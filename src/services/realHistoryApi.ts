@@ -25,18 +25,46 @@ export const realHistoryApiService = {
       params.set('forceRefresh', 'true');
     }
 
-    const response = await fetch(`${BASE_URL}/history?${params.toString()}`);
+    const endpointUrl = `${BASE_URL}/history?${params.toString()}`;
+    const response = await fetch(endpointUrl);
+    
+    console.log(`[RealHistoryApi] GET ${endpointUrl} - HTTP Status: ${response.status} (${response.statusText})`);
+
     if (!response.ok) {
       throw new Error(`Proxy error: HTTP ${response.status}`);
     }
-    return (await response.json()) as RealHistoryApiResponse;
+
+    const data = (await response.json()) as RealHistoryApiResponse;
+    console.log('[RealHistoryApi] /history response shape:', {
+      success: data.success,
+      totalAvailable: data.totalAvailable,
+      returnedCount: data.returnedCount,
+      error: data.error,
+      resultsCount: data.results?.length ?? 0,
+    });
+
+    return data;
   },
 
   async fetchRealSchedule(): Promise<RealGameSchedule> {
-    const response = await fetch(`${BASE_URL}/current`);
+    const endpointUrl = `${BASE_URL}/current`;
+    const response = await fetch(endpointUrl);
+
+    console.log(`[RealHistoryApi] GET ${endpointUrl} - HTTP Status: ${response.status} (${response.statusText})`);
+
     if (!response.ok) {
       throw new Error(`Proxy error: HTTP ${response.status}`);
     }
-    return (await response.json()) as RealGameSchedule;
+
+    const data = (await response.json()) as RealGameSchedule;
+    console.log('[RealHistoryApi] /current response shape:', {
+      success: (data as unknown as { success?: boolean }).success,
+      currentIssue: data.currentIssue,
+      previousIssue: data.previousIssue,
+      nextIssue: data.nextIssue,
+      remainingSeconds: data.remainingSeconds,
+    });
+
+    return data;
   },
 };

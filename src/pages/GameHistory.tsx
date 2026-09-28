@@ -7,6 +7,8 @@ import { AlgorithmAnalyzer } from '../components/history/AlgorithmAnalyzer';
 import { RealHistoryView } from '../components/history/RealHistoryView';
 import { History, LineChart, Target, RefreshCw, Brain, Zap, Code2, X, Radio } from 'lucide-react';
 
+import { useRealHistory } from '../context/RealHistoryContext';
+
 export const GameHistory: React.FC = () => {
   const {
     results,
@@ -18,6 +20,8 @@ export const GameHistory: React.FC = () => {
     importRawCurlJson,
   } = useResults();
 
+  const { importRealHistoryCurlJson } = useRealHistory();
+
   const [activeTab, setActiveTab] = useState<'real' | 'history' | 'chart' | 'strategy' | 'analyzer'>('real');
   const [isImportModalOpen, setIsImportModalOpen] = useState<boolean>(false);
   const [rawJsonText, setRawJsonText] = useState<string>('');
@@ -28,11 +32,15 @@ export const GameHistory: React.FC = () => {
   const handleImportSubmit = async () => {
     if (!rawJsonText.trim()) return;
     setImporting(true);
-    const ok = await importRawCurlJson(rawJsonText);
-    setImporting(false);
-    if (ok) {
-      setRawJsonText('');
-      setIsImportModalOpen(false);
+    try {
+      const okReal = importRealHistoryCurlJson(rawJsonText);
+      const okSim = await importRawCurlJson(rawJsonText);
+      if (okReal || okSim) {
+        setRawJsonText('');
+        setIsImportModalOpen(false);
+      }
+    } finally {
+      setImporting(false);
     }
   };
 

@@ -10,9 +10,8 @@ import {
   AlertCircle,
   Layers,
   Download,
-  FileSpreadsheet,
-  FileJson,
-  Check,
+  Code2,
+  X,
 } from 'lucide-react';
 
 function convertToCSV(records: RealGameRecord[]): string {
@@ -54,11 +53,14 @@ export const RealHistoryView: React.FC = () => {
     isLoading,
     error,
     refreshRealResults,
+    importRealHistoryCurlJson,
   } = useRealHistory();
 
   const { showToast } = useToast();
   const [isDownloading, setIsDownloading] = useState(false);
-  const [downloadedFormat, setDownloadedFormat] = useState<'csv' | 'json' | null>(null);
+  const [isImportModalOpen, setIsImportModalOpen] = useState(false);
+  const [rawJsonText, setRawJsonText] = useState('');
+  const [importing, setImporting] = useState(false);
 
   const formattedSeconds = realSchedule
     ? String(realSchedule.remainingSeconds).padStart(2, '0')
@@ -68,19 +70,32 @@ export const RealHistoryView: React.FC = () => {
     ? new Date(lastUpdated).toLocaleTimeString()
     : 'Not yet updated';
 
+  const handleImportSubmit = () => {
+    if (!rawJsonText.trim()) return;
+    setImporting(true);
+    try {
+      const ok = importRealHistoryCurlJson(rawJsonText);
+      if (ok) {
+        setRawJsonText('');
+        setIsImportModalOpen(false);
+      }
+    } finally {
+      setImporting(false);
+    }
+  };
+
   const handleDownload = async (format: 'csv' | 'json') => {
     try {
       setIsDownloading(true);
       let recordsToExport: RealGameRecord[] = realHistory;
 
-      // Always attempt to fetch the complete set of accumulated records from the proxy
       try {
         const res = await realHistoryApiService.fetchRealHistory('all', false);
         if (res.results && res.results.length > 0) {
           recordsToExport = res.results;
         }
       } catch {
-        // Fallback to realHistory already in context
+        // Fallback to realHistory in context
       }
 
       if (recordsToExport.length === 0) {
@@ -98,9 +113,6 @@ export const RealHistoryView: React.FC = () => {
         const json = JSON.stringify(recordsToExport, null, 2);
         triggerDownload(json, filename, 'application/json;charset=utf-8;');
       }
-
-      setDownloadedFormat(format);
-      setTimeout(() => setDownloadedFormat(null), 2500);
 
       showToast(
         `Downloaded ${recordsToExport.length} real history records (${format.toUpperCase()})!`,
@@ -129,65 +141,37 @@ export const RealHistoryView: React.FC = () => {
             </span>
           </div>
           <p className="text-xs text-[#8D9B95]">
-            Official settled results and real-time schedule. Isolated from simulator data.
+            Real historical draw outcomes direct from official feed with automated accumulation.
           </p>
         </div>
 
-        {/* Action Controls */}
-        <div className="flex flex-wrap items-center gap-2.5">
+        <div className="flex flex-wrap items-center gap-3">
           {/* Limit selector */}
-          <div className="flex items-center gap-1 bg-[#06130F] p-1 rounded-xl border border-[#1E3A2B] text-xs">
-            <span className="px-2 text-[10px] text-[#8D9B95] uppercase font-mono font-bold">
-              Show:
-            </span>
+          <div className="flex items-center gap-1 bg-[#06130F] p-1 rounded-xl border border-[#1E3A2B]">
             {([10, 50, 100, 'all'] as const).map((lim) => (
               <button
                 key={lim}
                 onClick={() => setSelectedLimit(lim)}
                 className={`px-2.5 py-1 rounded-lg font-mono text-xs font-bold transition-all cursor-pointer ${
                   selectedLimit === lim
-                    ? 'bg-[#E7B93F] text-[#020806] shadow'
+                    ? 'bg-[#35B978] text-[#020806] shadow'
                     : 'text-[#8D9B95] hover:text-[#F5F5F5]'
                 }`}
               >
-                {lim === 'all' ? 'All' : lim}
+                {lim === 'all' ? 'ALL' : lim}
               </button>
             ))}
           </div>
 
-          {/* Download Export Group */}
-          <div className="flex items-center gap-1 bg-[#06130F] p-1 rounded-xl border border-[#1E3A2B] text-xs">
-            <span className="px-2 text-[10px] text-[#8D9B95] uppercase font-mono font-bold flex items-center gap-1">
-              <Download className="w-3 h-3 text-[#E7B93F]" />
-              Export:
-            </span>
-            <button
-              onClick={() => handleDownload('csv')}
-              disabled={isDownloading || realHistory.length === 0}
-              className="px-2.5 py-1 rounded-lg font-mono text-xs font-bold bg-[#1E3A2B]/60 hover:bg-[#1E3A2B] text-[#F5F5F5] border border-[#1E3A2B] transition-all cursor-pointer flex items-center gap-1.5 disabled:opacity-40"
-              title="Download all accumulated live game records as CSV (Spreadsheet / Excel)"
-            >
-              {downloadedFormat === 'csv' ? (
-                <Check className="w-3 h-3 text-[#35B978]" />
-              ) : (
-                <FileSpreadsheet className="w-3 h-3 text-[#35B978]" />
-              )}
-              CSV
-            </button>
-            <button
-              onClick={() => handleDownload('json')}
-              disabled={isDownloading || realHistory.length === 0}
-              className="px-2.5 py-1 rounded-lg font-mono text-xs font-bold bg-[#1E3A2B]/60 hover:bg-[#1E3A2B] text-[#F5F5F5] border border-[#1E3A2B] transition-all cursor-pointer flex items-center gap-1.5 disabled:opacity-40"
-              title="Download all accumulated live game records as JSON"
-            >
-              {downloadedFormat === 'json' ? (
-                <Check className="w-3 h-3 text-[#E7B93F]" />
-              ) : (
-                <FileJson className="w-3 h-3 text-[#E7B93F]" />
-              )}
-              JSON
-            </button>
-          </div>
+          {/* Import Curl JSON button */}
+          <button
+            onClick={() => setIsImportModalOpen(true)}
+            className="px-3.5 py-2 rounded-xl bg-[#06130F] hover:bg-[#0E2E22] text-[#35B978] border border-[#35B978]/30 text-xs font-bold transition-all cursor-pointer shadow flex items-center gap-1.5"
+            title="Import raw JSON from curl command to populate official results"
+          >
+            <Code2 className="w-3.5 h-3.5" />
+            Import Curl JSON
+          </button>
 
           {/* Auto Refresh Toggle */}
           <button
@@ -215,19 +199,35 @@ export const RealHistoryView: React.FC = () => {
         </div>
       </div>
 
-      {/* Error Banner */}
+      {/* Upstream Status / Error Banner */}
       {error && (
-        <div className="p-4 rounded-xl bg-red-950/40 border border-red-800/40 text-xs text-red-200 flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
-            <span>{error}</span>
+        <div className="p-4 rounded-xl bg-amber-950/40 border border-amber-600/40 text-xs text-amber-200 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-lg">
+          <div className="flex items-start sm:items-center gap-2.5">
+            <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5 sm:mt-0" />
+            <div>
+              <div className="font-bold text-amber-300">
+                Upstream Feed Inaccessible from Cloud Host: {error}
+              </div>
+              <div className="text-[11px] text-[#8D9B95] mt-0.5">
+                Cloudflare on draw.ar-lottery01.com restricts datacenter/server IPs (HTTP 403). Use &quot;Import Curl JSON&quot; below to load live official results.
+              </div>
+            </div>
           </div>
-          <button
-            onClick={() => refreshRealResults(true)}
-            className="underline font-bold text-red-300 hover:text-white"
-          >
-            Retry
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => setIsImportModalOpen(true)}
+              className="px-3 py-1.5 rounded-lg bg-[#35B978] hover:bg-[#2fa368] text-[#020806] font-bold text-xs cursor-pointer shadow"
+            >
+              Import Curl JSON
+            </button>
+            <button
+              onClick={() => refreshRealResults(true)}
+              disabled={isLoading}
+              className="px-3 py-1.5 rounded-lg bg-[#06130F] border border-[#1E3A2B] text-amber-300 hover:text-white font-semibold text-xs cursor-pointer"
+            >
+              Retry
+            </button>
+          </div>
         </div>
       )}
 
@@ -241,16 +241,16 @@ export const RealHistoryView: React.FC = () => {
               </span>
               <span className="text-[11px] text-[#35B978] font-bold uppercase tracking-wider flex items-center gap-1">
                 <span className="w-1.5 h-1.5 rounded-full bg-[#35B978] animate-ping" />
-                Active Unsettled Round
+                Active Round
               </span>
             </div>
             <div className="font-mono text-xl sm:text-2xl font-black text-[#F5F5F5] tracking-wider">
-              {realSchedule?.currentIssue || 'Connecting to live schedule...'}
+              {realSchedule?.currentIssue || (realHistory.length > 0 ? (BigInt(realHistory[0].periodNumber) + 1n).toString() : 'Connecting to live schedule...')}
             </div>
             <div className="text-[11px] text-[#8D9B95] font-mono flex items-center gap-3">
-              <span>Prev: <strong className="text-gray-300">{realSchedule?.previousIssue || '--'}</strong></span>
+              <span>Prev: <strong className="text-gray-300">{realSchedule?.previousIssue || (realHistory.length > 0 ? realHistory[0].periodNumber : '--')}</strong></span>
               <span>•</span>
-              <span>Next: <strong className="text-gray-300">{realSchedule?.nextIssue || '--'}</strong></span>
+              <span>Next: <strong className="text-gray-300">{realSchedule?.nextIssue || (realHistory.length > 0 ? (BigInt(realHistory[0].periodNumber) + 2n).toString() : '--')}</strong></span>
               <span>•</span>
               <span>Last updated: <strong className="text-gray-300">{lastUpdatedDisplay}</strong></span>
             </div>
@@ -282,8 +282,15 @@ export const RealHistoryView: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-2.5">
+            <button
+              onClick={() => setIsImportModalOpen(true)}
+              className="px-2.5 py-1 rounded-lg bg-[#06130F] hover:bg-[#1E3A2B] border border-[#35B978]/30 text-xs font-mono text-[#35B978] transition-all flex items-center gap-1.5 cursor-pointer"
+            >
+              <Code2 className="w-3 h-3" />
+              Import Curl JSON
+            </button>
             <span className="text-xs font-mono text-[#8D9B95] hidden sm:inline">
-              Download All:
+              Download:
             </span>
             <button
               onClick={() => handleDownload('csv')}
@@ -307,21 +314,58 @@ export const RealHistoryView: React.FC = () => {
         </div>
 
         {realHistory.length === 0 ? (
-          <div className="p-12 text-center text-xs text-[#8D9B95] space-y-3">
+          <div className="p-12 text-center text-xs text-[#8D9B95] space-y-4">
             {isLoading ? (
               <div className="flex flex-col items-center gap-2">
                 <RefreshCw className="w-6 h-6 animate-spin text-[#35B978]" />
                 <span>Fetching official WinGo 30S history from live feed...</span>
               </div>
+            ) : error ? (
+              <div className="max-w-md mx-auto space-y-3">
+                <div className="w-10 h-10 rounded-full bg-amber-500/10 border border-amber-500/20 text-amber-400 flex items-center justify-center mx-auto">
+                  <AlertCircle className="w-5 h-5" />
+                </div>
+                <div>
+                  <h4 className="font-bold text-[#F5F5F5] text-sm">
+                    No Upstream Records Loaded (HTTP 403)
+                  </h4>
+                  <p className="text-[#8D9B95] text-xs mt-1">
+                    The upstream provider (draw.ar-lottery01.com) blocks requests from cloud datacenter networks. Paste the curl response to populate the official results.
+                  </p>
+                </div>
+                <div className="pt-2 flex items-center justify-center gap-2">
+                  <button
+                    onClick={() => setIsImportModalOpen(true)}
+                    className="px-4 py-2 rounded-xl bg-[#35B978] hover:bg-[#2fa368] text-[#020806] font-bold text-xs transition-colors cursor-pointer shadow flex items-center gap-1.5"
+                  >
+                    <Code2 className="w-3.5 h-3.5" />
+                    Import Curl JSON
+                  </button>
+                  <button
+                    onClick={() => refreshRealResults(true)}
+                    className="px-4 py-2 rounded-xl bg-[#06130F] border border-[#1E3A2B] text-[#F5F5F5] font-semibold text-xs transition-colors cursor-pointer"
+                  >
+                    Retry Connection
+                  </button>
+                </div>
+              </div>
             ) : (
               <div className="space-y-2">
                 <p>No real records loaded yet.</p>
-                <button
-                  onClick={() => refreshRealResults(true)}
-                  className="px-4 py-2 rounded-xl bg-[#35B978] text-[#020806] font-bold"
-                >
-                  Fetch Now
-                </button>
+                <div className="flex items-center justify-center gap-2 pt-2">
+                  <button
+                    onClick={() => refreshRealResults(true)}
+                    className="px-4 py-2 rounded-xl bg-[#35B978] text-[#020806] font-bold cursor-pointer"
+                  >
+                    Fetch Now
+                  </button>
+                  <button
+                    onClick={() => setIsImportModalOpen(true)}
+                    className="px-4 py-2 rounded-xl bg-[#06130F] border border-[#1E3A2B] text-[#35B978] font-bold cursor-pointer"
+                  >
+                    Import Curl JSON
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -434,6 +478,64 @@ export const RealHistoryView: React.FC = () => {
           </div>
         )}
       </div>
+
+      {/* Import Modal */}
+      {isImportModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-[#071A14] border border-[#1E3A2B] rounded-2xl p-6 w-full max-w-xl shadow-2xl space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-[#1E3A2B]">
+              <div className="flex items-center gap-2">
+                <Code2 className="w-5 h-5 text-[#35B978]" />
+                <h3 className="text-base font-bold text-[#F5F5F5]">
+                  Import Official WinGo 30S JSON
+                </h3>
+              </div>
+              <button
+                onClick={() => setIsImportModalOpen(false)}
+                className="text-[#8D9B95] hover:text-[#F5F5F5] transition-colors p-1 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-xs text-[#8D9B95] block">
+                Run this curl command in your terminal and paste the JSON output below:
+              </label>
+              <div className="p-2.5 rounded-lg bg-[#020806] border border-[#1E3A2B] font-mono text-[11px] text-[#35B978] overflow-x-auto select-all">
+                curl -s &apos;https://draw.ar-lottery01.com/WinGo/WinGo_30S/GetHistoryIssuePage.json?ts=&apos;$(date +%s%3N)
+              </div>
+              <textarea
+                value={rawJsonText}
+                onChange={(e) => setRawJsonText(e.target.value)}
+                placeholder='Paste raw JSON here (e.g. {"data": {"list": [...]}})...'
+                rows={8}
+                className="w-full p-3 rounded-xl bg-[#06130F] border border-[#1E3A2B] text-xs font-mono text-[#F5F5F5] placeholder-[#8D9B95]/50 focus:outline-none focus:border-[#35B978] resize-none"
+              />
+            </div>
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                onClick={() => {
+                  setRawJsonText('');
+                  setIsImportModalOpen(false);
+                }}
+                className="px-4 py-2 rounded-xl text-xs font-semibold text-[#8D9B95] hover:text-[#F5F5F5] transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleImportSubmit}
+                disabled={!rawJsonText.trim() || importing}
+                className="px-5 py-2 rounded-xl bg-[#35B978] hover:bg-[#2fa368] disabled:opacity-40 text-[#020806] text-xs font-bold transition-all cursor-pointer shadow flex items-center gap-2"
+              >
+                {importing && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+                Import Official Results
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
