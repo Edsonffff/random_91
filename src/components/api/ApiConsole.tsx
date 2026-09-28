@@ -231,7 +231,7 @@ export const ApiConsole: React.FC = () => {
               Host
             </span>
             <span className="font-mono font-medium text-[#F5F5F5] inline-block mt-0.5">
-              http://localhost:3000
+              {import.meta.env.VITE_API_BASE_URL || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000')}
             </span>
           </div>
 

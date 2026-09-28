@@ -8,6 +8,18 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// Path preservation middleware for serverless/reverse-proxy environments
+app.use((req, _res, next) => {
+  const forwardedUrl = req.headers['x-forwarded-url'] as string | undefined;
+  const matchedPath = req.headers['x-matched-path'] as string | undefined;
+  const originalPath = forwardedUrl || matchedPath;
+
+  if (originalPath && (req.url === '/api' || req.url === '/api/index' || req.url === '/api/')) {
+    req.url = originalPath;
+  }
+  next();
+});
+
 interface TestRecord {
   id: string;
   gameCode: string;
@@ -570,15 +582,38 @@ app.get('/api/real/history/export', async (req, res) => {
   return res.send(csvContent);
 });
 
-app.listen(PORT, () => {
-  console.log(`[Lottery Simulator Mock API Server] running on http://localhost:${PORT}`);
-  console.log(`Matching SaaS Imperial Merchant API endpoints:`);
-  console.log(`  POST   /api/merchant/token`);
-  console.log(`  POST   /merchant/api/set_merchant_custom_result.php`);
-  console.log(`  GET    /merchant/api/get_merchant_custom_results.php`);
-  console.log(`  GET    /api/test/current-period`);
-  console.log(`Live WinGo 30S Proxy endpoints:`);
-  console.log(`  GET    /api/real/current`);
-  console.log(`  GET    /api/real/history`);
-  console.log(`  GET    /api/real/history/export?format=csv|json`);
+// Health / Root info endpoint
+app.get('/api', (_req, res) => {
+  res.json({
+    status: 'online',
+    service: 'Lottery Simulator & Real Proxy API',
+    endpoints: [
+      '/api/real/current',
+      '/api/real/history',
+      '/api/real/history/export',
+      '/api/test/current-period',
+      '/api/test/results',
+      '/api/merchant/token',
+      '/merchant/api/get_merchant_custom_results.php',
+      '/merchant/api/set_merchant_custom_result.php',
+    ],
+  });
 });
+
+// Local-only startup when running directly (npm run server)
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`[Lottery Simulator Mock API Server] running on http://localhost:${PORT}`);
+    console.log(`Matching SaaS Imperial Merchant API endpoints:`);
+    console.log(`  POST   /api/merchant/token`);
+    console.log(`  POST   /merchant/api/set_merchant_custom_result.php`);
+    console.log(`  GET    /merchant/api/get_merchant_custom_results.php`);
+    console.log(`  GET    /api/test/current-period`);
+    console.log(`Live WinGo 30S Proxy endpoints:`);
+    console.log(`  GET    /api/real/current`);
+    console.log(`  GET    /api/real/history`);
+    console.log(`  GET    /api/real/history/export?format=csv|json`);
+  });
+}
+
+export default app;

@@ -13,8 +13,8 @@ import { ApiLogger } from './apiLogger';
 export class SaaSImperialSandboxProvider implements ResultProvider {
   private baseUrl: string;
 
-  constructor(baseUrl: string = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000') {
-    this.baseUrl = baseUrl.replace(/\/$/, '');
+  constructor(baseUrl: string = import.meta.env.VITE_API_BASE_URL || '') {
+    this.baseUrl = baseUrl.replace(/\/$/, '').replace(/\/api$/, '');
   }
 
   async getCurrentPeriod(gameCode: string = 'WinGo_30S'): Promise<ResultPeriod> {

@@ -1,0 +1,24 @@
+{
+  "rewrites": [
+    {
+      "source": "/api",
+      "destination": "/api"
+    },
+    {
+      "source": "/api/(.*)",
+      "destination": "/api"
+    },
+    {
+      "source": "/merchant/api",
+      "destination": "/api"
+    },
+    {
+      "source": "/merchant/api/(.*)",
+      "destination": "/api"
+    },
+    {
+      "source": "/((?!api|merchant/api).*)",
+      "destination": "/index.html"
+    }
+  ]
+}

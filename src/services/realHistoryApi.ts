@@ -1,6 +1,6 @@
 import type { RealGameRecord, RealGameSchedule } from '../types/result';
-
-const BASE_URL = 'http://localhost:3000/api/real';
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '').replace(/\/api$/, '');
+const BASE_URL = `${API_BASE}/api/real`;
 
 export interface RealHistoryApiResponse {
   success: boolean;
