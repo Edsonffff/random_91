@@ -364,13 +364,15 @@ function parseRealColors(rawColor: string | undefined, num: number): ('red' | 'g
   return num % 2 === 0 ? ['red'] : ['green'];
 }
 
+const UPSTREAM_BASE_URL = (process.env.UPSTREAM_WINGO_BASE_URL || 'https://draw.ar-lottery01.com/WinGo').replace(/\/$/, '');
+
 async function fetchAndAccumulateRealHistory(): Promise<RealCompletedRecord[]> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 6000);
 
   try {
     const ts = Date.now();
-    const url = `https://draw.ar-lottery01.com/WinGo/WinGo_30S/GetHistoryIssuePage.json?ts=${ts}`;
+    const url = `${UPSTREAM_BASE_URL}/WinGo_30S/GetHistoryIssuePage.json?ts=${ts}`;
     const response = await fetch(url, {
       signal: controller.signal,
       headers: {
@@ -380,7 +382,11 @@ async function fetchAndAccumulateRealHistory(): Promise<RealCompletedRecord[]> {
     });
 
     if (!response.ok) {
-      throw new Error(`Upstream server returned HTTP ${response.status}`);
+      const serverHeader = response.headers.get('server') || 'unknown';
+      const cfRay = response.headers.get('cf-ray') || 'none';
+      const contentType = response.headers.get('content-type') || 'unknown';
+      console.warn(`[Upstream Diagnostic]: History endpoint returned HTTP ${response.status} (${response.statusText}). Server: ${serverHeader}, CF-Ray: ${cfRay}, Content-Type: ${contentType}`);
+      throw new Error(`Upstream server returned HTTP ${response.status} (${serverHeader}, CF-Ray: ${cfRay})`);
     }
 
     const payload = (await response.json()) as {
@@ -464,7 +470,7 @@ app.get('/api/real/current', async (_req, res) => {
 
   try {
     const ts = Date.now();
-    const url = `https://draw.ar-lottery01.com/WinGo/WinGo_30S.json?ts=${ts}`;
+    const url = `${UPSTREAM_BASE_URL}/WinGo_30S.json?ts=${ts}`;
     const response = await fetch(url, {
       signal: controller.signal,
       headers: {
@@ -474,7 +480,11 @@ app.get('/api/real/current', async (_req, res) => {
     });
 
     if (!response.ok) {
-      throw new Error(`Upstream returned HTTP ${response.status}`);
+      const serverHeader = response.headers.get('server') || 'unknown';
+      const cfRay = response.headers.get('cf-ray') || 'none';
+      const contentType = response.headers.get('content-type') || 'unknown';
+      console.warn(`[Upstream Diagnostic]: Current schedule returned HTTP ${response.status} (${response.statusText}). Server: ${serverHeader}, CF-Ray: ${cfRay}, Content-Type: ${contentType}`);
+      throw new Error(`Upstream returned HTTP ${response.status} (${serverHeader}, CF-Ray: ${cfRay})`);
     }
 
     const data = (await response.json()) as {
