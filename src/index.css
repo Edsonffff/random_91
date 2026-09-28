@@ -1,0 +1,94 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --bg-main: #020806;
+    --panel-sidebar: #06130F;
+    --panel-card: #071A14;
+    --panel-card-hover: #0b251c;
+    --border-theme: #1E3A2B;
+    --border-subtle: #13271d;
+    --border-gold: #5a481c;
+    --gold: #E7B93F;
+    --gold-hover: #f5cb58;
+    --text-main: #F5F5F5;
+    --text-secondary: #8D9B95;
+    --text-muted: #5e6f66;
+    --success: #35B978;
+    --danger: #F04444;
+    --violet: #C94DDA;
+  }
+
+  body {
+    background-color: var(--bg-main);
+    color: var(--text-main);
+    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+
+  code, pre, .font-mono {
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  }
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #020806;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #1E3A2B;
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #35B978;
+}
+
+/* Glowing card borders & effects */
+.card-border-glow {
+  border: 1px solid #1E3A2B;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.card-border-glow:hover {
+  border-color: #2b543e;
+}
+
+.card-gold-glow {
+  border: 1px solid rgba(231, 185, 63, 0.4);
+  box-shadow: 0 0 20px -5px rgba(231, 185, 63, 0.15);
+}
+
+/* Custom glass / backdrop */
+.bg-panel-card {
+  background-color: #071A14;
+}
+
+.bg-panel-sidebar {
+  background-color: #06130F;
+}
+
+.border-theme {
+  border-color: #1E3A2B;
+}
+
+.border-theme-subtle {
+  border-color: #13271d;
+}
+
+.text-gold {
+  color: #E7B93F;
+}
+
+.bg-gold {
+  background-color: #E7B93F;
+}
+
+.border-gold {
+  border-color: #E7B93F;
+}
