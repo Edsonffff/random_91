@@ -14,6 +14,9 @@ import {
   Flame,
 } from 'lucide-react';
 import { CollapsibleCard } from '../common/CollapsibleCard';
+import { useAdaptiveLearning } from '../../hooks/useAdaptiveLearning';
+import type { Test4InputRow } from '../../hooks/useAdaptiveLearning';
+import { AdaptiveLearningPanel } from './AdaptiveLearningPanel';
 
 interface RoundEntry {
   period: string;
@@ -496,7 +499,7 @@ export const AlgorithmAnalyzer: React.FC = () => {
   const { results, loadBigMumbaiSample } = useResults();
   const { realHistory } = useRealHistory();
   const [dataSource, setDataSource] = useState<'realLive' | 'sample3' | 'sample2' | 'sample1' | 'live'>('realLive');
-  const [activeTestTab, setActiveTestTab] = useState<'periodSum' | 'linearDelta' | 'alternation'>('periodSum');
+  const [activeTestTab, setActiveTestTab] = useState<'periodSum' | 'linearDelta' | 'alternation' | 'adaptive'>('periodSum');
   const [expandedSources, setExpandedSources] = useState<Record<string, boolean>>({});
   const showAllSequence = Boolean(expandedSources[dataSource]);
 
@@ -752,6 +755,54 @@ export const AlgorithmAnalyzer: React.FC = () => {
   const streakStatsAlternation = useMemo(() => {
     return calculateStreakStats(testAlternation.details.map((d) => (d.isHit ? 'H' : 'M')));
   }, [testAlternation.details]);
+
+  // ==========================================
+  // 4. ADAPTIVE SELF-LEARNING ENGINE (Test 4)
+  // ==========================================
+  // Build aligned input rows for Test 4.
+  // A row is only created when ALL THREE tests have a prediction for that period.
+  // Test 2 starts at index 1 (needs a "previous" row), so Test 1 rows for the
+  // same period are matched by period string — not by array index.
+  const test4Inputs = useMemo((): Test4InputRow[] => {
+    if (testPeriodSum.details.length === 0) return [];
+
+    const t1Map = new Map<string, 'Big' | 'Small'>();
+    for (const d of testPeriodSum.details) {
+      t1Map.set(d.period, d.predictedSize);
+    }
+
+    const t2Map = new Map<string, 'Big' | 'Small'>();
+    for (const d of testLinearRecurrence.details) {
+      t2Map.set(d.period, d.predictedSize);
+    }
+
+    const t3Map = new Map<string, 'Big' | 'Small'>();
+    for (const d of testAlternation.details) {
+      t3Map.set(d.period, d.predictedSize);
+    }
+
+    // actual outcome for each period from the active dataset
+    const actualMap = new Map<string, 'Big' | 'Small'>();
+    for (const item of activeDataset) {
+      actualMap.set(item.period, item.number >= 5 ? 'Big' : 'Small');
+    }
+
+    const rows: Test4InputRow[] = [];
+    // Iterate periods that Test 1 covers (largest set)
+    for (const [period, t1pred] of t1Map) {
+      const t2pred = t2Map.get(period);
+      const t3pred = t3Map.get(period);
+      const actual = actualMap.get(period);
+      // Only include if all three tests AND actual are available
+      if (t2pred && t3pred && actual) {
+        rows.push({ period, t1pred, t2pred, t3pred, actual });
+      }
+    }
+
+    return rows;
+  }, [testPeriodSum.details, testLinearRecurrence.details, testAlternation.details, activeDataset]);
+
+  const adaptiveLearning = useAdaptiveLearning(test4Inputs);
 
   return (
     <div className="space-y-8 animate-in fade-in duration-300">
@@ -1017,6 +1068,17 @@ export const AlgorithmAnalyzer: React.FC = () => {
             }`}
           >
             Test 3: Alternating Streak Flip
+          </button>
+
+          <button
+            onClick={() => setActiveTestTab('adaptive')}
+            className={`px-3 py-1.5 rounded-lg font-medium transition-colors cursor-pointer ${
+              activeTestTab === 'adaptive'
+                ? 'bg-[#C94DDA] text-white font-bold shadow'
+                : 'bg-[#06130F] text-[#C94DDA] hover:text-[#F5F5F5] border border-[#C94DDA]/40'
+            }`}
+          >
+            ✦ Test 4: Adaptive Self-Learning
           </button>
         </div>
 
@@ -1286,6 +1348,27 @@ export const AlgorithmAnalyzer: React.FC = () => {
               </div>
             </CollapsibleCard>
           </div>
+        )}
+
+        {/* Test 4: Adaptive Self-Learning */}
+        {activeTestTab === 'adaptive' && (
+          <CollapsibleCard
+            id="test4_adaptive"
+            variant="subcard"
+            title={
+              <div className="flex items-center gap-2">
+                <span className="px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-[#C94DDA]/15 text-[#C94DDA] border border-[#C94DDA]/30">
+                  TEST 4
+                </span>
+                <span className="font-mono text-xs font-bold text-[#F5F5F5]">
+                  Adaptive Self-Learning
+                </span>
+              </div>
+            }
+            subtitle="Continuously learns from Test 1, Test 2 and Test 3 performance"
+          >
+            <AdaptiveLearningPanel data={adaptiveLearning} />
+          </CollapsibleCard>
         )}
 
         {/* Scientific Conclusion Box */}
