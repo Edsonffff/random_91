@@ -1,27 +1,18 @@
 /**
- * useAdaptiveLearning — Test 4 Adaptive Self-Learning Engine
+ * useAdaptiveLearning — Test 4 Adaptive Self-Learning Engine (v3)
  *
- * Learning mechanism:
- *   - Maintains weights [w1, w2, w3] that sum to 1.0 (always normalised).
- *   - After each settled round the weight of a test that was CORRECT is nudged
- *     up by learningRate; a weight that was WRONG is nudged down by learningRate.
- *   - Weights are clamped to [MIN_WEIGHT, 1] then re-normalised.
+ * Now learns from ALL seven input signals: Tests 1, 2, 3, 5, 6, 7, 8.
  *
- * Anti-leakage guarantee:
- *   - The prediction for round `i` is generated using weights derived from
- *     rounds 0 … i-1 ONLY.  The actual result of round `i` is never available
- *     when the prediction is made.
- *
- * Persistence:
- *   - Model state (weights + processed period set) is stored in localStorage so
- *     a page-refresh does not reset learning.
- *   - History rows are computed deterministically from the inputs, so no extra
- *     storage is required for them.
- *
- * Duplicate protection:
- *   - A Set<string> of already-processed period IDs is maintained.  The same
- *     period is never processed twice regardless of how many times the dataset
- *     updates.
+ * Key design decisions
+ * ────────────────────
+ * • 7 weights [w1…w7], always ≥ MIN_WEIGHT, always sum to 1.0.
+ * • Missing signal for a round → that weight is excluded from the
+ *   vote and remaining weights are normalised for that round only.
+ * • Anti-leakage: prediction for round i uses weights from rounds 0…i-1.
+ * • Deterministic replay: every render rebuilds history from INITIAL_WEIGHT
+ *   chronologically, so the displayed table is always consistent.
+ * • Persistence: final live weights stored in localStorage (v3 key).
+ * • Duplicate protection: same period never processed twice.
  */
 
 import { useState, useEffect, useMemo, useCallback } from 'react';
@@ -29,9 +20,10 @@ import { useState, useEffect, useMemo, useCallback } from 'react';
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const LEARNING_RATE = 0.05;
-const INITIAL_WEIGHT = 1 / 3; // equal start
-const MIN_WEIGHT = 0.01; // prevents any signal from reaching 0
-const STORAGE_KEY = 'wingo_test4_model_v2';
+const N_SIGNALS = 7;
+const INITIAL_WEIGHT = 1 / N_SIGNALS;
+const MIN_WEIGHT = 0.01;
+const STORAGE_KEY = 'wingo_test4_model_v3'; // v3 = 7-signal model
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -39,10 +31,14 @@ export type BigSmall = 'Big' | 'Small';
 
 export interface Test4InputRow {
   period: string;
-  t1pred: BigSmall; // Test 1 Big/Small prediction
-  t2pred: BigSmall; // Test 2 Big/Small prediction
-  t3pred: BigSmall; // Test 3 Big/Small prediction
-  actual: BigSmall; // Ground-truth Big/Small for this period
+  t1pred: BigSmall;
+  t2pred: BigSmall;
+  t3pred: BigSmall;
+  t5pred?: BigSmall; // optional — may not exist for early rounds
+  t6pred?: BigSmall;
+  t7pred?: BigSmall;
+  t8pred?: BigSmall;
+  actual: BigSmall;
 }
 
 export interface Test4HistoryRow {
@@ -50,70 +46,77 @@ export interface Test4HistoryRow {
   t1pred: BigSmall;
   t2pred: BigSmall;
   t3pred: BigSmall;
+  t5pred: BigSmall | null;
+  t6pred: BigSmall | null;
+  t7pred: BigSmall | null;
+  t8pred: BigSmall | null;
   t4pred: BigSmall; // prediction made BEFORE seeing actual
   actual: BigSmall;
   isHit: boolean;
-  probBig: number; // 0-100 %
-  probSmall: number; // 0-100 %
-  w1: number; // weights AT THE TIME the prediction was made
-  w2: number;
-  w3: number;
+  probBig: number; // 0–100 %
+  probSmall: number;
+  /** Snapshot of weights at prediction time */
+  weights: number[]; // [w1,w2,w3,w5,w6,w7,w8]
+  /** How many signals were available for this round */
+  signalsAvailable: number;
 }
 
 export interface ModelState {
-  w1: number;
-  w2: number;
-  w3: number;
-  processedPeriods: string[]; // serialised Set
+  weights: number[]; // 7 weights [w1…w7]
+  processedPeriods: string[];
+}
+
+export interface SignalAgreement {
+  bigVotes: number;
+  smallVotes: number;
+  total: number;
+  majority: BigSmall | null;
 }
 
 export interface Test4Result {
-  // live prediction (next round)
-  nextPrediction: BigSmall | null;
-  nextProbBig: number;
-  nextProbSmall: number;
-  nextConfidence: number;
-
-  // history (evaluated rows, oldest first for display)
   history: Test4HistoryRow[];
 
-  // aggregate stats
   totalPredictions: number;
   totalHits: number;
   totalMisses: number;
   accuracyPct: number;
 
-  // streaks
   currentHitStreak: number;
   currentMissStreak: number;
   longestHitStreak: number;
   longestMissStreak: number;
 
-  // model weights (live)
-  w1: number;
-  w2: number;
-  w3: number;
-  dominantSignal: 1 | 2 | 3;
+  /** Live weights after full replay [w1,w2,w3,w5,w6,w7,w8] */
+  weights: number[];
+  dominantSignalIndex: number; // 0-based index into weights array
 
-  // rolling windows
   last20: { hits: number; total: number };
   last50: { hits: number; total: number };
   last100: { hits: number; total: number };
+  last250: { hits: number; total: number };
 
-  // controls
+  /** Latest signal agreement (from last row) */
+  lastSignalAgreement: SignalAgreement;
+
   resetLearning: () => void;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function normalise(w1: number, w2: number, w3: number): [number, number, number] {
-  const sum = w1 + w2 + w3;
-  if (sum <= 0) return [INITIAL_WEIGHT, INITIAL_WEIGHT, INITIAL_WEIGHT];
-  return [w1 / sum, w2 / sum, w3 / sum];
+const SIGNAL_LABELS = ['Test 1', 'Test 2', 'Test 3', 'Test 5', 'Test 6', 'Test 7', 'Test 8'];
+
+function normaliseWeights(ws: number[]): number[] {
+  const sum = ws.reduce((a, b) => a + b, 0);
+  if (sum <= 0) return ws.map(() => INITIAL_WEIGHT);
+  return ws.map((w) => w / sum);
 }
 
 function clamp(v: number): number {
   return Math.max(MIN_WEIGHT, v);
+}
+
+function freshWeights(): number[] {
+  return Array(N_SIGNALS).fill(INITIAL_WEIGHT);
 }
 
 function loadModel(): ModelState {
@@ -121,18 +124,19 @@ function loadModel(): ModelState {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) throw new Error('no data');
     const parsed = JSON.parse(raw) as Partial<ModelState>;
-    const w1 = typeof parsed.w1 === 'number' && isFinite(parsed.w1) ? parsed.w1 : INITIAL_WEIGHT;
-    const w2 = typeof parsed.w2 === 'number' && isFinite(parsed.w2) ? parsed.w2 : INITIAL_WEIGHT;
-    const w3 = typeof parsed.w3 === 'number' && isFinite(parsed.w3) ? parsed.w3 : INITIAL_WEIGHT;
-    const [nw1, nw2, nw3] = normalise(clamp(w1), clamp(w2), clamp(w3));
+    const rawWeights = Array.isArray(parsed.weights) ? parsed.weights : freshWeights();
+    const clamped = rawWeights.slice(0, N_SIGNALS).map((w) =>
+      typeof w === 'number' && isFinite(w) ? clamp(w) : INITIAL_WEIGHT
+    );
+    // Pad if shorter (migration from old model)
+    while (clamped.length < N_SIGNALS) clamped.push(INITIAL_WEIGHT);
+    const normalised = normaliseWeights(clamped);
     return {
-      w1: nw1,
-      w2: nw2,
-      w3: nw3,
+      weights: normalised,
       processedPeriods: Array.isArray(parsed.processedPeriods) ? parsed.processedPeriods : [],
     };
   } catch {
-    return { w1: INITIAL_WEIGHT, w2: INITIAL_WEIGHT, w3: INITIAL_WEIGHT, processedPeriods: [] };
+    return { weights: freshWeights(), processedPeriods: [] };
   }
 }
 
@@ -144,18 +148,11 @@ function saveModel(state: ModelState): void {
   }
 }
 
-function computeStreaks(outcomes: boolean[]): {
-  currentHitStreak: number;
-  currentMissStreak: number;
-  longestHitStreak: number;
-  longestMissStreak: number;
-} {
+function computeStreaks(outcomes: boolean[]) {
   if (outcomes.length === 0) {
     return { currentHitStreak: 0, currentMissStreak: 0, longestHitStreak: 0, longestMissStreak: 0 };
   }
-  let longestHit = 0;
-  let longestMiss = 0;
-  let runLen = 1;
+  let longestHit = 0, longestMiss = 0, runLen = 1;
   for (let i = 1; i < outcomes.length; i++) {
     if (outcomes[i] === outcomes[i - 1]) {
       runLen++;
@@ -165,10 +162,8 @@ function computeStreaks(outcomes: boolean[]): {
       runLen = 1;
     }
   }
-  // flush last run
   if (outcomes[outcomes.length - 1]) longestHit = Math.max(longestHit, runLen);
   else longestMiss = Math.max(longestMiss, runLen);
-
   const last = outcomes[outcomes.length - 1];
   return {
     currentHitStreak: last ? runLen : 0,
@@ -178,10 +173,25 @@ function computeStreaks(outcomes: boolean[]): {
   };
 }
 
-function rollingWindow(history: Test4HistoryRow[], n: number): { hits: number; total: number } {
+function rollingWindow(history: Test4HistoryRow[], n: number) {
   const slice = history.slice(-n);
-  const hits = slice.filter((r) => r.isHit).length;
-  return { hits, total: slice.length };
+  return { hits: slice.filter((r) => r.isHit).length, total: slice.length };
+}
+
+/**
+ * Extract the 7 optional predictions from a row as an array.
+ * Index matches SIGNAL_LABELS: [t1,t2,t3,t5,t6,t7,t8]
+ */
+function rowPredictions(row: Test4InputRow): Array<BigSmall | null> {
+  return [
+    row.t1pred,
+    row.t2pred,
+    row.t3pred,
+    row.t5pred ?? null,
+    row.t6pred ?? null,
+    row.t7pred ?? null,
+    row.t8pred ?? null,
+  ];
 }
 
 // ─── Hook ────────────────────────────────────────────────────────────────────
@@ -189,81 +199,62 @@ function rollingWindow(history: Test4HistoryRow[], n: number): { hits: number; t
 export function useAdaptiveLearning(inputs: Test4InputRow[]): Test4Result & { resetLearning: () => void } {
   const [modelState, setModelState] = useState<ModelState>(() => loadModel());
 
-  // Reset: restore equal weights and clear processed-periods memory
   const resetLearning = useCallback(() => {
-    const fresh: ModelState = {
-      w1: INITIAL_WEIGHT,
-      w2: INITIAL_WEIGHT,
-      w3: INITIAL_WEIGHT,
-      processedPeriods: [],
-    };
+    const fresh: ModelState = { weights: freshWeights(), processedPeriods: [] };
     saveModel(fresh);
     setModelState(fresh);
   }, []);
 
-  // ── Core learning pass ────────────────────────────────────────────────────
-  // Re-run whenever either the inputs array or the stored model changes.
-  // The result is a deterministic replay: starting from stored weights, we
-  // process only NEWLY SEEN periods (those NOT in processedPeriods), in
-  // ascending chronological order.
-
   const result = useMemo(() => {
-    if (inputs.length === 0) {
-      return null;
-    }
+    if (inputs.length === 0) return null;
 
-    // Sort inputs ascending (oldest first) so we can learn chronologically
+    // ── Sort chronologically (ascending) ────────────────────────────────
     const ascending = [...inputs].sort((a, b) => {
-      try {
-        const diff = BigInt(a.period) - BigInt(b.period);
-        if (diff > 0n) return 1;
-        if (diff < 0n) return -1;
-        return 0;
-      } catch {
-        return a.period.localeCompare(b.period, undefined, { numeric: true });
-      }
+      const na = parseInt(a.period.slice(-7), 10);
+      const nb = parseInt(b.period.slice(-7), 10);
+      return na - nb;
     });
 
-    // Build processed-period lookup
     const processedSet = new Set<string>(modelState.processedPeriods);
 
-    // Running weights — start from persisted state
-    let w1 = modelState.w1;
-    let w2 = modelState.w2;
-    let w3 = modelState.w3;
-
-    // We build the full history by replaying ALL inputs:
-    // • Rounds already in processedSet: we still replay them using the
-    //   weights-as-they-were (stored implicitly in the sequential update).
-    //   Since we re-derive history entirely, we replay from scratch each render.
-    //
-    // IMPORTANT: we replay from equal weights and reprocess ALL rows each
-    // render so the history is always self-consistent.  The persisted weights
-    // give us the "live" starting state for the NEXT unseen round, but for
-    // history display we recompute from scratch (deterministic replay).
-
-    let rw1 = INITIAL_WEIGHT;
-    let rw2 = INITIAL_WEIGHT;
-    let rw3 = INITIAL_WEIGHT;
+    // ── Deterministic replay from scratch ────────────────────────────────
+    // We always replay ALL rows from INITIAL_WEIGHT so the history table
+    // is self-consistent. Persisted weights are used only to detect whether
+    // a save is needed.
+    let ws = freshWeights(); // running weights for replay
 
     const history: Test4HistoryRow[] = [];
 
     for (const row of ascending) {
-      // Prediction for this round is generated with weights from BEFORE this round
-      const bigScore = (row.t1pred === 'Big' ? rw1 : 0) +
-                       (row.t2pred === 'Big' ? rw2 : 0) +
-                       (row.t3pred === 'Big' ? rw3 : 0);
-      const smallScore = (row.t1pred === 'Small' ? rw1 : 0) +
-                         (row.t2pred === 'Small' ? rw2 : 0) +
-                         (row.t3pred === 'Small' ? rw3 : 0);
+      const preds = rowPredictions(row);
+
+      // ── Build the available signal set for this round ──────────────
+      // Exclude signals that have no prediction (null). This handles Tests
+      // 5/7/8 which skip the first round (need a previous result).
+      const available: Array<{ idx: number; pred: BigSmall; weight: number }> = [];
+      for (let k = 0; k < N_SIGNALS; k++) {
+        if (preds[k] !== null) {
+          available.push({ idx: k, pred: preds[k]!, weight: ws[k] });
+        }
+      }
+
+      // Normalise available weights for this round's vote
+      const availableSum = available.reduce((s, a) => s + a.weight, 0);
+      let bigScore = 0;
+      let smallScore = 0;
+      let bigVotes = 0;
+      let smallVotes = 0;
+      for (const sig of available) {
+        const normW = availableSum > 0 ? sig.weight / availableSum : 1 / available.length;
+        if (sig.pred === 'Big') { bigScore += normW; bigVotes++; }
+        else { smallScore += normW; smallVotes++; }
+      }
 
       const totalScore = bigScore + smallScore;
       const rawProbBig = totalScore > 0 ? bigScore / totalScore : 0.5;
-
       const t4pred: BigSmall = rawProbBig >= 0.5 ? 'Big' : 'Small';
       const isHit = t4pred === row.actual;
-
-      const probBig = Math.round(rawProbBig * 1000) / 10; // one decimal
+      const probBig = Math.round(rawProbBig * 1000) / 10;
       const probSmall = Math.round((1 - rawProbBig) * 1000) / 10;
 
       history.push({
@@ -271,140 +262,101 @@ export function useAdaptiveLearning(inputs: Test4InputRow[]): Test4Result & { re
         t1pred: row.t1pred,
         t2pred: row.t2pred,
         t3pred: row.t3pred,
+        t5pred: row.t5pred ?? null,
+        t6pred: row.t6pred ?? null,
+        t7pred: row.t7pred ?? null,
+        t8pred: row.t8pred ?? null,
         t4pred,
         actual: row.actual,
         isHit,
         probBig,
         probSmall,
-        w1: rw1,
-        w2: rw2,
-        w3: rw3,
+        weights: [...ws],
+        signalsAvailable: available.length,
       });
 
-      // ── Learn from this round ────────────────────────────────────────────
-      const t1correct = row.t1pred === row.actual;
-      const t2correct = row.t2pred === row.actual;
-      const t3correct = row.t3pred === row.actual;
-
-      rw1 = clamp(rw1 + (t1correct ? LEARNING_RATE : -LEARNING_RATE));
-      rw2 = clamp(rw2 + (t2correct ? LEARNING_RATE : -LEARNING_RATE));
-      rw3 = clamp(rw3 + (t3correct ? LEARNING_RATE : -LEARNING_RATE));
-      [rw1, rw2, rw3] = normalise(rw1, rw2, rw3);
+      // ── Learn: update weights from each available signal ────────────
+      for (const sig of available) {
+        const correct = sig.pred === row.actual;
+        ws[sig.idx] = clamp(ws[sig.idx] + (correct ? LEARNING_RATE : -LEARNING_RATE));
+      }
+      ws = normaliseWeights(ws);
     }
 
-    // The "live" weights after replaying everything
-    const liveW1 = rw1;
-    const liveW2 = rw2;
-    const liveW3 = rw3;
+    // Live weights after full replay
+    const liveWeights = [...ws];
 
-    // ── Stats ─────────────────────────────────────────────────────────────
+    // ── Stats ──────────────────────────────────────────────────────────
     const totalPredictions = history.length;
     const totalHits = history.filter((r) => r.isHit).length;
     const totalMisses = totalPredictions - totalHits;
     const accuracyPct = totalPredictions > 0 ? Math.round((totalHits / totalPredictions) * 100) : 0;
+    const streaks = computeStreaks(history.map((r) => r.isHit));
 
-    const outcomes = history.map((r) => r.isHit);
-    const streaks = computeStreaks(outcomes);
-
-    // ── Next prediction (using live weights) ──────────────────────────────
-    // We need Test 1/2/3 predictions for the NEXT unsettled round.
-    // We don't have that yet — it will be the last row's NEXT period.
-    // For the UI, we use the LAST available Test 1/2/3 predictions
-    // (the prediction the model would make for the period AFTER the last known one).
-    // This is the "upcoming" prediction shown on the dashboard.
-    //
-    // Since Test 1/2/3 produce predictions for each known period (the prediction
-    // for period N uses only information available before period N), the last
-    // row of our history represents the most recent evaluated round.
-    // The "next" prediction requires Test 1/2/3 inputs for the NEXT period —
-    // which we don't have yet. So we display it as "Awaiting next round".
-    // 
-    // However, we can show what the model WOULD predict if we knew the next
-    // period's Test 1/2/3 signals — but those depend on the NEXT round's period
-    // number / previous number, which we can't compute here without knowing the
-    // next period ID. We'll return null and let the UI show a placeholder.
-
-    const nextPrediction: BigSmall | null = null;
-    const nextProbBig = Math.round(liveW1 * 50 + liveW2 * 50 + liveW3 * 50); // placeholder
-    const nextProbSmall = 100 - nextProbBig;
-    const nextConfidence = Math.abs(50 - nextProbBig) * 2; // 0–100
-
-    // Rolling windows (use history in chronological order)
     const last20 = rollingWindow(history, 20);
     const last50 = rollingWindow(history, 50);
     const last100 = rollingWindow(history, 100);
+    const last250 = rollingWindow(history, 250);
 
-    // Dominant signal
-    let dominantSignal: 1 | 2 | 3 = 1;
-    if (liveW2 >= liveW1 && liveW2 >= liveW3) dominantSignal = 2;
-    else if (liveW3 >= liveW1 && liveW3 >= liveW2) dominantSignal = 3;
+    const dominantSignalIndex = liveWeights.indexOf(Math.max(...liveWeights));
 
-    // ── Persist updated weights if any new periods were processed ─────────
-    // We always persist the live (replayed) weights so they reflect reality
-    const newProcessed = ascending.map((r) => r.period);
-    const updatedProcessedSet = new Set([...processedSet, ...newProcessed]);
+    // ── Last signal agreement ──────────────────────────────────────────
+    let lastSignalAgreement: SignalAgreement = { bigVotes: 0, smallVotes: 0, total: 0, majority: null };
+    if (history.length > 0) {
+      const last = history[history.length - 1];
+      const preds = [last.t1pred, last.t2pred, last.t3pred, last.t5pred, last.t6pred, last.t7pred, last.t8pred];
+      const available = preds.filter((p): p is BigSmall => p !== null);
+      const bv = available.filter((p) => p === 'Big').length;
+      const sv = available.filter((p) => p === 'Small').length;
+      lastSignalAgreement = {
+        bigVotes: bv,
+        smallVotes: sv,
+        total: available.length,
+        majority: bv > sv ? 'Big' : sv > bv ? 'Small' : null,
+      };
+    }
 
-    // We use w1/w2/w3 from the persisted modelState as a reference —
-    // but we want to save the freshly-replayed live weights:
-    const prevLiveW1 = w1; // from persisted state (not replayed)
-    const prevLiveW2 = w2;
-    const prevLiveW3 = w3;
-
+    // ── Persist if weights changed ──────────────────────────────────────
+    const allPeriods = ascending.map((r) => r.period);
+    const updatedProcessedSet = new Set([...processedSet, ...allPeriods]);
+    const prevWeights = modelState.weights;
     const weightsChanged =
-      Math.abs(liveW1 - prevLiveW1) > 0.0001 ||
-      Math.abs(liveW2 - prevLiveW2) > 0.0001 ||
-      Math.abs(liveW3 - prevLiveW3) > 0.0001 ||
+      liveWeights.some((w, i) => Math.abs(w - (prevWeights[i] ?? INITIAL_WEIGHT)) > 0.0001) ||
       updatedProcessedSet.size !== processedSet.size;
 
     if (weightsChanged) {
-      const newModelState: ModelState = {
-        w1: liveW1,
-        w2: liveW2,
-        w3: liveW3,
-        processedPeriods: Array.from(updatedProcessedSet),
-      };
-      saveModel(newModelState);
+      saveModel({ weights: liveWeights, processedPeriods: Array.from(updatedProcessedSet) });
     }
 
     return {
-      nextPrediction,
-      nextProbBig,
-      nextProbSmall,
-      nextConfidence,
       history,
       totalPredictions,
       totalHits,
       totalMisses,
       accuracyPct,
       ...streaks,
-      w1: liveW1,
-      w2: liveW2,
-      w3: liveW3,
-      dominantSignal,
+      weights: liveWeights,
+      dominantSignalIndex,
       last20,
       last50,
       last100,
+      last250,
+      lastSignalAgreement,
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [inputs, modelState.processedPeriods.length, modelState.w1, modelState.w2, modelState.w3]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inputs, modelState.processedPeriods.length, ...modelState.weights]);
 
   // Sync persisted weights back into state when localStorage changes externally
   useEffect(() => {
     const handleStorageChange = (e: StorageEvent) => {
-      if (e.key === STORAGE_KEY) {
-        setModelState(loadModel());
-      }
+      if (e.key === STORAGE_KEY) setModelState(loadModel());
     };
     window.addEventListener('storage', handleStorageChange);
     return () => window.removeEventListener('storage', handleStorageChange);
   }, []);
 
-  // Default empty result when inputs are empty
+  // Default empty result
   const empty: Test4Result & { resetLearning: () => void } = {
-    nextPrediction: null,
-    nextProbBig: 50,
-    nextProbSmall: 50,
-    nextConfidence: 0,
     history: [],
     totalPredictions: 0,
     totalHits: 0,
@@ -414,17 +366,18 @@ export function useAdaptiveLearning(inputs: Test4InputRow[]): Test4Result & { re
     currentMissStreak: 0,
     longestHitStreak: 0,
     longestMissStreak: 0,
-    w1: modelState.w1,
-    w2: modelState.w2,
-    w3: modelState.w3,
-    dominantSignal: 1,
+    weights: modelState.weights,
+    dominantSignalIndex: 0,
     last20: { hits: 0, total: 0 },
     last50: { hits: 0, total: 0 },
     last100: { hits: 0, total: 0 },
+    last250: { hits: 0, total: 0 },
+    lastSignalAgreement: { bigVotes: 0, smallVotes: 0, total: 0, majority: null },
     resetLearning,
   };
 
   if (!result) return empty;
-
   return { ...result, resetLearning };
 }
+
+export { SIGNAL_LABELS };

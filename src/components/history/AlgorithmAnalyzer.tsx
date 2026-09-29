@@ -768,64 +768,82 @@ export const AlgorithmAnalyzer: React.FC = () => {
   }, [testAlternation.details]);
 
   // ==========================================
+  // 5–8. TIME-BASED / ROUND-ID SIGNAL TESTS
+  // ==========================================
+  // Declared BEFORE test4Inputs so their .details arrays are available
+  // when building the join maps below.
+
+  const test5 = useMemo(() => computeTest5(activeDataset), [activeDataset]);
+  const test6 = useMemo(() => computeTest6(activeDataset), [activeDataset]);
+  const test7 = useMemo(() => computeTest7(activeDataset), [activeDataset]);
+  const test8 = useMemo(() => computeTest8(activeDataset), [activeDataset]);
+
+  // ==========================================
   // 4. ADAPTIVE SELF-LEARNING ENGINE (Test 4)
   // ==========================================
   // Build aligned input rows for Test 4.
-  // A row is only created when ALL THREE tests have a prediction for that period.
-  // Test 2 starts at index 1 (needs a "previous" row), so Test 1 rows for the
-  // same period are matched by period string — not by array index.
+  // T1/T2/T3 + actual are required; T5–T8 are optional.
+  // Missing T5–T8 are excluded from that round's vote inside the hook.
   const test4Inputs = useMemo((): Test4InputRow[] => {
     if (testPeriodSum.details.length === 0) return [];
 
     const t1Map = new Map<string, 'Big' | 'Small'>();
-    for (const d of testPeriodSum.details) {
-      t1Map.set(d.period, d.predictedSize);
-    }
+    for (const d of testPeriodSum.details) t1Map.set(d.period, d.predictedSize);
 
     const t2Map = new Map<string, 'Big' | 'Small'>();
-    for (const d of testLinearRecurrence.details) {
-      t2Map.set(d.period, d.predictedSize);
-    }
+    for (const d of testLinearRecurrence.details) t2Map.set(d.period, d.predictedSize);
 
     const t3Map = new Map<string, 'Big' | 'Small'>();
-    for (const d of testAlternation.details) {
-      t3Map.set(d.period, d.predictedSize);
-    }
+    for (const d of testAlternation.details) t3Map.set(d.period, d.predictedSize);
 
-    // actual outcome for each period from the active dataset
+    const t5Map = new Map<string, 'Big' | 'Small'>();
+    for (const d of test5.details) t5Map.set(d.period, d.predictedSize);
+
+    const t6Map = new Map<string, 'Big' | 'Small'>();
+    for (const d of test6.details) t6Map.set(d.period, d.predictedSize);
+
+    const t7Map = new Map<string, 'Big' | 'Small'>();
+    for (const d of test7.details) t7Map.set(d.period, d.predictedSize);
+
+    const t8Map = new Map<string, 'Big' | 'Small'>();
+    for (const d of test8.details) t8Map.set(d.period, d.predictedSize);
+
     const actualMap = new Map<string, 'Big' | 'Small'>();
     for (const item of activeDataset) {
       actualMap.set(item.period, item.number >= 5 ? 'Big' : 'Small');
     }
 
     const rows: Test4InputRow[] = [];
-    // Iterate periods that Test 1 covers (largest set)
     for (const [period, t1pred] of t1Map) {
       const t2pred = t2Map.get(period);
       const t3pred = t3Map.get(period);
       const actual = actualMap.get(period);
-      // Only include if all three tests AND actual are available
-      if (t2pred && t3pred && actual) {
-        rows.push({ period, t1pred, t2pred, t3pred, actual });
-      }
+      if (!t2pred || !t3pred || !actual) continue;
+      rows.push({
+        period,
+        t1pred,
+        t2pred,
+        t3pred,
+        t5pred: t5Map.get(period),
+        t6pred: t6Map.get(period),
+        t7pred: t7Map.get(period),
+        t8pred: t8Map.get(period),
+        actual,
+      });
     }
-
     return rows;
-  }, [testPeriodSum.details, testLinearRecurrence.details, testAlternation.details, activeDataset]);
+  }, [
+    testPeriodSum.details,
+    testLinearRecurrence.details,
+    testAlternation.details,
+    test5.details,
+    test6.details,
+    test7.details,
+    test8.details,
+    activeDataset,
+  ]);
 
   const adaptiveLearning = useAdaptiveLearning(test4Inputs);
-
-  // ==========================================
-  // 5–8. TIME-BASED SIGNAL TESTS
-  // ==========================================
-  // All four tests derive the prediction timestamp directly from the
-  // 17-character period string (YYYYMMDDHHMMSS + 3-digit seq).
-  // No actual result is used in generating the same round's prediction.
-
-  const test5 = useMemo(() => computeTest5(activeDataset), [activeDataset]);
-  const test6 = useMemo(() => computeTest6(activeDataset), [activeDataset]);
-  const test7 = useMemo(() => computeTest7(activeDataset), [activeDataset]);
-  const test8 = useMemo(() => computeTest8(activeDataset), [activeDataset]);
 
   // ==========================================
   // ALL-8 SIGNAL SUMMARY
