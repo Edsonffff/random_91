@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 import { useRealHistory } from '../../context/RealHistoryContext';
 import { useToast } from '../../context/ToastContext';
-import { realHistoryApiService } from '../../services/realHistoryApi';
 import type { RealGameRecord } from '../../types/result';
 import {
   RefreshCw,
@@ -12,6 +11,8 @@ import {
   Download,
   Code2,
   X,
+  CheckCircle2,
+  Globe2,
 } from 'lucide-react';
 
 function convertToCSV(records: RealGameRecord[]): string {
@@ -52,6 +53,8 @@ export const RealHistoryView: React.FC = () => {
     lastUpdated,
     isLoading,
     error,
+    pagination,
+    connectionMode,
     refreshRealResults,
     importRealHistoryCurlJson,
   } = useRealHistory();
@@ -70,6 +73,9 @@ export const RealHistoryView: React.FC = () => {
     ? new Date(lastUpdated).toLocaleTimeString()
     : 'Not yet updated';
 
+  const recordsToDisplay =
+    selectedLimit === 'all' ? realHistory : realHistory.slice(0, selectedLimit);
+
   const handleImportSubmit = () => {
     if (!rawJsonText.trim()) return;
     setImporting(true);
@@ -84,21 +90,10 @@ export const RealHistoryView: React.FC = () => {
     }
   };
 
-  const handleDownload = async (format: 'csv' | 'json') => {
+  const handleDownload = (format: 'csv' | 'json') => {
     try {
       setIsDownloading(true);
-      let recordsToExport: RealGameRecord[] = realHistory;
-
-      try {
-        const res = await realHistoryApiService.fetchRealHistory('all', false);
-        if (res.results && res.results.length > 0) {
-          recordsToExport = res.results;
-        }
-      } catch {
-        // Fallback to realHistory in context
-      }
-
-      if (recordsToExport.length === 0) {
+      if (realHistory.length === 0) {
         showToast('No real game records available to download.', 'warning');
         return;
       }
@@ -107,15 +102,15 @@ export const RealHistoryView: React.FC = () => {
       const filename = `wingo30s_real_history_${timestamp}.${format}`;
 
       if (format === 'csv') {
-        const csv = convertToCSV(recordsToExport);
+        const csv = convertToCSV(realHistory);
         triggerDownload(csv, filename, 'text/csv;charset=utf-8;');
       } else {
-        const json = JSON.stringify(recordsToExport, null, 2);
+        const json = JSON.stringify(realHistory, null, 2);
         triggerDownload(json, filename, 'application/json;charset=utf-8;');
       }
 
       showToast(
-        `Downloaded ${recordsToExport.length} real history records (${format.toUpperCase()})!`,
+        `Downloaded ${realHistory.length} real history records (${format.toUpperCase()})!`,
         'success'
       );
     } catch (err: unknown) {
@@ -126,22 +121,80 @@ export const RealHistoryView: React.FC = () => {
     }
   };
 
+  // Helper to categorize and present UI error messages
+  const getErrorDetails = (errString: string) => {
+    const lower = errString.toLowerCase();
+    if (lower.includes('403')) {
+      return {
+        title: 'HTTP 403 Forbidden (Cloudflare Restriction)',
+        description:
+          'Access to the official endpoint was blocked by Cloudflare HTTP 403. Use "Import Curl JSON" below to load live results manually.',
+      };
+    }
+    if (lower.includes('cors') || lower.includes('failed to fetch') || lower.includes('network')) {
+      return {
+        title: 'Browser Network / CORS Restriction',
+        description:
+          'Direct browser connection to draw.ar-lottery01.com could not be completed. Check your internet connection or use "Import Curl JSON".',
+      };
+    }
+    if (lower.includes('malformed')) {
+      return {
+        title: 'Malformed JSON Payload',
+        description:
+          'The endpoint responded but the payload structure was missing expected data fields (data.list).',
+      };
+    }
+    if (lower.includes('empty')) {
+      return {
+        title: 'Empty Feed Data',
+        description: 'The official endpoint returned 0 history records.',
+      };
+    }
+    return {
+      title: 'Direct Connection Issue',
+      description: errString,
+    };
+  };
+
   return (
     <div className="space-y-6 animate-in fade-in duration-300">
       {/* Top Banner & Control Bar */}
       <div className="p-5 rounded-2xl bg-[#071A14] border border-[#1E3A2B] shadow-xl flex flex-wrap items-center justify-between gap-4">
         <div className="space-y-1">
-          <div className="flex items-center gap-2.5">
+          <div className="flex flex-wrap items-center gap-2.5">
             <span className="px-2.5 py-0.5 rounded text-[11px] font-mono font-bold bg-[#35B978]/15 text-[#35B978] border border-[#35B978]/30 inline-flex items-center gap-1.5">
               <span className="w-2 h-2 rounded-full bg-[#35B978] animate-pulse" />
               COMPLETED REAL HISTORY
             </span>
-            <span className="text-xs text-[#8D9B95] font-mono">
-              Live Feed from draw.ar-lottery01.com
-            </span>
+
+            {/* Connection Mode Indicator */}
+            {connectionMode === 'browser-direct' && (
+              <span className="px-2.5 py-0.5 rounded text-[11px] font-mono font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 inline-flex items-center gap-1.5">
+                <Globe2 className="w-3 h-3 text-emerald-400" />
+                Browser Direct Feed (HTTP 200)
+              </span>
+            )}
+            {connectionMode === 'imported' && (
+              <span className="px-2.5 py-0.5 rounded text-[11px] font-mono font-bold bg-[#E7B93F]/20 text-[#E7B93F] border border-[#E7B93F]/40 inline-flex items-center gap-1.5">
+                <CheckCircle2 className="w-3 h-3 text-[#E7B93F]" />
+                Imported Official Feed
+              </span>
+            )}
+            {connectionMode === 'cached' && (
+              <span className="px-2.5 py-0.5 rounded text-[11px] font-mono font-bold bg-[#1E3A2B] text-[#8D9B95] border border-[#1E3A2B] inline-flex items-center gap-1.5">
+                Local Storage Cached
+              </span>
+            )}
+            {connectionMode === 'server-fallback' && (
+              <span className="px-2.5 py-0.5 rounded text-[11px] font-mono font-bold bg-blue-500/20 text-blue-300 border border-blue-500/40 inline-flex items-center gap-1.5">
+                Server Fallback
+              </span>
+            )}
           </div>
           <p className="text-xs text-[#8D9B95]">
-            Real historical draw outcomes direct from official feed with automated accumulation.
+            Direct browser-side feed from{' '}
+            <code className="text-[#35B978]">draw.ar-lottery01.com</code> with deduplication & auto-accumulation.
           </p>
         </div>
 
@@ -206,10 +259,10 @@ export const RealHistoryView: React.FC = () => {
             <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5 sm:mt-0" />
             <div>
               <div className="font-bold text-amber-300">
-                Upstream Feed Inaccessible from Cloud Host: {error}
+                {getErrorDetails(error).title}
               </div>
               <div className="text-[11px] text-[#8D9B95] mt-0.5">
-                Cloudflare on draw.ar-lottery01.com restricts datacenter/server IPs (HTTP 403). Use &quot;Import Curl JSON&quot; below to load live official results.
+                {getErrorDetails(error).description}
               </div>
             </div>
           </div>
@@ -225,7 +278,7 @@ export const RealHistoryView: React.FC = () => {
               disabled={isLoading}
               className="px-3 py-1.5 rounded-lg bg-[#06130F] border border-[#1E3A2B] text-amber-300 hover:text-white font-semibold text-xs cursor-pointer"
             >
-              Retry
+              Retry Direct Fetch
             </button>
           </div>
         </div>
@@ -245,14 +298,32 @@ export const RealHistoryView: React.FC = () => {
               </span>
             </div>
             <div className="font-mono text-xl sm:text-2xl font-black text-[#F5F5F5] tracking-wider">
-              {realSchedule?.currentIssue || (realHistory.length > 0 ? (BigInt(realHistory[0].periodNumber) + 1n).toString() : 'Connecting to live schedule...')}
+              {realSchedule?.currentIssue ||
+                (realHistory.length > 0
+                  ? (BigInt(realHistory[0].periodNumber) + 1n).toString()
+                  : 'Connecting to live schedule...')}
             </div>
             <div className="text-[11px] text-[#8D9B95] font-mono flex items-center gap-3">
-              <span>Prev: <strong className="text-gray-300">{realSchedule?.previousIssue || (realHistory.length > 0 ? realHistory[0].periodNumber : '--')}</strong></span>
+              <span>
+                Prev:{' '}
+                <strong className="text-gray-300">
+                  {realSchedule?.previousIssue || (realHistory.length > 0 ? realHistory[0].periodNumber : '--')}
+                </strong>
+              </span>
               <span>•</span>
-              <span>Next: <strong className="text-gray-300">{realSchedule?.nextIssue || (realHistory.length > 0 ? (BigInt(realHistory[0].periodNumber) + 2n).toString() : '--')}</strong></span>
+              <span>
+                Next:{' '}
+                <strong className="text-gray-300">
+                  {realSchedule?.nextIssue ||
+                    (realHistory.length > 0
+                      ? (BigInt(realHistory[0].periodNumber) + 2n).toString()
+                      : '--')}
+                </strong>
+              </span>
               <span>•</span>
-              <span>Last updated: <strong className="text-gray-300">{lastUpdatedDisplay}</strong></span>
+              <span>
+                Last updated: <strong className="text-gray-300">{lastUpdatedDisplay}</strong>
+              </span>
             </div>
           </div>
 
@@ -276,9 +347,16 @@ export const RealHistoryView: React.FC = () => {
         <div className="p-4 border-b border-[#1E3A2B] flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <Layers className="w-4 h-4 text-[#35B978]" />
-            <h3 className="text-sm font-bold text-[#F5F5F5]">
-              Completed Official Results ({realHistory.length} records shown)
-            </h3>
+            <div>
+              <h3 className="text-sm font-bold text-[#F5F5F5]">
+                Completed Official Results ({recordsToDisplay.length} of {realHistory.length} records shown)
+              </h3>
+              {pagination && (
+                <div className="text-[11px] font-mono text-[#8D9B95] mt-0.5">
+                  Official Feed: Page {pagination.pageNo} / {pagination.totalPage} ({pagination.totalCount} total draws available upstream)
+                </div>
+              )}
+            </div>
           </div>
 
           <div className="flex items-center gap-2.5">
@@ -313,12 +391,12 @@ export const RealHistoryView: React.FC = () => {
           </div>
         </div>
 
-        {realHistory.length === 0 ? (
+        {recordsToDisplay.length === 0 ? (
           <div className="p-12 text-center text-xs text-[#8D9B95] space-y-4">
             {isLoading ? (
               <div className="flex flex-col items-center gap-2">
                 <RefreshCw className="w-6 h-6 animate-spin text-[#35B978]" />
-                <span>Fetching official WinGo 30S history from live feed...</span>
+                <span>Fetching official WinGo 30S history directly from browser...</span>
               </div>
             ) : error ? (
               <div className="max-w-md mx-auto space-y-3">
@@ -327,10 +405,10 @@ export const RealHistoryView: React.FC = () => {
                 </div>
                 <div>
                   <h4 className="font-bold text-[#F5F5F5] text-sm">
-                    No Upstream Records Loaded (HTTP 403)
+                    {getErrorDetails(error).title}
                   </h4>
                   <p className="text-[#8D9B95] text-xs mt-1">
-                    The upstream provider (draw.ar-lottery01.com) blocks requests from cloud datacenter networks. Paste the curl response to populate the official results.
+                    {getErrorDetails(error).description}
                   </p>
                 </div>
                 <div className="pt-2 flex items-center justify-center gap-2">
@@ -345,7 +423,7 @@ export const RealHistoryView: React.FC = () => {
                     onClick={() => refreshRealResults(true)}
                     className="px-4 py-2 rounded-xl bg-[#06130F] border border-[#1E3A2B] text-[#F5F5F5] font-semibold text-xs transition-colors cursor-pointer"
                   >
-                    Retry Connection
+                    Retry Direct Fetch
                   </button>
                 </div>
               </div>
@@ -375,7 +453,7 @@ export const RealHistoryView: React.FC = () => {
               <thead>
                 <tr className="border-b border-[#1E3A2B] bg-[#06130F] text-[#8D9B95] font-mono uppercase text-[11px]">
                   <th className="py-3 px-4">Period / Issue</th>
-                  <th className="py-3 px-4 text-center">Number</th>
+                  <th className="py-3 px-4 text-center">Result Number</th>
                   <th className="py-3 px-4">Big / Small</th>
                   <th className="py-3 px-4">Color</th>
                   <th className="py-3 px-4 text-center">Premium</th>
@@ -384,7 +462,7 @@ export const RealHistoryView: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#1E3A2B]/40 font-mono">
-                {realHistory.map((item, idx) => {
+                {recordsToDisplay.map((item, idx) => {
                   const isZero = item.winningNumber === 0;
                   const isFive = item.winningNumber === 5;
                   const isEven = item.winningNumber % 2 === 0;
@@ -397,14 +475,14 @@ export const RealHistoryView: React.FC = () => {
 
                   return (
                     <tr
-                      key={item.periodNumber}
+                      key={item.issueNumber}
                       className={`hover:bg-[#06130F]/60 transition-colors ${
                         idx === 0 ? 'bg-[#35B978]/5' : ''
                       }`}
                     >
-                      {/* Period */}
+                      {/* Period / Issue */}
                       <td className="py-3 px-4 font-bold text-[#F5F5F5]">
-                        {item.periodNumber}
+                        {item.issueNumber}
                         {idx === 0 && (
                           <span className="ml-2 px-1.5 py-0.5 rounded text-[9px] bg-[#35B978]/20 text-[#35B978] border border-[#35B978]/30 font-bold uppercase">
                             Latest Settled
@@ -412,14 +490,14 @@ export const RealHistoryView: React.FC = () => {
                         )}
                       </td>
 
-                      {/* Number */}
+                      {/* Result Number */}
                       <td className="py-3 px-4 text-center">
                         <span className={`text-base font-black ${numColor}`}>
                           {item.winningNumber}
                         </span>
                       </td>
 
-                      {/* Size */}
+                      {/* Big / Small */}
                       <td className="py-3 px-4">
                         <span
                           className={`px-2.5 py-0.5 rounded text-[11px] font-bold ${
@@ -440,10 +518,10 @@ export const RealHistoryView: React.FC = () => {
                               key={i}
                               className={`w-3 h-3 rounded-full inline-block ${
                                 c === 'red'
-                                  ? 'bg-[#F04444]'
-                                  : c === 'green'
-                                  ? 'bg-[#35B978]'
-                                  : 'bg-[#C94DDA]'
+                                    ? 'bg-[#F04444]'
+                                    : c === 'green'
+                                    ? 'bg-[#35B978]'
+                                    : 'bg-[#C94DDA]'
                               }`}
                               title={c}
                             />

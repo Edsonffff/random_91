@@ -331,10 +331,10 @@ app.delete('/api/test/results/:id', (req, res) => {
 });
 
 // ========================================================
-// REAL WINGO 30S PROXY & ACCUMULATION STORE
-// Official endpoints:
-// - Schedule/Current Issue: https://draw.ar-lottery01.com/WinGo/WinGo_30S.json
-// - Completed History: https://draw.ar-lottery01.com/WinGo/WinGo_30S/GetHistoryIssuePage.json
+// REAL WINGO 30S IN-MEMORY STORE & STATUS ENDPOINTS
+// Note: Upstream (draw.ar-lottery01.com) blocks cloud datacenter/server IPs
+// with HTTP 403 (Cloudflare). Live real history is fetched directly by the browser.
+// /api/real/history remains as a fallback and status endpoint.
 // ========================================================
 
 export interface RealCompletedRecord {
@@ -351,7 +351,6 @@ export interface RealCompletedRecord {
 
 let accumulatedRealHistory: RealCompletedRecord[] = [];
 let lastRealFetchTime = 0;
-let lastRealFetchError: string | null = null;
 
 function parseRealColors(rawColor: string | undefined, num: number): ('red' | 'green' | 'violet')[] {
   if (rawColor) {
@@ -364,109 +363,11 @@ function parseRealColors(rawColor: string | undefined, num: number): ('red' | 'g
   return num % 2 === 0 ? ['red'] : ['green'];
 }
 
-const UPSTREAM_BASE_URL = (process.env.UPSTREAM_WINGO_BASE_URL || 'https://draw.ar-lottery01.com/WinGo').replace(/\/$/, '');
-
-async function fetchAndAccumulateRealHistory(): Promise<RealCompletedRecord[]> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 6000);
-
-  try {
-    const ts = Date.now();
-    const url = `${UPSTREAM_BASE_URL}/WinGo_30S/GetHistoryIssuePage.json?ts=${ts}`;
-    const response = await fetch(url, {
-      signal: controller.signal,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        Accept: 'application/json, text/plain, */*',
-      },
-    });
-
-    if (!response.ok) {
-      const serverHeader = response.headers.get('server') || 'unknown';
-      const cfRay = response.headers.get('cf-ray') || 'none';
-      const contentType = response.headers.get('content-type') || 'unknown';
-      console.warn(`[Upstream Diagnostic]: History endpoint returned HTTP ${response.status} (${response.statusText}). Server: ${serverHeader}, CF-Ray: ${cfRay}, Content-Type: ${contentType}`);
-      throw new Error(`Upstream server returned HTTP ${response.status} (${serverHeader}, CF-Ray: ${cfRay})`);
-    }
-
-    const payload = (await response.json()) as {
-      data?: {
-        list?: Array<{
-          issueNumber?: string;
-          number?: string | number;
-          color?: string;
-          premium?: string | number;
-          sum?: number;
-        }>;
-      };
-    };
-
-    const list = payload?.data?.list;
-    if (!Array.isArray(list)) {
-      throw new Error('Malformed upstream response: missing data.list array');
-    }
-
-    const newRecords: RealCompletedRecord[] = [];
-    for (const item of list) {
-      const issue = String(item.issueNumber || '').trim();
-      const num = typeof item.number === 'number' ? item.number : parseInt(String(item.number ?? ''), 10);
-      if (issue && !isNaN(num) && num >= 0 && num <= 9) {
-        newRecords.push({
-          issueNumber: issue,
-          periodNumber: issue,
-          winningNumber: num,
-          size: num >= 5 ? 'Big' : 'Small',
-          colors: parseRealColors(item.color, num),
-          premium: String(item.premium ?? num),
-          sum: typeof item.sum === 'number' ? item.sum : num,
-          completedAt: new Date().toISOString(),
-          source: 'COMPLETED REAL HISTORY',
-        });
-      }
-    }
-
-    // Merge into accumulated store without duplicates
-    const existingMap = new Map<string, RealCompletedRecord>();
-    for (const item of accumulatedRealHistory) {
-      existingMap.set(item.periodNumber, item);
-    }
-    for (const item of newRecords) {
-      existingMap.set(item.periodNumber, item);
-    }
-
-    // Sort newest first
-    accumulatedRealHistory = Array.from(existingMap.values()).sort((a, b) => {
-      try {
-        const ba = BigInt(a.periodNumber);
-        const bb = BigInt(b.periodNumber);
-        return ba > bb ? -1 : ba < bb ? 1 : 0;
-      } catch {
-        return b.periodNumber.localeCompare(a.periodNumber);
-      }
-    });
-
-    // Cap buffer at 1,000 items
-    if (accumulatedRealHistory.length > 1000) {
-      accumulatedRealHistory = accumulatedRealHistory.slice(0, 1000);
-    }
-
-    lastRealFetchTime = Date.now();
-    lastRealFetchError = null;
-    return accumulatedRealHistory;
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : 'Failed to fetch real history from upstream';
-    lastRealFetchError = msg;
-    console.warn('[Real History Proxy Warning]:', msg);
-    return accumulatedRealHistory;
-  } finally {
-    clearTimeout(timeoutId);
-  }
-}
-
-// GET /api/real/current
+// GET /api/real/current (Fallback status / schedule)
 app.get('/api/real/current', async (_req, res) => {
+  const UPSTREAM_BASE_URL = (process.env.UPSTREAM_WINGO_BASE_URL || 'https://draw.ar-lottery01.com/WinGo').replace(/\/$/, '');
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 6000);
+  const timeoutId = setTimeout(() => controller.abort(), 4000);
 
   try {
     const ts = Date.now();
@@ -479,62 +380,75 @@ app.get('/api/real/current', async (_req, res) => {
       },
     });
 
-    if (!response.ok) {
-      const serverHeader = response.headers.get('server') || 'unknown';
-      const cfRay = response.headers.get('cf-ray') || 'none';
-      const contentType = response.headers.get('content-type') || 'unknown';
-      console.warn(`[Upstream Diagnostic]: Current schedule returned HTTP ${response.status} (${response.statusText}). Server: ${serverHeader}, CF-Ray: ${cfRay}, Content-Type: ${contentType}`);
-      throw new Error(`Upstream returned HTTP ${response.status} (${serverHeader}, CF-Ray: ${cfRay})`);
+    if (response.ok) {
+      const data = (await response.json()) as {
+        gameCode?: string;
+        intervalMinute?: number;
+        state?: number;
+        previous?: { issueNumber?: string; startTime?: number; endTime?: number };
+        current?: { issueNumber?: string; startTime?: number; endTime?: number };
+        next?: { issueNumber?: string; startTime?: number; endTime?: number };
+      };
+
+      const endTime = data.current?.endTime || (Date.now() + 30000);
+      const remainingSeconds = Math.max(0, Math.round((endTime - Date.now()) / 1000));
+
+      return res.json({
+        success: true,
+        gameCode: data.gameCode || 'WinGo_30S',
+        intervalMinute: data.intervalMinute || 0.5,
+        state: data.state ?? 1,
+        currentIssue: data.current?.issueNumber || '',
+        startTime: data.current?.startTime || Date.now(),
+        endTime,
+        remainingSeconds,
+        previousIssue: data.previous?.issueNumber || '',
+        nextIssue: data.next?.issueNumber || '',
+        source: 'CURRENT ISSUE',
+        lastUpdated: new Date().toISOString(),
+      });
     }
-
-    const data = (await response.json()) as {
-      gameCode?: string;
-      intervalMinute?: number;
-      state?: number;
-      previous?: { issueNumber?: string; startTime?: number; endTime?: number };
-      current?: { issueNumber?: string; startTime?: number; endTime?: number };
-      next?: { issueNumber?: string; startTime?: number; endTime?: number };
-    };
-
-    const endTime = data.current?.endTime || (Date.now() + 30000);
-    const remainingSeconds = Math.max(0, Math.round((endTime - Date.now()) / 1000));
-
-    res.json({
-      success: true,
-      gameCode: data.gameCode || 'WinGo_30S',
-      intervalMinute: data.intervalMinute || 0.5,
-      state: data.state ?? 1,
-      currentIssue: data.current?.issueNumber || '',
-      startTime: data.current?.startTime || Date.now(),
-      endTime,
-      remainingSeconds,
-      previousIssue: data.previous?.issueNumber || '',
-      nextIssue: data.next?.issueNumber || '',
-      source: 'CURRENT ISSUE',
-      lastUpdated: new Date().toISOString(),
-    });
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : 'Unable to connect to live schedule';
-    res.status(503).json({
-      success: false,
-      error: msg,
-      source: 'CURRENT ISSUE',
-      lastUpdated: new Date().toISOString(),
-    });
+  } catch {
+    // Cloudflare 403 or network failure on datacenter IP
   } finally {
     clearTimeout(timeoutId);
   }
+
+  // Graceful fallback from latest accumulated record
+  const latest = accumulatedRealHistory[0];
+  let curIssue = '';
+  let prevIssue = '';
+  let nextIssue = '';
+  if (latest) {
+    try {
+      prevIssue = latest.issueNumber;
+      curIssue = (BigInt(latest.issueNumber) + 1n).toString();
+      nextIssue = (BigInt(latest.issueNumber) + 2n).toString();
+    } catch {
+      // ignore
+    }
+  }
+
+  res.json({
+    success: true,
+    gameCode: 'WinGo_30S',
+    intervalMinute: 0.5,
+    state: 1,
+    currentIssue: curIssue,
+    startTime: Date.now(),
+    endTime: Date.now() + 30000,
+    remainingSeconds: 25,
+    previousIssue: prevIssue,
+    nextIssue,
+    source: 'CURRENT ISSUE',
+    lastUpdated: new Date().toISOString(),
+    statusNote: 'Fallback schedule (browser direct fetch is primary)',
+  });
 });
 
-// GET /api/real/history
-app.get('/api/real/history', async (req, res) => {
-  const forceRefresh = req.query.forceRefresh === 'true';
+// GET /api/real/history (Fallback & status endpoint - does NOT proxy upstream to avoid 403)
+app.get('/api/real/history', (req, res) => {
   const limitParam = req.query.limit as string;
-
-  // Cache duration: 3 seconds to avoid spamming upstream
-  if (forceRefresh || Date.now() - lastRealFetchTime > 3000 || accumulatedRealHistory.length === 0) {
-    await fetchAndAccumulateRealHistory();
-  }
 
   let limit = 10;
   if (limitParam === 'all') {
@@ -549,20 +463,64 @@ app.get('/api/real/history', async (req, res) => {
     totalAvailable: accumulatedRealHistory.length,
     returnedCount: Math.min(limit, accumulatedRealHistory.length),
     lastUpdated: new Date(lastRealFetchTime || Date.now()).toISOString(),
-    error: lastRealFetchError,
+    error: accumulatedRealHistory.length === 0
+      ? 'Vercel server proxy is disabled (upstream blocks datacenter IPs with Cloudflare HTTP 403). Live history is fetched directly from client browser.'
+      : null,
     source: 'COMPLETED REAL HISTORY',
     results: accumulatedRealHistory.slice(0, limit),
   });
 });
 
-// GET /api/real/history/export?format=csv|json
-app.get('/api/real/history/export', async (req, res) => {
-  const format = (req.query.format as string) === 'json' ? 'json' : 'csv';
+// POST /api/real/history (Sync client-fetched records into server memory if needed)
+app.post('/api/real/history', (req, res) => {
+  const incoming = Array.isArray(req.body.results) ? req.body.results : [];
+  if (incoming.length > 0) {
+    const existingMap = new Map<string, RealCompletedRecord>();
+    for (const item of accumulatedRealHistory) {
+      existingMap.set(item.periodNumber, item);
+    }
+    for (const item of incoming) {
+      if (item && item.issueNumber) {
+        const num = Number(item.winningNumber ?? item.number);
+        existingMap.set(String(item.issueNumber), {
+          issueNumber: String(item.issueNumber),
+          periodNumber: String(item.issueNumber),
+          winningNumber: isNaN(num) ? 0 : num,
+          size: num >= 5 ? 'Big' : 'Small',
+          colors: parseRealColors(item.color, num),
+          premium: String(item.premium ?? num),
+          sum: Number(item.sum ?? 0),
+          completedAt: item.completedAt || new Date().toISOString(),
+          source: 'COMPLETED REAL HISTORY',
+        });
+      }
+    }
 
-  if (Date.now() - lastRealFetchTime > 4000 || accumulatedRealHistory.length === 0) {
-    await fetchAndAccumulateRealHistory();
+    accumulatedRealHistory = Array.from(existingMap.values()).sort((a, b) => {
+      try {
+        const ba = BigInt(a.periodNumber);
+        const bb = BigInt(b.periodNumber);
+        return ba > bb ? -1 : ba < bb ? 1 : 0;
+      } catch {
+        return b.periodNumber.localeCompare(a.periodNumber);
+      }
+    });
+
+    if (accumulatedRealHistory.length > 1000) {
+      accumulatedRealHistory = accumulatedRealHistory.slice(0, 1000);
+    }
+    lastRealFetchTime = Date.now();
   }
 
+  res.json({
+    success: true,
+    totalAvailable: accumulatedRealHistory.length,
+  });
+});
+
+// GET /api/real/history/export?format=csv|json
+app.get('/api/real/history/export', (req, res) => {
+  const format = (req.query.format as string) === 'json' ? 'json' : 'csv';
   const timestamp = new Date().toISOString().slice(0, 10);
   const filename = `wingo30s_real_history_${timestamp}.${format}`;
 
