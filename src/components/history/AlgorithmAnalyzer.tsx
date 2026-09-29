@@ -591,17 +591,22 @@ export const AlgorithmAnalyzer: React.FC = () => {
   // Test A: Period Digit Sum Modulo 10
   const testPeriodSum = useMemo(() => {
     let hits = 0;
+    const toBigSmall = (n: number): 'Big' | 'Small' => (n >= 5 ? 'Big' : 'Small');
     const details = activeDataset.map((item) => {
       const sum = item.period
         .split('')
         .reduce((acc, char) => acc + parseInt(char, 10), 0);
       const predicted = sum % 10;
-      const isHit = predicted === item.number;
+      const predictedSize = toBigSmall(predicted);
+      const actualSize = toBigSmall(item.number);
+      const isHit = predictedSize === actualSize;
       if (isHit) hits++;
       return {
         period: item.period,
         actual: item.number,
+        actualSize,
         predicted,
+        predictedSize,
         isHit,
       };
     });
@@ -613,11 +618,14 @@ export const AlgorithmAnalyzer: React.FC = () => {
   // Test B: Previous Number Linear Recurrence: (Prev * 3 + 7) mod 10
   const testLinearRecurrence = useMemo(() => {
     let hits = 0;
+    const toBigSmall = (n: number): 'Big' | 'Small' => (n >= 5 ? 'Big' : 'Small');
     const details: Array<{
       period: string;
       prev: number;
       actual: number;
+      actualSize: 'Big' | 'Small';
       predicted: number;
+      predictedSize: 'Big' | 'Small';
       isHit: boolean;
     }> = [];
 
@@ -625,13 +633,17 @@ export const AlgorithmAnalyzer: React.FC = () => {
       const prev = activeDataset[i - 1].number;
       const predicted = (prev * 3 + 7) % 10;
       const actual = activeDataset[i].number;
-      const isHit = predicted === actual;
+      const predictedSize = toBigSmall(predicted);
+      const actualSize = toBigSmall(actual);
+      const isHit = predictedSize === actualSize;
       if (isHit) hits++;
       details.push({
         period: activeDataset[i].period,
         prev,
         actual,
+        actualSize,
         predicted,
+        predictedSize,
         isHit,
       });
     }
@@ -1023,14 +1035,14 @@ export const AlgorithmAnalyzer: React.FC = () => {
 
               <div className="flex items-center gap-4 text-xs font-mono">
                 <div>
-                  <span className="text-[#8D9B95] block text-[10px]">OBSERVED HIT RATE:</span>
+                  <span className="text-[#8D9B95] block text-[10px]">BIG/SMALL HIT RATE:</span>
                   <span className="text-base font-bold text-[#F04444]">
                     {testPeriodSum.accuracy}% ({testPeriodSum.hits} / {testPeriodSum.total})
                   </span>
                 </div>
                 <div>
                   <span className="text-[#8D9B95] block text-[10px]">RANDOM BASELINE:</span>
-                  <span className="text-base font-bold text-[#8D9B95]">10.0%</span>
+                  <span className="text-base font-bold text-[#8D9B95]">50.0%</span>
                 </div>
               </div>
             </div>
@@ -1057,8 +1069,8 @@ export const AlgorithmAnalyzer: React.FC = () => {
                   <thead className="bg-[#06130F] text-[#8D9B95] uppercase text-[10px]">
                     <tr>
                       <th className="py-2.5 px-4">Period</th>
-                      <th className="py-2.5 px-4">Actual Number</th>
-                      <th className="py-2.5 px-4">Formula Prediction</th>
+                      <th className="py-2.5 px-4">Actual (Digit → Size)</th>
+                      <th className="py-2.5 px-4">Prediction (Digit → Size)</th>
                       <th className="py-2.5 px-4 text-right">Outcome</th>
                     </tr>
                   </thead>
@@ -1066,8 +1078,20 @@ export const AlgorithmAnalyzer: React.FC = () => {
                     {testPeriodSum.details.map((row, i) => (
                       <tr key={i} className="hover:bg-[#06130F]/80">
                         <td className="py-2 px-4 text-gray-300">{row.period}</td>
-                        <td className="py-2 px-4 font-bold text-[#E7B93F]">{row.actual}</td>
-                        <td className="py-2 px-4 text-gray-400">{row.predicted}</td>
+                        <td className="py-2 px-4 font-bold text-[#E7B93F]">
+                          {row.actual}{' '}
+                          <span className="text-[10px] text-[#8D9B95]">→</span>{' '}
+                          <span className={row.actualSize === 'Big' ? 'text-[#E7B93F]' : 'text-[#60A5FA]'}>
+                            {row.actualSize.toUpperCase()}
+                          </span>
+                        </td>
+                        <td className="py-2 px-4 text-gray-400">
+                          {row.predicted}{' '}
+                          <span className="text-[10px] text-[#8D9B95]">→</span>{' '}
+                          <span className={row.predictedSize === 'Big' ? 'text-[#E7B93F]' : 'text-[#60A5FA]'}>
+                            {row.predictedSize.toUpperCase()}
+                          </span>
+                        </td>
                         <td className="py-2 px-4 text-right">
                           {row.isHit ? (
                             <span className="inline-flex items-center gap-1 text-[#35B978] font-bold">
@@ -1103,14 +1127,14 @@ export const AlgorithmAnalyzer: React.FC = () => {
 
               <div className="flex items-center gap-4 text-xs font-mono">
                 <div>
-                  <span className="text-[#8D9B95] block text-[10px]">OBSERVED HIT RATE:</span>
+                  <span className="text-[#8D9B95] block text-[10px]">BIG/SMALL HIT RATE:</span>
                   <span className="text-base font-bold text-[#F04444]">
                     {testLinearRecurrence.accuracy}% ({testLinearRecurrence.hits} / {testLinearRecurrence.total})
                   </span>
                 </div>
                 <div>
                   <span className="text-[#8D9B95] block text-[10px]">RANDOM BASELINE:</span>
-                  <span className="text-base font-bold text-[#8D9B95]">10.0%</span>
+                  <span className="text-base font-bold text-[#8D9B95]">50.0%</span>
                 </div>
               </div>
             </div>
@@ -1138,8 +1162,8 @@ export const AlgorithmAnalyzer: React.FC = () => {
                     <tr>
                       <th className="py-2.5 px-4">Period</th>
                       <th className="py-2.5 px-4">Previous Number</th>
-                      <th className="py-2.5 px-4">Actual Number</th>
-                      <th className="py-2.5 px-4">Formula Prediction</th>
+                      <th className="py-2.5 px-4">Actual (Digit → Size)</th>
+                      <th className="py-2.5 px-4">Prediction (Digit → Size)</th>
                       <th className="py-2.5 px-4 text-right">Outcome</th>
                     </tr>
                   </thead>
@@ -1148,8 +1172,20 @@ export const AlgorithmAnalyzer: React.FC = () => {
                       <tr key={i} className="hover:bg-[#06130F]/80">
                         <td className="py-2 px-4 text-gray-300">{row.period}</td>
                         <td className="py-2 px-4 text-gray-400">{row.prev}</td>
-                        <td className="py-2 px-4 font-bold text-[#E7B93F]">{row.actual}</td>
-                        <td className="py-2 px-4 text-gray-400">{row.predicted}</td>
+                        <td className="py-2 px-4 font-bold text-[#E7B93F]">
+                          {row.actual}{' '}
+                          <span className="text-[10px] text-[#8D9B95]">→</span>{' '}
+                          <span className={row.actualSize === 'Big' ? 'text-[#E7B93F]' : 'text-[#60A5FA]'}>
+                            {row.actualSize.toUpperCase()}
+                          </span>
+                        </td>
+                        <td className="py-2 px-4 text-gray-400">
+                          {row.predicted}{' '}
+                          <span className="text-[10px] text-[#8D9B95]">→</span>{' '}
+                          <span className={row.predictedSize === 'Big' ? 'text-[#E7B93F]' : 'text-[#60A5FA]'}>
+                            {row.predictedSize.toUpperCase()}
+                          </span>
+                        </td>
                         <td className="py-2 px-4 text-right">
                           {row.isHit ? (
                             <span className="inline-flex items-center gap-1 text-[#35B978] font-bold">
