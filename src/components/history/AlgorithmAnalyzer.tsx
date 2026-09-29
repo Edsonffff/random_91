@@ -591,6 +591,27 @@ export const AlgorithmAnalyzer: React.FC = () => {
 
   // Test C: Alternating Pattern Prediction: Predict opposite of previous size
   const testAlternation = useMemo(() => {
+    const roundByPeriod = new Map<string, RoundEntry>();
+    for (const item of activeDataset) {
+      if (item && item.period) {
+        roundByPeriod.set(String(item.period).trim(), item);
+      }
+    }
+
+    const sortedPeriods = Array.from(roundByPeriod.keys()).sort((a, b) => {
+      try {
+        const diff = BigInt(a) - BigInt(b);
+        if (diff > 0n) return 1;
+        if (diff < 0n) return -1;
+        return 0;
+      } catch {
+        return a.localeCompare(b, undefined, { numeric: true });
+      }
+    });
+
+    const periodIndexInSorted = new Map<string, number>();
+    sortedPeriods.forEach((p, idx) => periodIndexInSorted.set(p, idx));
+
     let hits = 0;
     const details: Array<{
       period: string;
@@ -600,22 +621,58 @@ export const AlgorithmAnalyzer: React.FC = () => {
       isHit: boolean;
     }> = [];
 
-    for (let i = 1; i < activeDataset.length; i++) {
-      const prevSize = activeDataset[i - 1].number >= 5 ? 'Big' : 'Small';
-      const actualSize = activeDataset[i].number >= 5 ? 'Big' : 'Small';
-      const predictedSize = prevSize === 'Big' ? 'Small' : 'Big';
-      const isHit = predictedSize === actualSize;
+    for (let i = 0; i < activeDataset.length; i++) {
+      const item = activeDataset[i];
+      const currentPeriod = String(item.period).trim();
+
+      // 1. Match explicit preceding period (e.g. period - 1)
+      let prevPeriod: string | null = null;
+      try {
+        const currentBig = BigInt(currentPeriod);
+        const candidate = String(currentBig - 1n).padStart(currentPeriod.length, '0');
+        if (roundByPeriod.has(candidate)) {
+          prevPeriod = candidate;
+        }
+      } catch {
+        // Non-BigInt format
+      }
+
+      // 2. Fallback to period immediately preceding in sorted chronological order
+      if (!prevPeriod) {
+        const sortIdx = periodIndexInSorted.get(currentPeriod);
+        if (sortIdx !== undefined && sortIdx > 0) {
+          prevPeriod = sortedPeriods[sortIdx - 1];
+        }
+      }
+
+      if (!prevPeriod) continue;
+      const prevRound = roundByPeriod.get(prevPeriod);
+      if (!prevRound) continue;
+
+      const previousActual: 'Big' | 'Small' = prevRound.number >= 5 ? 'Big' : 'Small';
+      const actualSize: 'Big' | 'Small' = item.number >= 5 ? 'Big' : 'Small';
+      const prediction: 'Big' | 'Small' = previousActual === 'Big' ? 'Small' : 'Big';
+      const isHit = prediction === actualSize;
       if (isHit) hits++;
+
+      // Temporary console logging as requested
+      console.log('[Test 3]', {
+        currentPeriod,
+        previousPeriod: prevPeriod,
+        previousActual,
+        prediction,
+      });
+
       details.push({
-        period: activeDataset[i].period,
-        prevSize,
+        period: item.period,
+        prevSize: previousActual,
         actualSize,
-        predictedSize,
+        predictedSize: prediction,
         isHit,
       });
     }
 
-    const total = activeDataset.length > 1 ? activeDataset.length - 1 : 0;
+    const total = details.length;
     const accuracy = total > 0 ? Math.round((hits / total) * 100) : 0;
     return { hits, total, accuracy, details };
   }, [activeDataset]);
