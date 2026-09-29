@@ -48,6 +48,7 @@ export interface TimeTestDetail {
   actual: number;
   actualSize: BigSmall;
   isHit: boolean;
+  noSignal?: boolean;
   extra?: Record<string, number | string>;
 }
 
@@ -66,11 +67,6 @@ export interface TimeTestResult {
   unavailableReason?: string;
 }
 
-export interface RoundIdBucket {
-  label: string; // last-digit value
-  hits: number;
-  total: number;
-}
 
 // ─── Input type (extended from RoundEntry to carry completedAt) ───────────────
 
@@ -210,56 +206,74 @@ export function computeTest5(dataset: RoundEntryForTests[]): TimeTestResult {
   };
 }
 
-// ─── Test 6 — Round ID Modulo ─────────────────────────────────────────────────
-// predictionNumber = roundNumber % 10
-// roundNumber = parseInt(period.slice(-7), 10)
-// last digit (0–9) cycles uniquely with every round
+/** Compute simple moving average over last `n` states (Big=1, Small=0). 
+ *  Only uses sorted[0..i-1] — never includes current round. */
+function smaWindow(sorted: RoundEntryForTests[], i: number, n: number): number | null {
+  if (i < n) return null;
+  let sum = 0;
+  for (let k = i - n; k < i; k++) sum += sorted[k].number >= 5 ? 1 : 0;
+  return sum / n;
+}
 
-export function computeTest6(dataset: RoundEntryForTests[]): TimeTestResult & { roundIdBuckets: RoundIdBucket[] } {
+// ─── Test 6 — Simple Moving Average (SMA-10 official) ────────────────────────
+// Encode: Big=1, Small=0
+// SMA = avg(prev N states)  — never includes current round (anti-leakage)
+// Official signal: SMA-10.  SMA=0.5 or unavailable → NO SIGNAL (excluded from accuracy)
+
+export function computeTest6(
+  dataset: RoundEntryForTests[]
+): TimeTestResult & { smaValues: { sma5: number | null; sma10: number | null; sma20: number | null } } {
+  const sorted = sortedAscending(dataset);
   let hits = 0;
+  let total = 0;
   const details: TimeTestDetail[] = [];
-  // Track accuracy per last digit (0–9)
-  const digitHits = new Array(10).fill(0);
-  const digitTotal = new Array(10).fill(0);
+  let finalSmaValues = { sma5: null as number | null, sma10: null as number | null, sma20: null as number | null };
 
-  for (const item of dataset) {
-    const roundNum = roundNumberFromPeriod(item.period);
-    if (roundNum === null) continue;
-    const predNum = roundNum % 10;
-    const predictedSize = toBigSmall(predNum);
-    const actualSize = toBigSmall(item.number);
-    const isHit = predictedSize === actualSize;
-    if (isHit) {
+  for (let i = 1; i < sorted.length; i++) {
+    const item = sorted[i];
+    const sma5Val  = smaWindow(sorted, i, 5);
+    const sma10Val = smaWindow(sorted, i, 10);
+    const sma20Val = smaWindow(sorted, i, 20);
+    finalSmaValues = { sma5: sma5Val, sma10: sma10Val, sma20: sma20Val };
+
+    const actualSize: BigSmall = toBigSmall(item.number);
+    const noSignal = sma10Val === null || sma10Val === 0.5;
+    let predictedSize: BigSmall = 'Big';
+    let predNum = 0;
+    let isHit = false;
+
+    if (!noSignal && sma10Val !== null) {
+      predictedSize = sma10Val > 0.5 ? 'Big' : 'Small';
+      predNum = Math.round(sma10Val * 10);
+      isHit = predictedSize === actualSize;
       hits++;
-      digitHits[predNum]++;
+      total++;
     }
-    digitTotal[predNum]++;
+
     details.push({
       period: item.period,
-      hour: 0,
-      minute: 0,
-      second: 0,
+      hour: 0, minute: 0, second: 0,
       predictionNumber: predNum,
       predictedSize,
       actual: item.number,
       actualSize,
       isHit,
-      extra: { roundNumber: roundNum, lastDigit: predNum },
+      noSignal,
+      extra: {
+        sma5:  sma5Val  !== null ? Math.round(sma5Val  * 1000) / 10 : -1,
+        sma10: sma10Val !== null ? Math.round(sma10Val * 1000) / 10 : -1,
+        sma20: sma20Val !== null ? Math.round(sma20Val * 1000) / 10 : -1,
+      },
     });
   }
 
-  const roundIdBuckets: RoundIdBucket[] = Array.from({ length: 10 }, (_, i) => ({
-    label: String(i),
-    hits: digitHits[i],
-    total: digitTotal[i],
-  }));
-
-  const total = details.length;
   const accuracy = total > 0 ? Math.round((hits / total) * 100) : 0;
+  const validDetails = details.filter((d) => !d.noSignal);
   return {
-    hits, total, accuracy, details, roundIdBuckets,
-    ...streakStats(details),
-    latestPrediction: details.length > 0 ? details[details.length - 1].predictedSize : null,
+    hits, total, accuracy, details,
+    ...streakStats(validDetails),
+    latestPrediction: validDetails.length > 0 ? validDetails[validDetails.length - 1].predictedSize : null,
+    smaValues: finalSmaValues,
   };
 }
 
@@ -446,7 +460,9 @@ function DetailTable({ result, showTime = false, extraHeaders, extraCells }: Det
                 </span>
               </td>
               <td className="py-1.5 px-3 text-right">
-                {row.isHit ? (
+                {row.noSignal ? (
+                  <span className="text-[#8D9B95] text-[10px] font-mono">NO SIGNAL</span>
+                ) : row.isHit ? (
                   <span className="inline-flex items-center gap-1 text-[#35B978] font-bold">
                     <CheckCircle2 className="w-3 h-3" /> HIT
                   </span>
@@ -494,7 +510,7 @@ function StreakMini({ result }: { result: TimeTestResult }) {
 
 export interface AdditionalSignalsPanelProps {
   test5: TimeTestResult;
-  test6: TimeTestResult & { roundIdBuckets: RoundIdBucket[] };
+  test6: TimeTestResult & { smaValues: { sma5: number | null; sma10: number | null; sma20: number | null } };
   test7: TimeTestResult;
   test8: TimeTestResult;
 }
@@ -521,7 +537,7 @@ export const AdditionalSignalsPanel: React.FC<AdditionalSignalsPanelProps> = ({
           <span className="w-12 text-right">Acc%</span>
         </div>
         <SignalRow testNum={5} label="Digit Mix" formula="(dSum×3+P×2+first+last)%10 → B/S" result={test5} accentColor={ACCENT_COLORS[0]} />
-        <SignalRow testNum={6} label="Round ID" formula="roundNum%10 → B/S" result={test6} accentColor={ACCENT_COLORS[1]} />
+        <SignalRow testNum={6} label="SMA-10" formula="avg(prev 10 states)>0.5→BIG, <0.5→SML" result={test6} accentColor={ACCENT_COLORS[1]} />
         <SignalRow testNum={7} label="Round ID + Prev" formula="(roundNum+prevResult)%10 → B/S" result={test7} accentColor={ACCENT_COLORS[2]} />
         <SignalRow testNum={8} label="Round ID + Streak" formula="(roundNum+streak)%10 → B/S" result={test8} accentColor={ACCENT_COLORS[3]} />
       </div>
@@ -563,36 +579,45 @@ export const AdditionalSignalsPanel: React.FC<AdditionalSignalsPanelProps> = ({
             </div>
           </CollapsibleCard>
 
-          {/* Test 6 */}
           <CollapsibleCard id="test6_detail" variant="subcard"
-            title={<span className="font-mono text-xs font-bold text-[#60A5FA]">Test 6 — Round ID Modulo</span>}
+            title={<span className="font-mono text-xs font-bold text-[#60A5FA]">Test 6 — Simple Moving Average (SMA-10)</span>}
             subtitle={`${test6.total} predictions · ${test6.accuracy}% accuracy · Cur Hit: ${test6.currentHitStreak} · Cur Miss: ${test6.currentMissStreak}`}
           >
             <div className="space-y-3">
-              <StreakMini result={test6} />
-              {/* Last-digit accuracy grid */}
+              {/* SMA Window Analysis */}
               <div className="p-3 rounded-lg bg-[#071A14] border border-[#1E3A2B] space-y-2">
-                <span className="text-[10px] font-mono uppercase font-bold text-[#8D9B95] tracking-wider block">
-                  Accuracy by Last Digit of Round ID
-                </span>
-                <div className="grid grid-cols-5 sm:grid-cols-10 gap-1.5 text-xs font-mono">
-                  {test6.roundIdBuckets.map((b) => {
-                    const pct = b.total > 0 ? Math.round((b.hits / b.total) * 100) : null;
+                <span className="text-[10px] font-mono uppercase font-bold text-[#8D9B95] tracking-wider block">SMA Window Analysis (latest round)</span>
+                <div className="grid grid-cols-3 gap-2 text-xs font-mono">
+                  {(([
+                    { label: 'SMA-5',     val: test6.smaValues?.sma5  ?? null },
+                    { label: 'SMA-10 ✓',  val: test6.smaValues?.sma10 ?? null },
+                    { label: 'SMA-20',    val: test6.smaValues?.sma20 ?? null },
+                  ] as { label: string; val: number | null }[]) ).map(({ label, val }) => {
+                    const pct = val !== null ? Math.round(val * 1000) / 10 : null;
+                    const noSig = pct === null || pct === 50;
                     return (
-                      <div key={b.label} className="p-1.5 rounded bg-[#020806] border border-[#1E3A2B]/60 text-center">
-                        <span className="text-[10px] text-[#8D9B95] block">…{b.label}</span>
-                        <span className={`font-bold text-xs ${pct !== null && pct >= 50 ? 'text-[#35B978]' : pct !== null ? 'text-[#F04444]' : 'text-[#8D9B95]'}`}>
+                      <div key={label} className="p-2.5 rounded-lg bg-[#020806] border border-[#1E3A2B]/60 text-center">
+                        <span className="text-[10px] text-[#8D9B95] block">{label}</span>
+                        <span className={`text-sm font-bold ${noSig ? 'text-[#8D9B95]' : (pct ?? 0) > 50 ? 'text-[#E7B93F]' : 'text-[#60A5FA]'}`}>
                           {pct !== null ? `${pct}%` : '—'}
                         </span>
-                        <span className="text-[9px] text-[#8D9B95] block">{b.hits}/{b.total}</span>
+                        <span className="text-[9px] text-[#8D9B95] block">
+                          {noSig ? 'NO SIGNAL' : (pct ?? 0) > 50 ? 'BIG' : 'SMALL'}
+                        </span>
                       </div>
                     );
                   })}
                 </div>
+                <p className="text-[10px] text-[#8D9B95] font-sans">Official signal: SMA-10. When SMA-10 = 50% the round is marked NO SIGNAL and excluded from accuracy and Test 4.</p>
               </div>
+              <StreakMini result={test6} />
               <DetailTable result={test6}
-                extraHeaders={['Round #', 'Last Digit']}
-                extraCells={(row) => [row.extra?.roundNumber ?? '—', row.extra?.lastDigit ?? '—']}
+                extraHeaders={['SMA-5', 'SMA-10', 'SMA-20']}
+                extraCells={(row) => [
+                  row.extra?.sma5  !== undefined && Number(row.extra.sma5)  !== -1 ? `${row.extra.sma5}%`  : '—',
+                  row.extra?.sma10 !== undefined && Number(row.extra.sma10) !== -1 ? `${row.extra.sma10}%` : '—',
+                  row.extra?.sma20 !== undefined && Number(row.extra.sma20) !== -1 ? `${row.extra.sma20}%` : '—',
+                ]}
               />
             </div>
           </CollapsibleCard>

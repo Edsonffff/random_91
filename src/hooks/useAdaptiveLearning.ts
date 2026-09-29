@@ -23,7 +23,7 @@ const LEARNING_RATE = 0.05;
 const N_SIGNALS = 7;
 const INITIAL_WEIGHT = 1 / N_SIGNALS;
 const MIN_WEIGHT = 0.01;
-const STORAGE_KEY = 'wingo_test4_model_v3'; // v3 = 7-signal model
+const STORAGE_KEY = 'wingo_test4_model_v4'; // v4 = 7-signal model with Markov & SMA
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 

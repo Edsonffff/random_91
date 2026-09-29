@@ -629,42 +629,98 @@ export const AlgorithmAnalyzer: React.FC = () => {
     return { hits, total: activeDataset.length, accuracy, details };
   }, [activeDataset]);
 
-  // Test B: Previous Number Linear Recurrence: (Prev * 3 + 7) mod 10
+  // Test B: Markov Chain Transition Model
+  // P(next | prev) = N(prev→next) / Σ N(prev→*)
+  // Anti-leakage: matrix built from rounds 0..i-1; prediction made before actual of round i is seen.
+  // Minimum samples (MIN_MARKOV) required per previous-state before a prediction is generated.
   const testLinearRecurrence = useMemo(() => {
-    let hits = 0;
+    const MIN_MARKOV = 5;
     const toBigSmall = (n: number): 'Big' | 'Small' => (n >= 5 ? 'Big' : 'Small');
+
+    // Sort ascending so we can process chronologically
+    const sorted = [...activeDataset].sort(
+      (a, b) => (parseInt(a.period.slice(-7), 10) || 0) - (parseInt(b.period.slice(-7), 10) || 0)
+    );
+
+    // 2×2 matrix: matrix[prev][cur] = transition count
+    const matrix: Record<'Big' | 'Small', Record<'Big' | 'Small', number>> = {
+      Big:   { Big: 0, Small: 0 },
+      Small: { Big: 0, Small: 0 },
+    };
+
+    let hits = 0;
     const details: Array<{
       period: string;
-      prev: number;
+      previousState: 'Big' | 'Small';
+      pBig: number;
+      pSmall: number;
+      samplesUsed: number;
+      predictedSize: 'Big' | 'Small';
       actual: number;
       actualSize: 'Big' | 'Small';
-      predicted: number;
-      predictedSize: 'Big' | 'Small';
       isHit: boolean;
+      insufficient: boolean;
     }> = [];
 
-    for (let i = 1; i < activeDataset.length; i++) {
-      const prev = activeDataset[i - 1].number;
-      const predicted = (prev * 3 + 7) % 10;
-      const actual = activeDataset[i].number;
-      const predictedSize = toBigSmall(predicted);
-      const actualSize = toBigSmall(actual);
-      const isHit = predictedSize === actualSize;
-      if (isHit) hits++;
+    for (let i = 1; i < sorted.length; i++) {
+      const prevState = toBigSmall(sorted[i - 1].number);
+      const item = sorted[i];
+      const actualSize = toBigSmall(item.number);
+
+      // Count transitions from prevState using matrix BEFORE updating
+      const samplesUsed = matrix[prevState]['Big'] + matrix[prevState]['Small'];
+      const insufficient = samplesUsed < MIN_MARKOV;
+      let predictedSize: 'Big' | 'Small' = 'Big';
+      let pBig = 0;
+      let pSmall = 0;
+      let isHit = false;
+
+      if (!insufficient) {
+        pBig   = matrix[prevState]['Big']   / samplesUsed;
+        pSmall = matrix[prevState]['Small'] / samplesUsed;
+        predictedSize = pBig >= pSmall ? 'Big' : 'Small';
+        isHit = predictedSize === actualSize;
+        if (isHit) hits++;
+      }
+
       details.push({
-        period: activeDataset[i].period,
-        prev,
-        actual,
-        actualSize,
-        predicted,
+        period: item.period,
+        previousState: prevState,
+        pBig,
+        pSmall,
+        samplesUsed,
         predictedSize,
+        actual: item.number,
+        actualSize,
         isHit,
+        insufficient,
       });
+
+      // Update matrix AFTER generating prediction (anti-leakage)
+      matrix[prevState][actualSize]++;
     }
 
-    const total = activeDataset.length > 1 ? activeDataset.length - 1 : 0;
+    const total = details.filter((d) => !d.insufficient).length;
     const accuracy = total > 0 ? Math.round((hits / total) * 100) : 0;
-    return { hits, total, accuracy, details };
+
+    // Compute current state for dashboard display
+    const lastItem = sorted.length > 0 ? sorted[sorted.length - 1] : null;
+    const currentState = lastItem ? toBigSmall(lastItem.number) : null;
+    let currentPBig: number | null = null;
+    let currentPSmall: number | null = null;
+    if (currentState) {
+      const tot = matrix[currentState]['Big'] + matrix[currentState]['Small'];
+      if (tot >= MIN_MARKOV) {
+        currentPBig   = matrix[currentState]['Big']   / tot;
+        currentPSmall = matrix[currentState]['Small'] / tot;
+      }
+    }
+
+    // Latest prediction: last non-insufficient detail
+    const validDetails = details.filter((d) => !d.insufficient);
+    const latestPrediction = validDetails.length > 0 ? validDetails[validDetails.length - 1].predictedSize : null;
+
+    return { hits, total, accuracy, details, latestPrediction, currentState, currentPBig, currentPSmall };
   }, [activeDataset]);
 
   // Test C: Alternating Pattern Prediction: Predict opposite of previous size
@@ -760,7 +816,11 @@ export const AlgorithmAnalyzer: React.FC = () => {
   }, [testPeriodSum.details]);
 
   const streakStatsLinearRecurrence = useMemo(() => {
-    return calculateStreakStats(testLinearRecurrence.details.map((d) => (d.isHit ? 'H' : 'M')));
+    return calculateStreakStats(
+      testLinearRecurrence.details
+        .filter((d) => !d.insufficient)
+        .map((d) => (d.isHit ? 'H' : 'M'))
+    );
   }, [testLinearRecurrence.details]);
 
   const streakStatsAlternation = useMemo(() => {
@@ -791,7 +851,9 @@ export const AlgorithmAnalyzer: React.FC = () => {
     for (const d of testPeriodSum.details) t1Map.set(d.period, d.predictedSize);
 
     const t2Map = new Map<string, 'Big' | 'Small'>();
-    for (const d of testLinearRecurrence.details) t2Map.set(d.period, d.predictedSize);
+    for (const d of testLinearRecurrence.details) {
+      if (!d.insufficient) t2Map.set(d.period, d.predictedSize);
+    }
 
     const t3Map = new Map<string, 'Big' | 'Small'>();
     for (const d of testAlternation.details) t3Map.set(d.period, d.predictedSize);
@@ -800,7 +862,9 @@ export const AlgorithmAnalyzer: React.FC = () => {
     for (const d of test5.details) t5Map.set(d.period, d.predictedSize);
 
     const t6Map = new Map<string, 'Big' | 'Small'>();
-    for (const d of test6.details) t6Map.set(d.period, d.predictedSize);
+    for (const d of test6.details) {
+      if (!d.noSignal) t6Map.set(d.period, d.predictedSize);
+    }
 
     const t7Map = new Map<string, 'Big' | 'Small'>();
     for (const d of test7.details) t7Map.set(d.period, d.predictedSize);
@@ -851,15 +915,15 @@ export const AlgorithmAnalyzer: React.FC = () => {
   const signalSummaryData = useMemo(() => {
     return [
       { testNum: 1, label: 'Period Digit Sum', prediction: testPeriodSum.details.length > 0 ? testPeriodSum.details[testPeriodSum.details.length - 1]?.predictedSize ?? null : null },
-      { testNum: 2, label: 'Linear Recurrence', prediction: testLinearRecurrence.details.length > 0 ? testLinearRecurrence.details[testLinearRecurrence.details.length - 1]?.predictedSize ?? null : null },
+      { testNum: 2, label: 'Markov Chain', prediction: testLinearRecurrence.latestPrediction },
       { testNum: 3, label: 'Alternating Flip', prediction: testAlternation.details.length > 0 ? testAlternation.details[testAlternation.details.length - 1]?.predictedSize ?? null : null },
       { testNum: 4, label: 'Adaptive Learning', prediction: adaptiveLearning.history.length > 0 ? adaptiveLearning.history[adaptiveLearning.history.length - 1]?.t4pred ?? null : null },
       { testNum: 5, label: 'Digit Mix', prediction: test5.latestPrediction },
-      { testNum: 6, label: 'Round ID', prediction: test6.latestPrediction },
+      { testNum: 6, label: 'SMA-10', prediction: test6.latestPrediction },
       { testNum: 7, label: 'Round ID + Prev', prediction: test7.latestPrediction },
       { testNum: 8, label: 'Round ID + Streak', prediction: test8.latestPrediction },
     ];
-  }, [testPeriodSum.details, testLinearRecurrence.details, testAlternation.details, adaptiveLearning.history, test5.latestPrediction, test6.latestPrediction, test7.latestPrediction, test8.latestPrediction]);
+  }, [testPeriodSum.details, testLinearRecurrence.latestPrediction, testAlternation.details, adaptiveLearning.history, test5.latestPrediction, test6.latestPrediction, test7.latestPrediction, test8.latestPrediction]);
 
   return (
     <div className="space-y-8 animate-in fade-in duration-300">
@@ -1113,7 +1177,7 @@ export const AlgorithmAnalyzer: React.FC = () => {
                 : 'bg-[#06130F] text-[#8D9B95] hover:text-[#F5F5F5] border border-[#1E3A2B]'
             }`}
           >
-            Test 2: Linear Recurrence Mod 10
+            Test 2: Markov Chain
           </button>
 
           <button
@@ -1245,20 +1309,20 @@ export const AlgorithmAnalyzer: React.FC = () => {
         {/* Test 2 Table & Hit Rate */}
         {activeTestTab === 'linearDelta' && (
           <div className="space-y-4">
+            {/* Info bar */}
             <div className="flex flex-wrap items-center justify-between gap-4 p-4 rounded-xl bg-[#06130F] border border-[#1E3A2B]">
               <div>
                 <span className="font-mono font-bold text-xs text-[#F5F5F5]">
-                  Formula: (Prev_Number * 3 + 7) mod 10
+                  Markov Chain Transition Model
                 </span>
                 <p className="text-[11px] text-[#8D9B95] mt-0.5">
-                  Standard linear congruential multiplier tested for step-to-step dependence.
+                  P(next | prev) computed from historical transition counts only. Processed chronologically — no future data used. Min 5 samples required per state before prediction starts.
                 </p>
               </div>
-
               <div className="flex items-center gap-4 text-xs font-mono">
                 <div>
                   <span className="text-[#8D9B95] block text-[10px]">BIG/SMALL HIT RATE:</span>
-                  <span className="text-base font-bold text-[#F04444]">
+                  <span className={`text-base font-bold ${testLinearRecurrence.accuracy >= 50 ? 'text-[#35B978]' : 'text-[#F04444]'}`}>
                     {testLinearRecurrence.accuracy}% ({testLinearRecurrence.hits} / {testLinearRecurrence.total})
                   </span>
                 </div>
@@ -1269,61 +1333,91 @@ export const AlgorithmAnalyzer: React.FC = () => {
               </div>
             </div>
 
-            {/* Streak Analysis Panel */}
+            {/* Current Markov state */}
+            {testLinearRecurrence.currentState && (
+              <div className="p-4 rounded-xl bg-[#06130F] border border-[#1E3A2B] space-y-2">
+                <span className="text-[10px] font-mono uppercase font-bold text-[#8D9B95] tracking-wider block">Current Markov State</span>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs font-mono">
+                  <div className="p-2.5 rounded-lg bg-[#020806] border border-[#1E3A2B]/60 text-center">
+                    <span className="text-[10px] text-[#8D9B95] block">Current State</span>
+                    <span className={`text-base font-bold ${testLinearRecurrence.currentState === 'Big' ? 'text-[#E7B93F]' : 'text-[#60A5FA]'}`}>
+                      {testLinearRecurrence.currentState.toUpperCase()}
+                    </span>
+                  </div>
+                  <div className="p-2.5 rounded-lg bg-[#020806] border border-[#1E3A2B]/60 text-center">
+                    <span className="text-[10px] text-[#8D9B95] block">P(BIG | curr)</span>
+                    <span className="text-base font-bold text-[#E7B93F]">
+                      {testLinearRecurrence.currentPBig !== null ? `${Math.round(testLinearRecurrence.currentPBig * 1000) / 10}%` : '—'}
+                    </span>
+                  </div>
+                  <div className="p-2.5 rounded-lg bg-[#020806] border border-[#1E3A2B]/60 text-center">
+                    <span className="text-[10px] text-[#8D9B95] block">P(SMALL | curr)</span>
+                    <span className="text-base font-bold text-[#60A5FA]">
+                      {testLinearRecurrence.currentPSmall !== null ? `${Math.round(testLinearRecurrence.currentPSmall * 1000) / 10}%` : '—'}
+                    </span>
+                  </div>
+                  <div className="p-2.5 rounded-lg bg-[#020806] border border-[#1E3A2B]/60 text-center">
+                    <span className="text-[10px] text-[#8D9B95] block">Next Prediction</span>
+                    <span className={`text-base font-bold ${testLinearRecurrence.latestPrediction === 'Big' ? 'text-[#E7B93F]' : 'text-[#60A5FA]'}`}>
+                      {testLinearRecurrence.latestPrediction?.toUpperCase() ?? '—'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )}
+
             <StreakAnalysisPanel
               stats={streakStatsLinearRecurrence}
-              title="Linear Recurrence Mod 10"
+              title="Markov Chain Transition"
               id="streak_test2"
             />
 
             <CollapsibleCard
               id="test2_predictions_table"
               variant="subcard"
-              title={
-                <span className="font-mono text-xs font-bold text-[#F5F5F5]">
-                  Formula Evaluation Table (Test 2)
-                </span>
-              }
-              subtitle="Step-to-step recurrence prediction and hit outcome"
+              title={<span className="font-mono text-xs font-bold text-[#F5F5F5]">Markov Transition History (Test 2)</span>}
+              subtitle="Chronological predictions — transition probabilities built from prior rounds only"
             >
               <div className="overflow-x-auto rounded-lg border border-[#1E3A2B]/60">
                 <table className="w-full text-left text-xs font-mono">
                   <thead className="bg-[#06130F] text-[#8D9B95] uppercase text-[10px]">
                     <tr>
-                      <th className="py-2.5 px-4">Period</th>
-                      <th className="py-2.5 px-4">Previous Number</th>
-                      <th className="py-2.5 px-4">Actual (Digit → Size)</th>
-                      <th className="py-2.5 px-4">Prediction (Digit → Size)</th>
-                      <th className="py-2.5 px-4 text-right">Outcome</th>
+                      <th className="py-2.5 px-3">Period</th>
+                      <th className="py-2.5 px-3">Prev</th>
+                      <th className="py-2.5 px-3">P(BIG)</th>
+                      <th className="py-2.5 px-3">P(SML)</th>
+                      <th className="py-2.5 px-3">N</th>
+                      <th className="py-2.5 px-3">Pred</th>
+                      <th className="py-2.5 px-3">Actual</th>
+                      <th className="py-2.5 px-3 text-right">Result</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#1E3A2B]/40">
-                    {testLinearRecurrence.details.map((row, i) => (
-                      <tr key={i} className="hover:bg-[#06130F]/80">
-                        <td className="py-2 px-4 text-gray-300">{row.period}</td>
-                        <td className="py-2 px-4 text-gray-400">{row.prev}</td>
-                        <td className="py-2 px-4 font-bold text-[#E7B93F]">
-                          {row.actual}{' '}
-                          <span className="text-[10px] text-[#8D9B95]">→</span>{' '}
-                          <span className={row.actualSize === 'Big' ? 'text-[#E7B93F]' : 'text-[#60A5FA]'}>
-                            {row.actualSize.toUpperCase()}
-                          </span>
+                    {[...testLinearRecurrence.details].reverse().map((row, i) => (
+                      <tr key={i} className={`hover:bg-[#06130F]/80 ${row.insufficient ? 'opacity-40' : ''}`}>
+                        <td className="py-1.5 px-3 text-gray-300">{row.period.slice(-7)}</td>
+                        <td className={`py-1.5 px-3 font-medium ${row.previousState === 'Big' ? 'text-[#E7B93F]' : 'text-[#60A5FA]'}`}>
+                          {row.previousState === 'Big' ? 'B' : 'S'}
                         </td>
-                        <td className="py-2 px-4 text-gray-400">
-                          {row.predicted}{' '}
-                          <span className="text-[10px] text-[#8D9B95]">→</span>{' '}
-                          <span className={row.predictedSize === 'Big' ? 'text-[#E7B93F]' : 'text-[#60A5FA]'}>
-                            {row.predictedSize.toUpperCase()}
-                          </span>
+                        <td className="py-1.5 px-3 text-[#E7B93F]">{row.insufficient ? '—' : `${Math.round(row.pBig * 1000) / 10}%`}</td>
+                        <td className="py-1.5 px-3 text-[#60A5FA]">{row.insufficient ? '—' : `${Math.round(row.pSmall * 1000) / 10}%`}</td>
+                        <td className="py-1.5 px-3 text-gray-400">{row.samplesUsed}</td>
+                        <td className={`py-1.5 px-3 font-medium ${row.insufficient ? 'text-[#8D9B95]' : row.predictedSize === 'Big' ? 'text-[#E7B93F]' : 'text-[#60A5FA]'}`}>
+                          {row.insufficient ? '—' : (row.predictedSize === 'Big' ? 'BIG' : 'SML')}
                         </td>
-                        <td className="py-2 px-4 text-right">
-                          {row.isHit ? (
+                        <td className={`py-1.5 px-3 font-bold ${row.actualSize === 'Big' ? 'text-[#E7B93F]' : 'text-[#60A5FA]'}`}>
+                          {row.actualSize === 'Big' ? 'BIG' : 'SML'}
+                        </td>
+                        <td className="py-1.5 px-3 text-right">
+                          {row.insufficient ? (
+                            <span className="text-[#8D9B95] text-[10px]">INSUFF.</span>
+                          ) : row.isHit ? (
                             <span className="inline-flex items-center gap-1 text-[#35B978] font-bold">
-                              <CheckCircle2 className="w-3.5 h-3.5" /> Hit
+                              <CheckCircle2 className="w-3 h-3" /> Hit
                             </span>
                           ) : (
                             <span className="inline-flex items-center gap-1 text-[#F04444]">
-                              <XCircle className="w-3.5 h-3.5" /> Miss
+                              <XCircle className="w-3 h-3" /> Miss
                             </span>
                           )}
                         </td>
@@ -1332,6 +1426,7 @@ export const AlgorithmAnalyzer: React.FC = () => {
                   </tbody>
                 </table>
               </div>
+              <p className="text-[10px] text-[#8D9B95] font-sans mt-1.5">INSUFF. = fewer than 5 transitions observed from prior state — prediction excluded from accuracy and Test 4.</p>
             </CollapsibleCard>
           </div>
         )}
