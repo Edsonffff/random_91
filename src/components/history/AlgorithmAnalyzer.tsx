@@ -11,12 +11,392 @@ import {
   Radio,
   ChevronDown,
   ChevronUp,
+  Flame,
 } from 'lucide-react';
 
 interface RoundEntry {
   period: string;
   number: number;
 }
+
+interface StreakDistribution {
+  1: number;
+  2: number;
+  3: number;
+  4: number;
+  5: number;
+  6: number;
+  '7+': number;
+}
+
+interface StreakStats {
+  totalPredictions: number;
+  totalHits: number;
+  totalMisses: number;
+  accuracyPct: number;
+  currentHitStreak: number;
+  currentMissStreak: number;
+  currentRunText: string;
+  currentRunType: 'HIT' | 'MISS' | 'NONE';
+  currentRunLength: number;
+  longestHitStreak: number;
+  longestMissStreak: number;
+  hitStreakCount: number;
+  missStreakCount: number;
+  hitStreaks: number[];
+  missStreaks: number[];
+  avgHitStreak: number;
+  avgMissStreak: number;
+  hitDistribution: StreakDistribution;
+  missDistribution: StreakDistribution;
+  sequenceStr: string;
+  rawSequence: ('H' | 'M')[];
+}
+
+const DISTRIBUTION_KEYS: (1 | 2 | 3 | 4 | 5 | 6 | '7+')[] = [1, 2, 3, 4, 5, 6, '7+'];
+
+function calculateStreakStats(outcomes: ('H' | 'M')[]): StreakStats {
+  const totalPredictions = outcomes.length;
+  if (totalPredictions === 0) {
+    return {
+      totalPredictions: 0,
+      totalHits: 0,
+      totalMisses: 0,
+      accuracyPct: 0,
+      currentHitStreak: 0,
+      currentMissStreak: 0,
+      currentRunText: '0',
+      currentRunType: 'NONE',
+      currentRunLength: 0,
+      longestHitStreak: 0,
+      longestMissStreak: 0,
+      hitStreakCount: 0,
+      missStreakCount: 0,
+      hitStreaks: [],
+      missStreaks: [],
+      avgHitStreak: 0,
+      avgMissStreak: 0,
+      hitDistribution: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, '7+': 0 },
+      missDistribution: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, '7+': 0 },
+      sequenceStr: '',
+      rawSequence: [],
+    };
+  }
+
+  let totalHits = 0;
+  let totalMisses = 0;
+  const hitStreaks: number[] = [];
+  const missStreaks: number[] = [];
+
+  let currentStreakType: 'H' | 'M' = outcomes[0];
+  let currentLen = 0;
+
+  for (let i = 0; i < outcomes.length; i++) {
+    const outcome = outcomes[i];
+    if (outcome === 'H') totalHits++;
+    else totalMisses++;
+
+    if (outcome === currentStreakType) {
+      currentLen++;
+    } else {
+      if (currentStreakType === 'H') {
+        hitStreaks.push(currentLen);
+      } else {
+        missStreaks.push(currentLen);
+      }
+      currentStreakType = outcome;
+      currentLen = 1;
+    }
+  }
+
+  if (currentLen > 0) {
+    if (currentStreakType === 'H') {
+      hitStreaks.push(currentLen);
+    } else {
+      missStreaks.push(currentLen);
+    }
+  }
+
+  const finalOutcome = outcomes[outcomes.length - 1];
+  const currentHitStreak = finalOutcome === 'H' ? currentLen : 0;
+  const currentMissStreak = finalOutcome === 'M' ? currentLen : 0;
+  const currentRunType = finalOutcome === 'H' ? 'HIT' : 'MISS';
+  const currentRunLength = currentLen;
+  const currentRunText = `${currentLen} ${currentRunType}`;
+
+  const longestHitStreak = hitStreaks.length > 0 ? Math.max(...hitStreaks) : 0;
+  const longestMissStreak = missStreaks.length > 0 ? Math.max(...missStreaks) : 0;
+
+  const hitStreakCount = hitStreaks.length;
+  const missStreakCount = missStreaks.length;
+
+  const sumHitLengths = hitStreaks.reduce((acc, v) => acc + v, 0);
+  const sumMissLengths = missStreaks.reduce((acc, v) => acc + v, 0);
+
+  const avgHitStreak = hitStreakCount > 0 ? Number((sumHitLengths / hitStreakCount).toFixed(1)) : 0;
+  const avgMissStreak = missStreakCount > 0 ? Number((sumMissLengths / missStreakCount).toFixed(1)) : 0;
+
+  const hitDistribution: StreakDistribution = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, '7+': 0 };
+  const missDistribution: StreakDistribution = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, '7+': 0 };
+
+  for (const len of hitStreaks) {
+    if (len >= 7) hitDistribution['7+']++;
+    else hitDistribution[len as 1 | 2 | 3 | 4 | 5 | 6]++;
+  }
+
+  for (const len of missStreaks) {
+    if (len >= 7) missDistribution['7+']++;
+    else missDistribution[len as 1 | 2 | 3 | 4 | 5 | 6]++;
+  }
+
+  const accuracyPct = Math.round((totalHits / totalPredictions) * 100);
+
+  return {
+    totalPredictions,
+    totalHits,
+    totalMisses,
+    accuracyPct,
+    currentHitStreak,
+    currentMissStreak,
+    currentRunText,
+    currentRunType,
+    currentRunLength,
+    longestHitStreak,
+    longestMissStreak,
+    hitStreakCount,
+    missStreakCount,
+    hitStreaks,
+    missStreaks,
+    avgHitStreak,
+    avgMissStreak,
+    hitDistribution,
+    missDistribution,
+    sequenceStr: outcomes.join(' '),
+    rawSequence: outcomes,
+  };
+}
+
+const StreakAnalysisPanel: React.FC<{ stats: StreakStats; title?: string }> = ({ stats, title }) => {
+  const maxHitFreq = Math.max(1, ...Object.values(stats.hitDistribution));
+  const maxMissFreq = Math.max(1, ...Object.values(stats.missDistribution));
+
+  return (
+    <div className="p-4 sm:p-5 rounded-xl bg-[#06130F] border border-[#1E3A2B] space-y-4">
+      {/* Header with Title and Current Run */}
+      <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-[#1E3A2B]/60">
+        <div className="flex items-center gap-2">
+          <Flame className="w-4 h-4 text-[#E7B93F]" />
+          <span className="text-xs font-mono font-bold uppercase tracking-wider text-[#F5F5F5]">
+            STREAK ANALYSIS {title ? `• ${title}` : ''}
+          </span>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] text-[#8D9B95] font-mono">Current Run:</span>
+          <span
+            className={`px-2.5 py-0.5 rounded text-xs font-mono font-bold border ${
+              stats.totalPredictions === 0
+                ? 'bg-[#1E3A2B]/40 text-[#8D9B95] border-[#1E3A2B]'
+                : stats.currentRunType === 'HIT'
+                ? 'bg-[#35B978]/20 text-[#35B978] border-[#35B978]/40 shadow-sm'
+                : 'bg-[#F04444]/20 text-[#F04444] border-[#F04444]/40 shadow-sm'
+            }`}
+          >
+            {stats.totalPredictions === 0 ? '0' : stats.currentRunText}
+          </span>
+        </div>
+      </div>
+
+      {/* 3 Metrics Sections: CURRENT | RECORDS | SUMMARY */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+        {/* CURRENT */}
+        <div className="p-3 rounded-lg bg-[#071A14] border border-[#1E3A2B] space-y-2">
+          <span className="text-[10px] font-mono uppercase font-bold text-[#8D9B95] tracking-wider block">
+            CURRENT
+          </span>
+          <div className="grid grid-cols-2 gap-2">
+            <div className="p-2 rounded bg-[#06130F] border border-[#1E3A2B]/60">
+              <span className="text-[10px] text-[#8D9B95] block">Hit Streak</span>
+              <span className="font-mono text-base font-extrabold text-[#35B978]">
+                {stats.currentHitStreak}
+              </span>
+            </div>
+            <div className="p-2 rounded bg-[#06130F] border border-[#1E3A2B]/60">
+              <span className="text-[10px] text-[#8D9B95] block">Miss Streak</span>
+              <span className="font-mono text-base font-extrabold text-[#F04444]">
+                {stats.currentMissStreak}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* RECORDS */}
+        <div className="p-3 rounded-lg bg-[#071A14] border border-[#1E3A2B] space-y-2">
+          <span className="text-[10px] font-mono uppercase font-bold text-[#8D9B95] tracking-wider block">
+            RECORDS
+          </span>
+          <div className="grid grid-cols-2 gap-2">
+            <div className="p-2 rounded bg-[#06130F] border border-[#1E3A2B]/60">
+              <span className="text-[10px] text-[#8D9B95] block">Longest Hit Streak</span>
+              <span className="font-mono text-base font-extrabold text-[#35B978]">
+                {stats.longestHitStreak}
+              </span>
+            </div>
+            <div className="p-2 rounded bg-[#06130F] border border-[#1E3A2B]/60">
+              <span className="text-[10px] text-[#8D9B95] block">Longest Miss Streak</span>
+              <span className="font-mono text-base font-extrabold text-[#F04444]">
+                {stats.longestMissStreak}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* SUMMARY */}
+        <div className="p-3 rounded-lg bg-[#071A14] border border-[#1E3A2B] space-y-2">
+          <span className="text-[10px] font-mono uppercase font-bold text-[#8D9B95] tracking-wider block">
+            SUMMARY
+          </span>
+          <div className="grid grid-cols-2 gap-2">
+            <div className="p-2 rounded bg-[#06130F] border border-[#1E3A2B]/60">
+              <span className="text-[10px] text-[#8D9B95] block">Total Hit Streaks</span>
+              <div className="font-mono font-bold text-[#F5F5F5]">
+                <span className="text-sm text-[#35B978]">{stats.hitStreakCount}</span>
+                <span className="text-[10px] text-[#8D9B95] block mt-0.5">
+                  Avg: {stats.avgHitStreak}
+                </span>
+              </div>
+            </div>
+            <div className="p-2 rounded bg-[#06130F] border border-[#1E3A2B]/60">
+              <span className="text-[10px] text-[#8D9B95] block">Total Miss Streaks</span>
+              <div className="font-mono font-bold text-[#F5F5F5]">
+                <span className="text-sm text-[#F04444]">{stats.missStreakCount}</span>
+                <span className="text-[10px] text-[#8D9B95] block mt-0.5">
+                  Avg: {stats.avgMissStreak}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* DISTRIBUTION Section with compact horizontal bars */}
+      <div className="space-y-2">
+        <span className="text-[10px] font-mono uppercase font-bold text-[#8D9B95] tracking-wider block">
+          DISTRIBUTION
+        </span>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+          {/* Hit Streaks Distribution */}
+          <div className="p-3 rounded-lg bg-[#071A14] border border-[#1E3A2B] space-y-2">
+            <div className="flex items-center justify-between text-[11px]">
+              <span className="font-mono font-bold text-[#35B978]">
+                Hit Streaks (H)
+              </span>
+              <span className="font-mono text-[10px] text-[#8D9B95]">
+                {stats.hitStreakCount} streaks • {stats.totalHits} total hits
+              </span>
+            </div>
+            <div className="space-y-1 pt-1">
+              {DISTRIBUTION_KEYS.map((key) => {
+                const count = stats.hitDistribution[key];
+                const pct = stats.hitStreakCount > 0 ? Math.round((count / stats.hitStreakCount) * 100) : 0;
+                const barWidth = maxHitFreq > 0 ? Math.round((count / maxHitFreq) * 100) : 0;
+                return (
+                  <div key={key} className="flex items-center gap-2 text-[11px] font-mono py-0.5">
+                    <span className="w-5 text-right text-[#8D9B95] font-semibold text-[10px]">{key}</span>
+                    <div className="flex-1 h-2.5 rounded bg-[#020806] overflow-hidden border border-[#1E3A2B]/50">
+                      <div
+                        className="h-full bg-[#35B978] transition-all duration-300 rounded-sm"
+                        style={{ width: `${barWidth}%` }}
+                      />
+                    </div>
+                    <span className="w-16 text-right font-mono text-[10px]">
+                      <span className={count > 0 ? 'font-bold text-[#F5F5F5]' : 'text-[#8D9B95]/50'}>{count}</span>
+                      <span className="text-[#8D9B95] ml-1">({pct}%)</span>
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Miss Streaks Distribution */}
+          <div className="p-3 rounded-lg bg-[#071A14] border border-[#1E3A2B] space-y-2">
+            <div className="flex items-center justify-between text-[11px]">
+              <span className="font-mono font-bold text-[#F04444]">
+                Miss Streaks (M)
+              </span>
+              <span className="font-mono text-[10px] text-[#8D9B95]">
+                {stats.missStreakCount} streaks • {stats.totalMisses} total misses
+              </span>
+            </div>
+            <div className="space-y-1 pt-1">
+              {DISTRIBUTION_KEYS.map((key) => {
+                const count = stats.missDistribution[key];
+                const pct = stats.missStreakCount > 0 ? Math.round((count / stats.missStreakCount) * 100) : 0;
+                const barWidth = maxMissFreq > 0 ? Math.round((count / maxMissFreq) * 100) : 0;
+                return (
+                  <div key={key} className="flex items-center gap-2 text-[11px] font-mono py-0.5">
+                    <span className="w-5 text-right text-[#8D9B95] font-semibold text-[10px]">{key}</span>
+                    <div className="flex-1 h-2.5 rounded bg-[#020806] overflow-hidden border border-[#1E3A2B]/50">
+                      <div
+                        className="h-full bg-[#F04444] transition-all duration-300 rounded-sm"
+                        style={{ width: `${barWidth}%` }}
+                      />
+                    </div>
+                    <span className="w-16 text-right font-mono text-[10px]">
+                      <span className={count > 0 ? 'font-bold text-[#F5F5F5]' : 'text-[#8D9B95]/50'}>{count}</span>
+                      <span className="text-[#8D9B95] ml-1">({pct}%)</span>
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Internal Sequence Container for verification */}
+      <div className="p-3 rounded-lg bg-[#071A14] border border-[#1E3A2B] space-y-1.5">
+        <div className="flex flex-wrap items-center justify-between text-[11px] gap-2">
+          <span className="text-[#8D9B95] uppercase font-semibold">
+            Sequence Used for Streak Calculation ({stats.totalPredictions} predictions):
+          </span>
+          <span className="font-mono text-[10px] text-[#8D9B95]">
+            <span className="text-[#35B978] font-bold">H</span> = Hit ({stats.totalHits}) •{' '}
+            <span className="text-[#F04444] font-bold">M</span> = Miss ({stats.totalMisses})
+          </span>
+        </div>
+        <div
+          className="h-16 overflow-y-auto overflow-x-hidden p-2 rounded bg-[#020806] border border-[#1E3A2B]/60 font-mono text-xs select-text leading-relaxed tracking-wider break-words"
+          style={{ scrollbarWidth: 'thin', scrollbarColor: '#35B978 #020806' }}
+        >
+          {stats.rawSequence.map((outcome, idx) => (
+            <span
+              key={idx}
+              className={`inline-block mr-1 font-bold ${
+                outcome === 'H' ? 'text-[#35B978]' : 'text-[#F04444]'
+              }`}
+            >
+              {outcome}
+            </span>
+          ))}
+          {stats.rawSequence.length === 0 && (
+            <span className="text-[#8D9B95] text-xs">No prediction data available</span>
+          )}
+        </div>
+      </div>
+
+      {/* Statistical Integrity Disclaimer */}
+      <div className="text-[11px] text-[#8D9B95] flex items-start gap-1.5 px-0.5 font-sans pt-1">
+        <span className="text-[#E7B93F] font-bold shrink-0">ℹ</span>
+        <span>
+          <strong>Empirical Probability Note:</strong> Observed streaks represent past statistical variance.
+          Consecutive misses do <em>not</em> increase the mathematical probability of a hit on the next round (independence of trials / Gambler&apos;s Fallacy).
+        </span>
+      </div>
+    </div>
+  );
+};
 
 // Sample 1: Earlier 10 rounds from the first Big Mumbai screenshot
 const SAMPLE_1_EVIDENCE: RoundEntry[] = [
@@ -239,6 +619,18 @@ export const AlgorithmAnalyzer: React.FC = () => {
     const accuracy = total > 0 ? Math.round((hits / total) * 100) : 0;
     return { hits, total, accuracy, details };
   }, [activeDataset]);
+
+  const streakStatsPeriodSum = useMemo(() => {
+    return calculateStreakStats(testPeriodSum.details.map((d) => (d.isHit ? 'H' : 'M')));
+  }, [testPeriodSum.details]);
+
+  const streakStatsLinearRecurrence = useMemo(() => {
+    return calculateStreakStats(testLinearRecurrence.details.map((d) => (d.isHit ? 'H' : 'M')));
+  }, [testLinearRecurrence.details]);
+
+  const streakStatsAlternation = useMemo(() => {
+    return calculateStreakStats(testAlternation.details.map((d) => (d.isHit ? 'H' : 'M')));
+  }, [testAlternation.details]);
 
   return (
     <div className="space-y-8 animate-in fade-in duration-300">
@@ -526,6 +918,9 @@ export const AlgorithmAnalyzer: React.FC = () => {
               </div>
             </div>
 
+            {/* Streak Analysis Panel */}
+            <StreakAnalysisPanel stats={streakStatsPeriodSum} title="Period Digit Sum Mod 10" />
+
             <div className="overflow-x-auto rounded-xl border border-[#1E3A2B]">
               <table className="w-full text-left text-xs font-mono">
                 <thead className="bg-[#06130F] text-[#8D9B95] uppercase text-[10px]">
@@ -587,6 +982,9 @@ export const AlgorithmAnalyzer: React.FC = () => {
                 </div>
               </div>
             </div>
+
+            {/* Streak Analysis Panel */}
+            <StreakAnalysisPanel stats={streakStatsLinearRecurrence} title="Linear Recurrence Mod 10" />
 
             <div className="overflow-x-auto rounded-xl border border-[#1E3A2B]">
               <table className="w-full text-left text-xs font-mono">
@@ -651,6 +1049,9 @@ export const AlgorithmAnalyzer: React.FC = () => {
                 </div>
               </div>
             </div>
+
+            {/* Streak Analysis Panel */}
+            <StreakAnalysisPanel stats={streakStatsAlternation} title="Alternating Streak Flip" />
 
             <div className="overflow-x-auto rounded-xl border border-[#1E3A2B]">
               <table className="w-full text-left text-xs font-mono">
