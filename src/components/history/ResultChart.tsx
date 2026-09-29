@@ -4,6 +4,7 @@ import { SUPPORTED_GAMES } from '../../types/result';
 import { ColorBadge } from '../common/ColorBadge';
 import { SizeBadge } from '../common/SizeBadge';
 import { BarChart3, LineChart as LineChartIcon } from 'lucide-react';
+import { CollapsibleCard } from '../common/CollapsibleCard';
 
 interface ResultChartProps {
   results: TestResult[];
@@ -59,13 +60,22 @@ export const ResultChart: React.FC<ResultChartProps> = ({
   const yTicks = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
 
   return (
-    <div className="bg-[#071A14] border border-[#1E3A2B] rounded-2xl p-6 shadow-xl space-y-6">
-      {/* Top Controls & Filters */}
-      <div className="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-[#1E3A2B]">
+    <CollapsibleCard
+      id="results_trend_chart"
+      title={
+        <div className="flex items-center gap-2">
+          <LineChartIcon className="w-4 h-4 text-[#E7B93F]" />
+          <h3 className="text-sm font-bold text-[#F5F5F5] uppercase tracking-wider">
+            Results Trend & Distribution Chart
+          </h3>
+        </div>
+      }
+      subtitle={`Visualizing winning digit patterns for ${activeGame.name}`}
+      headerRight={
         <div className="flex flex-wrap items-center gap-3">
           {/* Game selector */}
           <div className="flex items-center gap-2">
-            <span className="text-xs font-semibold uppercase tracking-wider text-[#8D9B95]">
+            <span className="text-xs font-semibold uppercase tracking-wider text-[#8D9B95] hidden sm:inline">
               Game:
             </span>
             <select
@@ -74,7 +84,7 @@ export const ResultChart: React.FC<ResultChartProps> = ({
                 const found = SUPPORTED_GAMES.find((g) => g.code === e.target.value);
                 if (found) onSelectGame(found);
               }}
-              className="bg-[#06130F] border border-[#1E3A2B] rounded-lg px-3 py-1.5 text-xs text-[#F5F5F5] font-medium focus:outline-none focus:border-[#E7B93F]"
+              className="bg-[#06130F] border border-[#1E3A2B] rounded-lg px-2.5 py-1 text-xs text-[#F5F5F5] font-medium focus:outline-none focus:border-[#E7B93F]"
             >
               {SUPPORTED_GAMES.map((g) => (
                 <option key={g.code} value={g.code}>
@@ -85,13 +95,13 @@ export const ResultChart: React.FC<ResultChartProps> = ({
           </div>
 
           {/* Results count limit */}
-          <div className="flex items-center gap-1.5 bg-[#06130F] p-1 rounded-lg border border-[#1E3A2B]">
+          <div className="flex items-center gap-1 bg-[#06130F] p-1 rounded-lg border border-[#1E3A2B]">
             {[10, 25, 50].map((count) => (
               <button
                 key={count}
                 type="button"
                 onClick={() => setLimit(count)}
-                className={`px-2.5 py-1 rounded text-xs font-medium transition-colors cursor-pointer ${
+                className={`px-2 py-0.5 rounded text-xs font-medium transition-colors cursor-pointer ${
                   limit === count
                     ? 'bg-[#E7B93F] text-[#020806] font-bold shadow'
                     : 'text-[#8D9B95] hover:text-[#F5F5F5]'
@@ -101,36 +111,38 @@ export const ResultChart: React.FC<ResultChartProps> = ({
               </button>
             ))}
           </div>
-        </div>
 
-        {/* Chart type toggle */}
-        <div className="flex items-center gap-1 bg-[#06130F] p-1 rounded-lg border border-[#1E3A2B]">
-          <button
-            type="button"
-            onClick={() => setChartType('line')}
-            className={`p-1.5 rounded transition-colors cursor-pointer ${
-              chartType === 'line'
-                ? 'bg-[#1E3A2B] text-[#E7B93F]'
-                : 'text-[#8D9B95] hover:text-[#F5F5F5]'
-            }`}
-            title="Line View"
-          >
-            <LineChartIcon className="w-4 h-4" />
-          </button>
-          <button
-            type="button"
-            onClick={() => setChartType('bar')}
-            className={`p-1.5 rounded transition-colors cursor-pointer ${
-              chartType === 'bar'
-                ? 'bg-[#1E3A2B] text-[#E7B93F]'
-                : 'text-[#8D9B95] hover:text-[#F5F5F5]'
-            }`}
-            title="Bar View"
-          >
-            <BarChart3 className="w-4 h-4" />
-          </button>
+          {/* Chart type toggle */}
+          <div className="flex items-center gap-1 bg-[#06130F] p-1 rounded-lg border border-[#1E3A2B]">
+            <button
+              type="button"
+              onClick={() => setChartType('line')}
+              className={`p-1.5 rounded transition-colors cursor-pointer ${
+                chartType === 'line'
+                  ? 'bg-[#1E3A2B] text-[#E7B93F]'
+                  : 'text-[#8D9B95] hover:text-[#F5F5F5]'
+              }`}
+              title="Line View"
+            >
+              <LineChartIcon className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => setChartType('bar')}
+              className={`p-1.5 rounded transition-colors cursor-pointer ${
+                chartType === 'bar'
+                  ? 'bg-[#1E3A2B] text-[#E7B93F]'
+                  : 'text-[#8D9B95] hover:text-[#F5F5F5]'
+              }`}
+              title="Bar View"
+            >
+              <BarChart3 className="w-3.5 h-3.5" />
+            </button>
+          </div>
         </div>
-      </div>
+      }
+      bodyClassName="p-5 sm:p-6 space-y-4"
+    >
 
       {/* SVG Chart Area */}
       {chartData.length === 0 ? (
@@ -307,6 +319,6 @@ export const ResultChart: React.FC<ResultChartProps> = ({
           )}
         </div>
       )}
-    </div>
+    </CollapsibleCard>
   );
 };

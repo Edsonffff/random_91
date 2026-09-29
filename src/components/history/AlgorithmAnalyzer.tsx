@@ -13,6 +13,7 @@ import {
   ChevronUp,
   Flame,
 } from 'lucide-react';
+import { CollapsibleCard } from '../common/CollapsibleCard';
 
 interface RoundEntry {
   period: string;
@@ -176,22 +177,62 @@ function calculateStreakStats(outcomes: ('H' | 'M')[]): StreakStats {
   };
 }
 
-const StreakAnalysisPanel: React.FC<{ stats: StreakStats; title?: string }> = ({ stats, title }) => {
+const StreakAnalysisPanel: React.FC<{ stats: StreakStats; title?: string; id?: string }> = ({
+  stats,
+  title,
+  id = 'streak_panel',
+}) => {
+  const [isExpanded, setIsExpanded] = useState<boolean>(() => {
+    try {
+      const stored = sessionStorage.getItem(`collapse_sec_${id}`);
+      if (stored !== null) return stored === 'true';
+    } catch {}
+    return true;
+  });
+
+  const toggle = () => {
+    setIsExpanded((prev) => {
+      const next = !prev;
+      try {
+        sessionStorage.setItem(`collapse_sec_${id}`, String(next));
+      } catch {}
+      return next;
+    });
+  };
+
   const maxHitFreq = Math.max(1, ...Object.values(stats.hitDistribution));
   const maxMissFreq = Math.max(1, ...Object.values(stats.missDistribution));
 
   return (
-    <div className="p-4 sm:p-5 rounded-xl bg-[#06130F] border border-[#1E3A2B] space-y-4">
+    <div className="rounded-xl bg-[#06130F] border border-[#1E3A2B] overflow-hidden transition-colors">
       {/* Header with Title and Current Run */}
-      <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-[#1E3A2B]/60">
-        <div className="flex items-center gap-2">
-          <Flame className="w-4 h-4 text-[#E7B93F]" />
-          <span className="text-xs font-mono font-bold uppercase tracking-wider text-[#F5F5F5]">
+      <div
+        className={`p-3.5 sm:p-4 flex flex-wrap items-center justify-between gap-3 ${
+          isExpanded ? 'border-b border-[#1E3A2B]/60' : ''
+        }`}
+      >
+        <div className="flex items-center gap-2 min-w-0">
+          <button
+            type="button"
+            onClick={toggle}
+            aria-expanded={isExpanded}
+            className="w-5 h-5 flex items-center justify-center rounded text-[#8D9B95] hover:text-[#E7B93F] hover:bg-[#1E3A2B]/50 transition-colors cursor-pointer select-none shrink-0"
+            title={isExpanded ? 'Collapse section' : 'Expand section'}
+          >
+            <span className="text-[10px] font-sans inline-block select-none">
+              {isExpanded ? '▼' : '▶'}
+            </span>
+          </button>
+          <Flame className="w-4 h-4 text-[#E7B93F] shrink-0" />
+          <span
+            onClick={toggle}
+            className="text-xs font-mono font-bold uppercase tracking-wider text-[#F5F5F5] cursor-pointer select-none truncate"
+          >
             STREAK ANALYSIS {title ? `• ${title}` : ''}
           </span>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 shrink-0">
           <span className="text-[11px] text-[#8D9B95] font-mono">Current Run:</span>
           <span
             className={`px-2.5 py-0.5 rounded text-xs font-mono font-bold border ${
@@ -207,192 +248,203 @@ const StreakAnalysisPanel: React.FC<{ stats: StreakStats; title?: string }> = ({
         </div>
       </div>
 
-      {/* 3 Metrics Sections: CURRENT | RECORDS | SUMMARY */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
-        {/* CURRENT */}
-        <div className="p-3 rounded-lg bg-[#071A14] border border-[#1E3A2B] space-y-2">
-          <span className="text-[10px] font-mono uppercase font-bold text-[#8D9B95] tracking-wider block">
-            CURRENT
-          </span>
-          <div className="grid grid-cols-2 gap-2">
-            <div className="p-2 rounded bg-[#06130F] border border-[#1E3A2B]/60">
-              <span className="text-[10px] text-[#8D9B95] block">Hit Streak</span>
-              <span className="font-mono text-base font-extrabold text-[#35B978]">
-                {stats.currentHitStreak}
-              </span>
-            </div>
-            <div className="p-2 rounded bg-[#06130F] border border-[#1E3A2B]/60">
-              <span className="text-[10px] text-[#8D9B95] block">Miss Streak</span>
-              <span className="font-mono text-base font-extrabold text-[#F04444]">
-                {stats.currentMissStreak}
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {/* RECORDS */}
-        <div className="p-3 rounded-lg bg-[#071A14] border border-[#1E3A2B] space-y-2">
-          <span className="text-[10px] font-mono uppercase font-bold text-[#8D9B95] tracking-wider block">
-            RECORDS
-          </span>
-          <div className="grid grid-cols-2 gap-2">
-            <div className="p-2 rounded bg-[#06130F] border border-[#1E3A2B]/60">
-              <span className="text-[10px] text-[#8D9B95] block">Longest Hit Streak</span>
-              <span className="font-mono text-base font-extrabold text-[#35B978]">
-                {stats.longestHitStreak}
-              </span>
-            </div>
-            <div className="p-2 rounded bg-[#06130F] border border-[#1E3A2B]/60">
-              <span className="text-[10px] text-[#8D9B95] block">Longest Miss Streak</span>
-              <span className="font-mono text-base font-extrabold text-[#F04444]">
-                {stats.longestMissStreak}
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {/* SUMMARY */}
-        <div className="p-3 rounded-lg bg-[#071A14] border border-[#1E3A2B] space-y-2">
-          <span className="text-[10px] font-mono uppercase font-bold text-[#8D9B95] tracking-wider block">
-            SUMMARY
-          </span>
-          <div className="grid grid-cols-2 gap-2">
-            <div className="p-2 rounded bg-[#06130F] border border-[#1E3A2B]/60">
-              <span className="text-[10px] text-[#8D9B95] block">Total Hit Streaks</span>
-              <div className="font-mono font-bold text-[#F5F5F5]">
-                <span className="text-sm text-[#35B978]">{stats.hitStreakCount}</span>
-                <span className="text-[10px] text-[#8D9B95] block mt-0.5">
-                  Avg: {stats.avgHitStreak}
+      {/* Collapsible Content with smooth CSS Grid height transition */}
+      <div
+        className={`grid transition-[grid-template-rows,opacity] duration-300 ease-in-out ${
+          isExpanded ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0 pointer-events-none'
+        }`}
+      >
+        <div className="overflow-hidden min-h-0">
+          <div className="p-4 sm:p-5 space-y-4">
+            {/* 3 Metrics Sections: CURRENT | RECORDS | SUMMARY */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+              {/* CURRENT */}
+              <div className="p-3 rounded-lg bg-[#071A14] border border-[#1E3A2B] space-y-2">
+                <span className="text-[10px] font-mono uppercase font-bold text-[#8D9B95] tracking-wider block">
+                  CURRENT
                 </span>
-              </div>
-            </div>
-            <div className="p-2 rounded bg-[#06130F] border border-[#1E3A2B]/60">
-              <span className="text-[10px] text-[#8D9B95] block">Total Miss Streaks</span>
-              <div className="font-mono font-bold text-[#F5F5F5]">
-                <span className="text-sm text-[#F04444]">{stats.missStreakCount}</span>
-                <span className="text-[10px] text-[#8D9B95] block mt-0.5">
-                  Avg: {stats.avgMissStreak}
-                </span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* DISTRIBUTION Section with compact horizontal bars */}
-      <div className="space-y-2">
-        <span className="text-[10px] font-mono uppercase font-bold text-[#8D9B95] tracking-wider block">
-          DISTRIBUTION
-        </span>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
-          {/* Hit Streaks Distribution */}
-          <div className="p-3 rounded-lg bg-[#071A14] border border-[#1E3A2B] space-y-2">
-            <div className="flex items-center justify-between text-[11px]">
-              <span className="font-mono font-bold text-[#35B978]">
-                Hit Streaks (H)
-              </span>
-              <span className="font-mono text-[10px] text-[#8D9B95]">
-                {stats.hitStreakCount} streaks • {stats.totalHits} total hits
-              </span>
-            </div>
-            <div className="space-y-1 pt-1">
-              {DISTRIBUTION_KEYS.map((key) => {
-                const count = stats.hitDistribution[key];
-                const pct = stats.hitStreakCount > 0 ? Math.round((count / stats.hitStreakCount) * 100) : 0;
-                const barWidth = maxHitFreq > 0 ? Math.round((count / maxHitFreq) * 100) : 0;
-                return (
-                  <div key={key} className="flex items-center gap-2 text-[11px] font-mono py-0.5">
-                    <span className="w-5 text-right text-[#8D9B95] font-semibold text-[10px]">{key}</span>
-                    <div className="flex-1 h-2.5 rounded bg-[#020806] overflow-hidden border border-[#1E3A2B]/50">
-                      <div
-                        className="h-full bg-[#35B978] transition-all duration-300 rounded-sm"
-                        style={{ width: `${barWidth}%` }}
-                      />
-                    </div>
-                    <span className="w-16 text-right font-mono text-[10px]">
-                      <span className={count > 0 ? 'font-bold text-[#F5F5F5]' : 'text-[#8D9B95]/50'}>{count}</span>
-                      <span className="text-[#8D9B95] ml-1">({pct}%)</span>
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="p-2 rounded bg-[#06130F] border border-[#1E3A2B]/60">
+                    <span className="text-[10px] text-[#8D9B95] block">Hit Streak</span>
+                    <span className="font-mono text-base font-extrabold text-[#35B978]">
+                      {stats.currentHitStreak}
                     </span>
                   </div>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Miss Streaks Distribution */}
-          <div className="p-3 rounded-lg bg-[#071A14] border border-[#1E3A2B] space-y-2">
-            <div className="flex items-center justify-between text-[11px]">
-              <span className="font-mono font-bold text-[#F04444]">
-                Miss Streaks (M)
-              </span>
-              <span className="font-mono text-[10px] text-[#8D9B95]">
-                {stats.missStreakCount} streaks • {stats.totalMisses} total misses
-              </span>
-            </div>
-            <div className="space-y-1 pt-1">
-              {DISTRIBUTION_KEYS.map((key) => {
-                const count = stats.missDistribution[key];
-                const pct = stats.missStreakCount > 0 ? Math.round((count / stats.missStreakCount) * 100) : 0;
-                const barWidth = maxMissFreq > 0 ? Math.round((count / maxMissFreq) * 100) : 0;
-                return (
-                  <div key={key} className="flex items-center gap-2 text-[11px] font-mono py-0.5">
-                    <span className="w-5 text-right text-[#8D9B95] font-semibold text-[10px]">{key}</span>
-                    <div className="flex-1 h-2.5 rounded bg-[#020806] overflow-hidden border border-[#1E3A2B]/50">
-                      <div
-                        className="h-full bg-[#F04444] transition-all duration-300 rounded-sm"
-                        style={{ width: `${barWidth}%` }}
-                      />
-                    </div>
-                    <span className="w-16 text-right font-mono text-[10px]">
-                      <span className={count > 0 ? 'font-bold text-[#F5F5F5]' : 'text-[#8D9B95]/50'}>{count}</span>
-                      <span className="text-[#8D9B95] ml-1">({pct}%)</span>
+                  <div className="p-2 rounded bg-[#06130F] border border-[#1E3A2B]/60">
+                    <span className="text-[10px] text-[#8D9B95] block">Miss Streak</span>
+                    <span className="font-mono text-base font-extrabold text-[#F04444]">
+                      {stats.currentMissStreak}
                     </span>
                   </div>
-                );
-              })}
+                </div>
+              </div>
+
+              {/* RECORDS */}
+              <div className="p-3 rounded-lg bg-[#071A14] border border-[#1E3A2B] space-y-2">
+                <span className="text-[10px] font-mono uppercase font-bold text-[#8D9B95] tracking-wider block">
+                  RECORDS
+                </span>
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="p-2 rounded bg-[#06130F] border border-[#1E3A2B]/60">
+                    <span className="text-[10px] text-[#8D9B95] block">Longest Hit Streak</span>
+                    <span className="font-mono text-base font-extrabold text-[#35B978]">
+                      {stats.longestHitStreak}
+                    </span>
+                  </div>
+                  <div className="p-2 rounded bg-[#06130F] border border-[#1E3A2B]/60">
+                    <span className="text-[10px] text-[#8D9B95] block">Longest Miss Streak</span>
+                    <span className="font-mono text-base font-extrabold text-[#F04444]">
+                      {stats.longestMissStreak}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* SUMMARY */}
+              <div className="p-3 rounded-lg bg-[#071A14] border border-[#1E3A2B] space-y-2">
+                <span className="text-[10px] font-mono uppercase font-bold text-[#8D9B95] tracking-wider block">
+                  SUMMARY
+                </span>
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="p-2 rounded bg-[#06130F] border border-[#1E3A2B]/60">
+                    <span className="text-[10px] text-[#8D9B95] block">Total Hit Streaks</span>
+                    <div className="font-mono font-bold text-[#F5F5F5]">
+                      <span className="text-sm text-[#35B978]">{stats.hitStreakCount}</span>
+                      <span className="text-[10px] text-[#8D9B95] block mt-0.5">
+                        Avg: {stats.avgHitStreak}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="p-2 rounded bg-[#06130F] border border-[#1E3A2B]/60">
+                    <span className="text-[10px] text-[#8D9B95] block">Total Miss Streaks</span>
+                    <div className="font-mono font-bold text-[#F5F5F5]">
+                      <span className="text-sm text-[#F04444]">{stats.missStreakCount}</span>
+                      <span className="text-[10px] text-[#8D9B95] block mt-0.5">
+                        Avg: {stats.avgMissStreak}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* DISTRIBUTION Section with compact horizontal bars */}
+            <div className="space-y-2">
+              <span className="text-[10px] font-mono uppercase font-bold text-[#8D9B95] tracking-wider block">
+                DISTRIBUTION
+              </span>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                {/* Hit Streaks Distribution */}
+                <div className="p-3 rounded-lg bg-[#071A14] border border-[#1E3A2B] space-y-2">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="font-mono font-bold text-[#35B978]">
+                      Hit Streaks (H)
+                    </span>
+                    <span className="font-mono text-[10px] text-[#8D9B95]">
+                      {stats.hitStreakCount} streaks • {stats.totalHits} total hits
+                    </span>
+                  </div>
+                  <div className="space-y-1 pt-1">
+                    {DISTRIBUTION_KEYS.map((key) => {
+                      const count = stats.hitDistribution[key];
+                      const pct = stats.hitStreakCount > 0 ? Math.round((count / stats.hitStreakCount) * 100) : 0;
+                      const barWidth = maxHitFreq > 0 ? Math.round((count / maxHitFreq) * 100) : 0;
+                      return (
+                        <div key={key} className="flex items-center gap-2 text-[11px] font-mono py-0.5">
+                          <span className="w-5 text-right text-[#8D9B95] font-semibold text-[10px]">{key}</span>
+                          <div className="flex-1 h-2.5 rounded bg-[#020806] overflow-hidden border border-[#1E3A2B]/50">
+                            <div
+                              className="h-full bg-[#35B978] transition-all duration-300 rounded-sm"
+                              style={{ width: `${barWidth}%` }}
+                            />
+                          </div>
+                          <span className="w-16 text-right font-mono text-[10px]">
+                            <span className={count > 0 ? 'font-bold text-[#F5F5F5]' : 'text-[#8D9B95]/50'}>{count}</span>
+                            <span className="text-[#8D9B95] ml-1">({pct}%)</span>
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Miss Streaks Distribution */}
+                <div className="p-3 rounded-lg bg-[#071A14] border border-[#1E3A2B] space-y-2">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="font-mono font-bold text-[#F04444]">
+                      Miss Streaks (M)
+                    </span>
+                    <span className="font-mono text-[10px] text-[#8D9B95]">
+                      {stats.missStreakCount} streaks • {stats.totalMisses} total misses
+                    </span>
+                  </div>
+                  <div className="space-y-1 pt-1">
+                    {DISTRIBUTION_KEYS.map((key) => {
+                      const count = stats.missDistribution[key];
+                      const pct = stats.missStreakCount > 0 ? Math.round((count / stats.missStreakCount) * 100) : 0;
+                      const barWidth = maxMissFreq > 0 ? Math.round((count / maxMissFreq) * 100) : 0;
+                      return (
+                        <div key={key} className="flex items-center gap-2 text-[11px] font-mono py-0.5">
+                          <span className="w-5 text-right text-[#8D9B95] font-semibold text-[10px]">{key}</span>
+                          <div className="flex-1 h-2.5 rounded bg-[#020806] overflow-hidden border border-[#1E3A2B]/50">
+                            <div
+                              className="h-full bg-[#F04444] transition-all duration-300 rounded-sm"
+                              style={{ width: `${barWidth}%` }}
+                            />
+                          </div>
+                          <span className="w-16 text-right font-mono text-[10px]">
+                            <span className={count > 0 ? 'font-bold text-[#F5F5F5]' : 'text-[#8D9B95]/50'}>{count}</span>
+                            <span className="text-[#8D9B95] ml-1">({pct}%)</span>
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Internal Sequence Container for verification */}
+            <div className="p-3 rounded-lg bg-[#071A14] border border-[#1E3A2B] space-y-1.5">
+              <div className="flex flex-wrap items-center justify-between text-[11px] gap-2">
+                <span className="text-[#8D9B95] uppercase font-semibold">
+                  Sequence Used for Streak Calculation ({stats.totalPredictions} predictions):
+                </span>
+                <span className="font-mono text-[10px] text-[#8D9B95]">
+                  <span className="text-[#35B978] font-bold">H</span> = Hit ({stats.totalHits}) •{' '}
+                  <span className="text-[#F04444] font-bold">M</span> = Miss ({stats.totalMisses})
+                </span>
+              </div>
+              <div
+                className="h-16 overflow-y-auto overflow-x-hidden p-2 rounded bg-[#020806] border border-[#1E3A2B]/60 font-mono text-xs select-text leading-relaxed tracking-wider break-words"
+                style={{ scrollbarWidth: 'thin', scrollbarColor: '#35B978 #020806' }}
+              >
+                {stats.rawSequence.map((outcome, idx) => (
+                  <span
+                    key={idx}
+                    className={`inline-block mr-1 font-bold ${
+                      outcome === 'H' ? 'text-[#35B978]' : 'text-[#F04444]'
+                    }`}
+                  >
+                    {outcome}
+                  </span>
+                ))}
+                {stats.rawSequence.length === 0 && (
+                  <span className="text-[#8D9B95] text-xs">No prediction data available</span>
+                )}
+              </div>
+            </div>
+
+            {/* Statistical Integrity Disclaimer */}
+            <div className="text-[11px] text-[#8D9B95] flex items-start gap-1.5 px-0.5 font-sans pt-1">
+              <span className="text-[#E7B93F] font-bold shrink-0">ℹ</span>
+              <span>
+                <strong>Empirical Probability Note:</strong> Observed streaks represent past statistical variance.
+                Consecutive misses do <em>not</em> increase the mathematical probability of a hit on the next round (independence of trials / Gambler&apos;s Fallacy).
+              </span>
             </div>
           </div>
         </div>
-      </div>
-
-      {/* Internal Sequence Container for verification */}
-      <div className="p-3 rounded-lg bg-[#071A14] border border-[#1E3A2B] space-y-1.5">
-        <div className="flex flex-wrap items-center justify-between text-[11px] gap-2">
-          <span className="text-[#8D9B95] uppercase font-semibold">
-            Sequence Used for Streak Calculation ({stats.totalPredictions} predictions):
-          </span>
-          <span className="font-mono text-[10px] text-[#8D9B95]">
-            <span className="text-[#35B978] font-bold">H</span> = Hit ({stats.totalHits}) •{' '}
-            <span className="text-[#F04444] font-bold">M</span> = Miss ({stats.totalMisses})
-          </span>
-        </div>
-        <div
-          className="h-16 overflow-y-auto overflow-x-hidden p-2 rounded bg-[#020806] border border-[#1E3A2B]/60 font-mono text-xs select-text leading-relaxed tracking-wider break-words"
-          style={{ scrollbarWidth: 'thin', scrollbarColor: '#35B978 #020806' }}
-        >
-          {stats.rawSequence.map((outcome, idx) => (
-            <span
-              key={idx}
-              className={`inline-block mr-1 font-bold ${
-                outcome === 'H' ? 'text-[#35B978]' : 'text-[#F04444]'
-              }`}
-            >
-              {outcome}
-            </span>
-          ))}
-          {stats.rawSequence.length === 0 && (
-            <span className="text-[#8D9B95] text-xs">No prediction data available</span>
-          )}
-        </div>
-      </div>
-
-      {/* Statistical Integrity Disclaimer */}
-      <div className="text-[11px] text-[#8D9B95] flex items-start gap-1.5 px-0.5 font-sans pt-1">
-        <span className="text-[#E7B93F] font-bold shrink-0">ℹ</span>
-        <span>
-          <strong>Empirical Probability Note:</strong> Observed streaks represent past statistical variance.
-          Consecutive misses do <em>not</em> increase the mathematical probability of a hit on the next round (independence of trials / Gambler&apos;s Fallacy).
-        </span>
       </div>
     </div>
   );
@@ -775,28 +827,33 @@ export const AlgorithmAnalyzer: React.FC = () => {
       {/* ======================================================== */}
       {/* CATEGORY 1: OBSERVED (What Actually Appears)             */}
       {/* ======================================================== */}
-      <div className="p-6 rounded-2xl bg-[#071A14] border border-[#1E3A2B] shadow-xl space-y-5">
-        <div className="flex flex-wrap items-center justify-between pb-3 border-b border-[#1E3A2B] gap-2">
+      <CollapsibleCard
+        id="analyzer_category_1"
+        title={
           <div className="flex items-center gap-2.5">
             <span className="px-2.5 py-0.5 rounded text-[11px] font-mono font-bold bg-[#35B978]/15 text-[#35B978] border border-[#35B978]/30">
               CATEGORY 1
             </span>
-            <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold border ${
-              dataSource === 'live'
-                ? 'bg-[#E7B93F]/15 text-[#E7B93F] border-[#E7B93F]/30'
-                : 'bg-[#35B978]/20 text-[#35B978] border-[#35B978]/40'
-            }`}>
+            <span
+              className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold border ${
+                dataSource === 'live'
+                  ? 'bg-[#E7B93F]/15 text-[#E7B93F] border-[#E7B93F]/30'
+                  : 'bg-[#35B978]/20 text-[#35B978] border-[#35B978]/40'
+              }`}
+            >
               {dataSource === 'live' ? 'SIMULATOR DATA' : 'COMPLETED REAL HISTORY'}
             </span>
             <h3 className="text-sm font-bold text-[#F5F5F5] uppercase tracking-wider">
               OBSERVED (Empirical Ground Truth)
             </h3>
           </div>
+        }
+        headerRight={
           <span className="text-xs text-[#8D9B95]">
             What actually appears in the recorded history
           </span>
-        </div>
-
+        }
+      >
         {observedStats && (
           <div className="space-y-4">
             {/* Sequence line with compact fixed-height scrollable container */}
@@ -892,13 +949,14 @@ export const AlgorithmAnalyzer: React.FC = () => {
             </div>
           </div>
         )}
-      </div>
+      </CollapsibleCard>
 
       {/* ======================================================== */}
       {/* CATEGORY 2: TESTED (Formula & Statistical Tests Run)      */}
       {/* ======================================================== */}
-      <div className="p-6 rounded-2xl bg-[#071A14] border border-[#1E3A2B] shadow-xl space-y-5">
-        <div className="flex items-center justify-between pb-3 border-b border-[#1E3A2B]">
+      <CollapsibleCard
+        id="analyzer_category_2"
+        title={
           <div className="flex items-center gap-2.5">
             <span className="px-2.5 py-0.5 rounded text-[11px] font-mono font-bold bg-[#E7B93F]/15 text-[#E7B93F] border border-[#E7B93F]/30">
               CATEGORY 2
@@ -907,11 +965,13 @@ export const AlgorithmAnalyzer: React.FC = () => {
               TESTED (Mathematical & Formula Evaluations)
             </h3>
           </div>
+        }
+        headerRight={
           <span className="text-xs text-[#8D9B95]">
             Statistical tests run against the observed history
           </span>
-        </div>
-
+        }
+      >
         {/* Sub tabs for formula tests */}
         <div className="flex flex-wrap items-center gap-2 text-xs">
           <button
@@ -976,40 +1036,55 @@ export const AlgorithmAnalyzer: React.FC = () => {
             </div>
 
             {/* Streak Analysis Panel */}
-            <StreakAnalysisPanel stats={streakStatsPeriodSum} title="Period Digit Sum Mod 10" />
+            <StreakAnalysisPanel
+              stats={streakStatsPeriodSum}
+              title="Period Digit Sum Mod 10"
+              id="streak_test1"
+            />
 
-            <div className="overflow-x-auto rounded-xl border border-[#1E3A2B]">
-              <table className="w-full text-left text-xs font-mono">
-                <thead className="bg-[#06130F] text-[#8D9B95] uppercase text-[10px]">
-                  <tr>
-                    <th className="py-2.5 px-4">Period</th>
-                    <th className="py-2.5 px-4">Actual Number</th>
-                    <th className="py-2.5 px-4">Formula Prediction</th>
-                    <th className="py-2.5 px-4 text-right">Outcome</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[#1E3A2B]/40">
-                  {testPeriodSum.details.map((row, i) => (
-                    <tr key={i} className="hover:bg-[#06130F]/80">
-                      <td className="py-2 px-4 text-gray-300">{row.period}</td>
-                      <td className="py-2 px-4 font-bold text-[#E7B93F]">{row.actual}</td>
-                      <td className="py-2 px-4 text-gray-400">{row.predicted}</td>
-                      <td className="py-2 px-4 text-right">
-                        {row.isHit ? (
-                          <span className="inline-flex items-center gap-1 text-[#35B978] font-bold">
-                            <CheckCircle2 className="w-3.5 h-3.5" /> Hit
-                          </span>
-                        ) : (
-                          <span className="inline-flex items-center gap-1 text-[#F04444]">
-                            <XCircle className="w-3.5 h-3.5" /> Miss
-                          </span>
-                        )}
-                      </td>
+            <CollapsibleCard
+              id="test1_predictions_table"
+              variant="subcard"
+              title={
+                <span className="font-mono text-xs font-bold text-[#F5F5F5]">
+                  Formula Evaluation Table (Test 1)
+                </span>
+              }
+              subtitle="Per-period predicted digit vs actual outcome"
+            >
+              <div className="overflow-x-auto rounded-lg border border-[#1E3A2B]/60">
+                <table className="w-full text-left text-xs font-mono">
+                  <thead className="bg-[#06130F] text-[#8D9B95] uppercase text-[10px]">
+                    <tr>
+                      <th className="py-2.5 px-4">Period</th>
+                      <th className="py-2.5 px-4">Actual Number</th>
+                      <th className="py-2.5 px-4">Formula Prediction</th>
+                      <th className="py-2.5 px-4 text-right">Outcome</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody className="divide-y divide-[#1E3A2B]/40">
+                    {testPeriodSum.details.map((row, i) => (
+                      <tr key={i} className="hover:bg-[#06130F]/80">
+                        <td className="py-2 px-4 text-gray-300">{row.period}</td>
+                        <td className="py-2 px-4 font-bold text-[#E7B93F]">{row.actual}</td>
+                        <td className="py-2 px-4 text-gray-400">{row.predicted}</td>
+                        <td className="py-2 px-4 text-right">
+                          {row.isHit ? (
+                            <span className="inline-flex items-center gap-1 text-[#35B978] font-bold">
+                              <CheckCircle2 className="w-3.5 h-3.5" /> Hit
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 text-[#F04444]">
+                              <XCircle className="w-3.5 h-3.5" /> Miss
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </CollapsibleCard>
           </div>
         )}
 
@@ -1041,42 +1116,57 @@ export const AlgorithmAnalyzer: React.FC = () => {
             </div>
 
             {/* Streak Analysis Panel */}
-            <StreakAnalysisPanel stats={streakStatsLinearRecurrence} title="Linear Recurrence Mod 10" />
+            <StreakAnalysisPanel
+              stats={streakStatsLinearRecurrence}
+              title="Linear Recurrence Mod 10"
+              id="streak_test2"
+            />
 
-            <div className="overflow-x-auto rounded-xl border border-[#1E3A2B]">
-              <table className="w-full text-left text-xs font-mono">
-                <thead className="bg-[#06130F] text-[#8D9B95] uppercase text-[10px]">
-                  <tr>
-                    <th className="py-2.5 px-4">Period</th>
-                    <th className="py-2.5 px-4">Previous Number</th>
-                    <th className="py-2.5 px-4">Actual Number</th>
-                    <th className="py-2.5 px-4">Formula Prediction</th>
-                    <th className="py-2.5 px-4 text-right">Outcome</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[#1E3A2B]/40">
-                  {testLinearRecurrence.details.map((row, i) => (
-                    <tr key={i} className="hover:bg-[#06130F]/80">
-                      <td className="py-2 px-4 text-gray-300">{row.period}</td>
-                      <td className="py-2 px-4 text-gray-400">{row.prev}</td>
-                      <td className="py-2 px-4 font-bold text-[#E7B93F]">{row.actual}</td>
-                      <td className="py-2 px-4 text-gray-400">{row.predicted}</td>
-                      <td className="py-2 px-4 text-right">
-                        {row.isHit ? (
-                          <span className="inline-flex items-center gap-1 text-[#35B978] font-bold">
-                            <CheckCircle2 className="w-3.5 h-3.5" /> Hit
-                          </span>
-                        ) : (
-                          <span className="inline-flex items-center gap-1 text-[#F04444]">
-                            <XCircle className="w-3.5 h-3.5" /> Miss
-                          </span>
-                        )}
-                      </td>
+            <CollapsibleCard
+              id="test2_predictions_table"
+              variant="subcard"
+              title={
+                <span className="font-mono text-xs font-bold text-[#F5F5F5]">
+                  Formula Evaluation Table (Test 2)
+                </span>
+              }
+              subtitle="Step-to-step recurrence prediction and hit outcome"
+            >
+              <div className="overflow-x-auto rounded-lg border border-[#1E3A2B]/60">
+                <table className="w-full text-left text-xs font-mono">
+                  <thead className="bg-[#06130F] text-[#8D9B95] uppercase text-[10px]">
+                    <tr>
+                      <th className="py-2.5 px-4">Period</th>
+                      <th className="py-2.5 px-4">Previous Number</th>
+                      <th className="py-2.5 px-4">Actual Number</th>
+                      <th className="py-2.5 px-4">Formula Prediction</th>
+                      <th className="py-2.5 px-4 text-right">Outcome</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody className="divide-y divide-[#1E3A2B]/40">
+                    {testLinearRecurrence.details.map((row, i) => (
+                      <tr key={i} className="hover:bg-[#06130F]/80">
+                        <td className="py-2 px-4 text-gray-300">{row.period}</td>
+                        <td className="py-2 px-4 text-gray-400">{row.prev}</td>
+                        <td className="py-2 px-4 font-bold text-[#E7B93F]">{row.actual}</td>
+                        <td className="py-2 px-4 text-gray-400">{row.predicted}</td>
+                        <td className="py-2 px-4 text-right">
+                          {row.isHit ? (
+                            <span className="inline-flex items-center gap-1 text-[#35B978] font-bold">
+                              <CheckCircle2 className="w-3.5 h-3.5" /> Hit
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 text-[#F04444]">
+                              <XCircle className="w-3.5 h-3.5" /> Miss
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </CollapsibleCard>
           </div>
         )}
 
@@ -1108,42 +1198,57 @@ export const AlgorithmAnalyzer: React.FC = () => {
             </div>
 
             {/* Streak Analysis Panel */}
-            <StreakAnalysisPanel stats={streakStatsAlternation} title="Alternating Streak Flip" />
+            <StreakAnalysisPanel
+              stats={streakStatsAlternation}
+              title="Alternating Streak Flip"
+              id="streak_test3"
+            />
 
-            <div className="overflow-x-auto rounded-xl border border-[#1E3A2B]">
-              <table className="w-full text-left text-xs font-mono">
-                <thead className="bg-[#06130F] text-[#8D9B95] uppercase text-[10px]">
-                  <tr>
-                    <th className="py-2.5 px-4">Period</th>
-                    <th className="py-2.5 px-4">Prior Size</th>
-                    <th className="py-2.5 px-4">Actual Size</th>
-                    <th className="py-2.5 px-4">Predicted (Opposite)</th>
-                    <th className="py-2.5 px-4 text-right">Outcome</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[#1E3A2B]/40">
-                  {testAlternation.details.map((row, i) => (
-                    <tr key={i} className="hover:bg-[#06130F]/80">
-                      <td className="py-2 px-4 text-gray-300">{row.period}</td>
-                      <td className="py-2 px-4 text-gray-400">{row.prevSize}</td>
-                      <td className="py-2 px-4 font-bold text-[#E7B93F]">{row.actualSize}</td>
-                      <td className="py-2 px-4 text-gray-400">{row.predictedSize}</td>
-                      <td className="py-2 px-4 text-right">
-                        {row.isHit ? (
-                          <span className="inline-flex items-center gap-1 text-[#35B978] font-bold">
-                            <CheckCircle2 className="w-3.5 h-3.5" /> Hit
-                          </span>
-                        ) : (
-                          <span className="inline-flex items-center gap-1 text-[#F04444]">
-                            <XCircle className="w-3.5 h-3.5" /> Miss
-                          </span>
-                        )}
-                      </td>
+            <CollapsibleCard
+              id="test3_predictions_table"
+              variant="subcard"
+              title={
+                <span className="font-mono text-xs font-bold text-[#F5F5F5]">
+                  Formula Evaluation Table (Test 3)
+                </span>
+              }
+              subtitle="Alternating opposite size predictions and hit outcome"
+            >
+              <div className="overflow-x-auto rounded-lg border border-[#1E3A2B]/60">
+                <table className="w-full text-left text-xs font-mono">
+                  <thead className="bg-[#06130F] text-[#8D9B95] uppercase text-[10px]">
+                    <tr>
+                      <th className="py-2.5 px-4">Period</th>
+                      <th className="py-2.5 px-4">Prior Size</th>
+                      <th className="py-2.5 px-4">Actual Size</th>
+                      <th className="py-2.5 px-4">Predicted (Opposite)</th>
+                      <th className="py-2.5 px-4 text-right">Outcome</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody className="divide-y divide-[#1E3A2B]/40">
+                    {testAlternation.details.map((row, i) => (
+                      <tr key={i} className="hover:bg-[#06130F]/80">
+                        <td className="py-2 px-4 text-gray-300">{row.period}</td>
+                        <td className="py-2 px-4 text-gray-400">{row.prevSize}</td>
+                        <td className="py-2 px-4 font-bold text-[#E7B93F]">{row.actualSize}</td>
+                        <td className="py-2 px-4 text-gray-400">{row.predictedSize}</td>
+                        <td className="py-2 px-4 text-right">
+                          {row.isHit ? (
+                            <span className="inline-flex items-center gap-1 text-[#35B978] font-bold">
+                              <CheckCircle2 className="w-3.5 h-3.5" /> Hit
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 text-[#F04444]">
+                              <XCircle className="w-3.5 h-3.5" /> Miss
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </CollapsibleCard>
           </div>
         )}
 
@@ -1153,16 +1258,17 @@ export const AlgorithmAnalyzer: React.FC = () => {
             Empirical Test Conclusion:
           </span>
           <p className="text-gray-300 leading-relaxed font-sans">
-            <strong>"No tested mathematical formula sufficiently explains this sample beyond expected random variance."</strong> Hit rates match statistical baseline expectations (10% on single numbers, ~50% on Big/Small), confirming that numbers cannot be predicted via deterministic formulas from period numbers or past draws.
+            <strong>&quot;No tested mathematical formula sufficiently explains this sample beyond expected random variance.&quot;</strong> Hit rates match statistical baseline expectations (10% on single numbers, ~50% on Big/Small), confirming that numbers cannot be predicted via deterministic formulas from period numbers or past draws.
           </p>
         </div>
-      </div>
+      </CollapsibleCard>
 
       {/* ======================================================== */}
       {/* CATEGORY 3: INFERRED / UNKNOWN (Boundary of Verifiability) */}
       {/* ======================================================== */}
-      <div className="p-6 rounded-2xl bg-[#071A14] border border-[#1E3A2B] shadow-xl space-y-5">
-        <div className="flex items-center justify-between pb-3 border-b border-[#1E3A2B]">
+      <CollapsibleCard
+        id="analyzer_category_3"
+        title={
           <div className="flex items-center gap-2.5">
             <span className="px-2.5 py-0.5 rounded text-[11px] font-mono font-bold bg-[#C94DDA]/15 text-[#C94DDA] border border-[#C94DDA]/30">
               CATEGORY 3
@@ -1171,11 +1277,13 @@ export const AlgorithmAnalyzer: React.FC = () => {
               INFERRED / UNKNOWN (Boundary of Client-Side Verifiability)
             </h3>
           </div>
+        }
+        headerRight={
           <span className="text-xs text-[#8D9B95]">
             Possible explanations that cannot be verified from client history alone
           </span>
-        </div>
-
+        }
+      >
         <div className="grid grid-cols-1 md:grid-cols-2 gap-5 text-xs">
           {/* Left: What is Documented & Proven */}
           <div className="p-5 rounded-xl bg-[#06130F] border border-[#35B978]/30 space-y-3">
@@ -1229,13 +1337,14 @@ export const AlgorithmAnalyzer: React.FC = () => {
             </ul>
           </div>
         </div>
-      </div>
+      </CollapsibleCard>
 
       {/* ======================================================== */}
       {/* CATEGORY 4: STRATEGY EVALUATION (Real vs. Simulator)    */}
       {/* ======================================================== */}
-      <div className="p-6 rounded-2xl bg-[#071A14] border border-[#1E3A2B] shadow-xl space-y-6">
-        <div className="flex items-center justify-between pb-3 border-b border-[#1E3A2B]">
+      <CollapsibleCard
+        id="analyzer_category_4"
+        title={
           <div className="flex items-center gap-2.5">
             <Scale className="w-4 h-4 text-[#E7B93F]" />
             <span className="px-2.5 py-0.5 rounded text-[11px] font-mono font-bold bg-[#E7B93F]/15 text-[#E7B93F] border border-[#E7B93F]/30">
@@ -1245,11 +1354,13 @@ export const AlgorithmAnalyzer: React.FC = () => {
               STRATEGY EVALUATION (Real Live Draws vs. Local Simulator)
             </h3>
           </div>
+        }
+        headerRight={
           <span className="text-xs text-[#8D9B95]">
             Evaluating whether any betting pattern can predict future values
           </span>
-        </div>
-
+        }
+      >
         <div className="grid grid-cols-1 md:grid-cols-2 gap-5 text-xs">
           {/* Real Live Screen Sample */}
           <div className="p-5 rounded-xl bg-[#06130F] border border-[#1E3A2B] space-y-3">
@@ -1337,7 +1448,7 @@ export const AlgorithmAnalyzer: React.FC = () => {
             </div>
           </div>
         </div>
-      </div>
+      </CollapsibleCard>
     </div>
   );
 };

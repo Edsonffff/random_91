@@ -15,6 +15,7 @@ import {
   Globe2,
   Database,
 } from 'lucide-react';
+import { CollapsibleCard } from '../common/CollapsibleCard';
 
 function convertToCSV(records: RealGameRecord[]): string {
   const headers = ['Period', 'WinningNumber', 'BigSmall', 'Colors', 'Premium', 'Sum', 'CompletedAt', 'Source'];
@@ -434,92 +435,100 @@ export const RealHistoryView: React.FC = () => {
       )}
 
       {/* CURRENT ACTIVE ISSUE CARD */}
-      <div className="p-5 rounded-2xl bg-gradient-to-r from-[#071A14] via-[#061912] to-[#071A14] border border-[#35B978]/30 shadow-xl">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div className="space-y-1.5">
-            <div className="flex items-center gap-2">
-              <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-[#35B978] text-[#020806]">
-                CURRENT ISSUE
-              </span>
-              <span className="text-[11px] text-[#35B978] font-bold uppercase tracking-wider flex items-center gap-1">
-                <span className="w-1.5 h-1.5 rounded-full bg-[#35B978] animate-ping" />
-                Active Round
-              </span>
-            </div>
-            <div className="font-mono text-xl sm:text-2xl font-black text-[#F5F5F5] tracking-wider">
+      <CollapsibleCard
+        id="real_history_schedule"
+        title={
+          <div className="flex items-center gap-2">
+            <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-[#35B978] text-[#020806]">
+              CURRENT ISSUE
+            </span>
+            <span className="font-mono text-base sm:text-lg font-black text-[#F5F5F5] tracking-wider">
               {realSchedule?.currentIssue ||
                 (realHistory.length > 0
                   ? (BigInt(realHistory[0].periodNumber) + 1n).toString()
                   : 'Connecting to live schedule...')}
-            </div>
-            <div className="text-[11px] text-[#8D9B95] font-mono flex items-center gap-3">
-              <span>
-                Prev:{' '}
-                <strong className="text-gray-300">
-                  {realSchedule?.previousIssue || (realHistory.length > 0 ? realHistory[0].periodNumber : '--')}
-                </strong>
-              </span>
-              <span>•</span>
-              <span>
-                Next:{' '}
-                <strong className="text-gray-300">
-                  {realSchedule?.nextIssue ||
-                    (realHistory.length > 0
-                      ? (BigInt(realHistory[0].periodNumber) + 2n).toString()
-                      : '--')}
-                </strong>
-              </span>
-              <span>•</span>
-              <span>
-                Last updated: <strong className="text-gray-300">{lastUpdatedDisplay}</strong>
-              </span>
-            </div>
+            </span>
+            <span className="text-[11px] text-[#35B978] font-bold uppercase tracking-wider hidden sm:inline-flex items-center gap-1 ml-2">
+              <span className="w-1.5 h-1.5 rounded-full bg-[#35B978] animate-ping" />
+              Active Round
+            </span>
           </div>
-
-          {/* LCD Countdown Display */}
-          <div className="flex items-center gap-3 bg-[#020806] px-5 py-3 rounded-2xl border border-[#1E3A2B]">
-            <Clock className="w-5 h-5 text-[#E7B93F]" />
+        }
+        headerRight={
+          <div className="flex items-center gap-2.5 bg-[#020806] px-3.5 py-1.5 rounded-xl border border-[#1E3A2B]">
+            <Clock className="w-4 h-4 text-[#E7B93F]" />
             <div className="text-right">
-              <span className="text-[10px] text-[#8D9B95] uppercase font-bold block">
-                Time Remaining
+              <span className="text-[9px] text-[#8D9B95] uppercase font-bold block leading-none">
+                Time Left
               </span>
-              <div className="font-mono text-2xl font-black text-[#E7B93F] tracking-widest">
+              <span className="font-mono text-base font-black text-[#E7B93F] tracking-widest leading-tight">
                 00:{formattedSeconds}
-              </div>
+              </span>
             </div>
           </div>
+        }
+        bodyClassName="p-4 sm:p-5 space-y-3"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-3 text-[11px] font-mono text-[#8D9B95]">
+          <div className="flex flex-wrap items-center gap-3">
+            <span>
+              Prev:{' '}
+              <strong className="text-gray-300">
+                {realSchedule?.previousIssue || (realHistory.length > 0 ? realHistory[0].periodNumber : '--')}
+              </strong>
+            </span>
+            <span>•</span>
+            <span>
+              Next:{' '}
+              <strong className="text-gray-300">
+                {realSchedule?.nextIssue ||
+                  (realHistory.length > 0
+                    ? (BigInt(realHistory[0].periodNumber) + 2n).toString()
+                    : '--')}
+              </strong>
+            </span>
+            <span>•</span>
+            <span>
+              Last updated: <strong className="text-gray-300">{lastUpdatedDisplay}</strong>
+            </span>
+          </div>
+          <span className="text-[10px] text-[#35B978] bg-[#35B978]/10 px-2 py-0.5 rounded border border-[#35B978]/20">
+            Real Live 30s Clock
+          </span>
         </div>
-      </div>
+      </CollapsibleCard>
 
       {/* COMPLETED REAL HISTORY TABLE */}
-      <div className="rounded-2xl bg-[#071A14] border border-[#1E3A2B] overflow-hidden shadow-xl">
-        <div className="p-4 border-b border-[#1E3A2B] flex flex-wrap items-center justify-between gap-3">
+      <CollapsibleCard
+        id="real_history_table"
+        title={
           <div className="flex items-center gap-2">
             <Layers className="w-4 h-4 text-[#35B978]" />
-            <div>
-              <h3 className="text-sm font-bold text-[#F5F5F5]">
-                Completed Official Results ({recordsToDisplay.length} of {realHistory.length} records shown)
-              </h3>
-              <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono text-[#8D9B95] mt-0.5">
-                {pagination && (
-                  <span>
-                    Official Feed: Page {pagination.pageNo} / {pagination.totalPage} ({pagination.totalCount} total upstream)
-                  </span>
-                )}
-                <span>•</span>
-                <span className="text-teal-400 flex items-center gap-1">
-                  <Database className="w-3 h-3" />
-                  public.real_wingo_30s_history
-                </span>
-                {lastSupabaseSyncTime && (
-                  <span>
-                    (Synced: {new Date(lastSupabaseSyncTime).toLocaleTimeString()})
-                  </span>
-                )}
-              </div>
-            </div>
+            <h3 className="text-sm font-bold text-[#F5F5F5]">
+              Completed Official Results ({recordsToDisplay.length} of {realHistory.length} records shown)
+            </h3>
           </div>
-
+        }
+        subtitle={
+          <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono text-[#8D9B95]">
+            {pagination && (
+              <span>
+                Official Feed: Page {pagination.pageNo} / {pagination.totalPage} ({pagination.totalCount} total upstream)
+              </span>
+            )}
+            <span>•</span>
+            <span className="text-teal-400 flex items-center gap-1">
+              <Database className="w-3 h-3" />
+              public.real_wingo_30s_history
+            </span>
+            {lastSupabaseSyncTime && (
+              <span>
+                (Synced: {new Date(lastSupabaseSyncTime).toLocaleTimeString()})
+              </span>
+            )}
+          </div>
+        }
+        headerRight={
           <div className="flex items-center gap-2.5">
             <button
               onClick={() => setIsImportModalOpen(true)}
@@ -550,7 +559,9 @@ export const RealHistoryView: React.FC = () => {
               JSON
             </button>
           </div>
-        </div>
+        }
+        bodyClassName="p-0"
+      >
 
         {recordsToDisplay.length === 0 ? (
           <div className="p-12 text-center text-xs text-[#8D9B95] space-y-4">
@@ -716,7 +727,7 @@ export const RealHistoryView: React.FC = () => {
             </table>
           </div>
         )}
-      </div>
+      </CollapsibleCard>
 
       {/* Import Modal */}
       {isImportModalOpen && (

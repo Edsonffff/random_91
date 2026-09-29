@@ -6,6 +6,7 @@ import { StrategySummary } from '../components/history/StrategySummary';
 import { AlgorithmAnalyzer } from '../components/history/AlgorithmAnalyzer';
 import { RealHistoryView } from '../components/history/RealHistoryView';
 import { History, LineChart, Target, RefreshCw, Brain, Zap, Code2, X, Radio } from 'lucide-react';
+import { CollapsibleCard } from '../components/common/CollapsibleCard';
 
 import { useRealHistory } from '../context/RealHistoryContext';
 
@@ -157,15 +158,26 @@ export const GameHistory: React.FC = () => {
       )}
 
       {activeTab === 'history' && (
-        <div className="space-y-4">
-          <div className="flex items-center justify-between text-xs text-[#8D9B95]">
-            <span>
-              Displaying <strong className="text-[#F5F5F5]">{filteredResults.length}</strong> test records for{' '}
-              <span className="text-[#E7B93F]">{activeGame.name}</span>
+        <CollapsibleCard
+          id="simulator_history_table"
+          title={
+            <div className="flex items-center gap-2">
+              <History className="w-4 h-4 text-[#E7B93F]" />
+              <h3 className="text-sm font-bold text-[#F5F5F5] uppercase tracking-wider">
+                Simulator Test Records ({filteredResults.length} draws)
+              </h3>
+            </div>
+          }
+          subtitle={`Displaying test records for ${activeGame.name}`}
+          headerRight={
+            <span className="text-xs font-mono text-[#8D9B95] px-2.5 py-1 rounded-lg bg-[#06130F] border border-[#1E3A2B]">
+              {activeGame.name}
             </span>
-          </div>
+          }
+          bodyClassName="p-0"
+        >
           <HistoryTable results={filteredResults} />
-        </div>
+        </CollapsibleCard>
       )}
 
       {activeTab === 'chart' && (
