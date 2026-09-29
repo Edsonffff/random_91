@@ -13,6 +13,7 @@ import {
   X,
   CheckCircle2,
   Globe2,
+  Database,
 } from 'lucide-react';
 
 function convertToCSV(records: RealGameRecord[]): string {
@@ -55,6 +56,9 @@ export const RealHistoryView: React.FC = () => {
     error,
     pagination,
     connectionMode,
+    lastSupabaseSyncTime,
+    supabaseStatus,
+    syncAllToSupabase,
     refreshRealResults,
     importRealHistoryCurlJson,
   } = useRealHistory();
@@ -191,10 +195,33 @@ export const RealHistoryView: React.FC = () => {
                 Server Fallback
               </span>
             )}
+            {/* Supabase Status Indicator */}
+            {lastSupabaseSyncTime ? (
+              <span
+                className="px-2.5 py-0.5 rounded text-[11px] font-mono font-bold bg-teal-500/20 text-teal-300 border border-teal-500/40 inline-flex items-center gap-1.5"
+                title="Records persisted to Supabase public.real_wingo_30s_history"
+              >
+                <Database className="w-3 h-3 text-teal-400" />
+                Supabase Synced ({new Date(lastSupabaseSyncTime).toLocaleTimeString()})
+              </span>
+            ) : supabaseStatus === 'syncing' ? (
+              <span className="px-2.5 py-0.5 rounded text-[11px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 inline-flex items-center gap-1.5">
+                <RefreshCw className="w-3 h-3 text-amber-400 animate-spin" />
+                Syncing to Supabase...
+              </span>
+            ) : (
+              <span
+                className="px-2.5 py-0.5 rounded text-[11px] font-mono font-bold bg-[#06130F] text-[#8D9B95] border border-[#1E3A2B] inline-flex items-center gap-1.5"
+                title="Supabase ready"
+              >
+                <Database className="w-3 h-3 text-[#8D9B95]" />
+                Supabase Table Ready
+              </span>
+            )}
           </div>
           <p className="text-xs text-[#8D9B95]">
-            Direct browser-side feed from{' '}
-            <code className="text-[#35B978]">draw.ar-lottery01.com</code> with deduplication & auto-accumulation.
+            Direct browser feed from <code className="text-[#35B978]">draw.ar-lottery01.com</code> with persistence in{' '}
+            <code className="text-teal-400">public.real_wingo_30s_history</code>.
           </p>
         </div>
 
@@ -215,6 +242,17 @@ export const RealHistoryView: React.FC = () => {
               </button>
             ))}
           </div>
+
+          {/* Sync to Supabase button */}
+          <button
+            onClick={syncAllToSupabase}
+            disabled={realHistory.length === 0 || supabaseStatus === 'syncing'}
+            className="px-3.5 py-2 rounded-xl bg-[#06130F] hover:bg-[#0E2E22] text-teal-300 border border-teal-500/40 text-xs font-bold transition-all cursor-pointer shadow flex items-center gap-1.5 disabled:opacity-50"
+            title="Upsert all loaded records into Supabase public.real_wingo_30s_history"
+          >
+            <Database className={`w-3.5 h-3.5 ${supabaseStatus === 'syncing' ? 'animate-pulse' : ''}`} />
+            Sync to Supabase
+          </button>
 
           {/* Import Curl JSON button */}
           <button
@@ -351,11 +389,23 @@ export const RealHistoryView: React.FC = () => {
               <h3 className="text-sm font-bold text-[#F5F5F5]">
                 Completed Official Results ({recordsToDisplay.length} of {realHistory.length} records shown)
               </h3>
-              {pagination && (
-                <div className="text-[11px] font-mono text-[#8D9B95] mt-0.5">
-                  Official Feed: Page {pagination.pageNo} / {pagination.totalPage} ({pagination.totalCount} total draws available upstream)
-                </div>
-              )}
+              <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono text-[#8D9B95] mt-0.5">
+                {pagination && (
+                  <span>
+                    Official Feed: Page {pagination.pageNo} / {pagination.totalPage} ({pagination.totalCount} total upstream)
+                  </span>
+                )}
+                <span>•</span>
+                <span className="text-teal-400 flex items-center gap-1">
+                  <Database className="w-3 h-3" />
+                  public.real_wingo_30s_history
+                </span>
+                {lastSupabaseSyncTime && (
+                  <span>
+                    (Synced: {new Date(lastSupabaseSyncTime).toLocaleTimeString()})
+                  </span>
+                )}
+              </div>
             </div>
           </div>
 

@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
 const app = express();
 
@@ -351,6 +352,19 @@ export interface RealCompletedRecord {
 
 let accumulatedRealHistory: RealCompletedRecord[] = [];
 let lastRealFetchTime = 0;
+let lastSupabaseSyncTime: string | null = null;
+
+function getSupabaseClient(): SupabaseClient | null {
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key) return null;
+  return createClient(url, key, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+    },
+  });
+}
 
 function parseRealColors(rawColor: string | undefined, num: number): ('red' | 'green' | 'violet')[] {
   if (rawColor) {
@@ -361,6 +375,114 @@ function parseRealColors(rawColor: string | undefined, num: number): ('red' | 'g
   if (num === 0) return ['red', 'violet'];
   if (num === 5) return ['green', 'violet'];
   return num % 2 === 0 ? ['red'] : ['green'];
+}
+
+/**
+ * Upsert records into public.real_wingo_30s_history with (game_code, issue_number) as duplicate key.
+ */
+async function upsertToSupabase(records: RealCompletedRecord[]): Promise<{ count: number; error: string | null }> {
+  const client = getSupabaseClient();
+  if (!client) {
+    return { count: 0, error: 'SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not configured' };
+  }
+
+  if (!records || records.length === 0) {
+    return { count: 0, error: null };
+  }
+
+  const baseRows = records.map((r) => {
+    const colorStr = r.colors.join(',');
+    return {
+      game_code: 'WinGo_30S',
+      issue_number: String(r.issueNumber),
+      number: r.winningNumber,
+      winning_number: r.winningNumber,
+      size: r.size,
+      color: colorStr,
+      colors: r.colors,
+      premium: String(r.premium ?? r.winningNumber),
+      sum: Number(r.sum ?? 0),
+      created_at: r.completedAt || new Date().toISOString(),
+    };
+  });
+
+  let candidateRows: Array<Record<string, unknown>> = baseRows;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const { error } = await client
+      .from('real_wingo_30s_history')
+      .upsert(candidateRows, { onConflict: 'game_code,issue_number' });
+
+    if (!error) {
+      return { count: records.length, error: null };
+    }
+
+    const msg = error.message || '';
+    const colMatch =
+      msg.match(/Could not find the '([^']+)' column/i) ||
+      msg.match(/column ["']?([^"'\s]+)["']?.*schema cache/i);
+    if (colMatch && colMatch[1]) {
+      const badCol = colMatch[1];
+      console.warn(`[Supabase Upsert] Column "${badCol}" not in real_wingo_30s_history. Retrying without it...`);
+      candidateRows = candidateRows.map((row) => {
+        const copy: Record<string, unknown> = { ...row };
+        delete copy[badCol];
+        return copy;
+      });
+      continue;
+    }
+
+    console.error('[Supabase Upsert Error]:', error);
+    return { count: 0, error: error.message };
+  }
+
+  return { count: 0, error: 'Failed to upsert records into Supabase' };
+}
+
+/**
+ * Read history from public.real_wingo_30s_history ordered by issue_number descending.
+ */
+async function readFromSupabase(
+  limit: number | 'all' = 50
+): Promise<{ records: RealCompletedRecord[]; totalCount: number; error: string | null }> {
+  const client = getSupabaseClient();
+  if (!client) {
+    return { records: [], totalCount: 0, error: 'SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not configured' };
+  }
+
+  const limitCount =
+    limit === 'all' ? 1000 : Math.min(1000, Math.max(1, typeof limit === 'number' ? limit : 50));
+
+  const { data, count, error } = await client
+    .from('real_wingo_30s_history')
+    .select('*', { count: 'exact' })
+    .eq('game_code', 'WinGo_30S')
+    .order('issue_number', { ascending: false })
+    .limit(limitCount);
+
+  if (error) {
+    console.error('[Supabase Read Error]:', error);
+    return { records: [], totalCount: 0, error: error.message };
+  }
+
+  const records: RealCompletedRecord[] = (data || []).map((row: any) => {
+    const rawNum = row.winning_number !== undefined ? row.winning_number : row.number;
+    const num = typeof rawNum === 'number' ? rawNum : parseInt(String(rawNum ?? 0), 10);
+    const colorStr = String(row.color || (Array.isArray(row.colors) ? row.colors.join(',') : '') || '');
+
+    return {
+      issueNumber: String(row.issue_number),
+      periodNumber: String(row.issue_number),
+      winningNumber: isNaN(num) ? 0 : num,
+      size: (row.size as 'Big' | 'Small') || (num >= 5 ? 'Big' : 'Small'),
+      colors: parseRealColors(colorStr, num),
+      premium: String(row.premium ?? num),
+      sum: typeof row.sum === 'number' ? row.sum : 0,
+      completedAt: row.completed_at || row.created_at || new Date().toISOString(),
+      source: 'COMPLETED REAL HISTORY',
+    };
+  });
+
+  return { records, totalCount: count ?? records.length, error: null };
 }
 
 // GET /api/real/current (Fallback status / schedule)
@@ -446,77 +568,148 @@ app.get('/api/real/current', async (_req, res) => {
   });
 });
 
-// GET /api/real/history (Fallback & status endpoint - does NOT proxy upstream to avoid 403)
-app.get('/api/real/history', (req, res) => {
+// GET /api/real/status (Check Supabase configuration and sync status)
+app.get('/api/real/status', (req, res) => {
+  const client = getSupabaseClient();
+  res.json({
+    supabaseConfigured: !!client,
+    lastSyncTime: lastSupabaseSyncTime,
+    totalInMemory: accumulatedRealHistory.length,
+    lastFetchTime: lastRealFetchTime ? new Date(lastRealFetchTime).toISOString() : null,
+  });
+});
+
+// GET /api/real/history (Reads from Supabase with in-memory fallback)
+app.get('/api/real/history', async (req, res) => {
   const limitParam = req.query.limit as string;
 
-  let limit = 10;
+  let limit: number | 'all' = 50;
   if (limitParam === 'all') {
-    limit = accumulatedRealHistory.length;
+    limit = 'all';
   } else if (limitParam) {
     const parsed = parseInt(limitParam, 10);
     if (!isNaN(parsed) && parsed > 0) limit = parsed;
   }
 
+  const supabaseClient = getSupabaseClient();
+  if (supabaseClient) {
+    const { records, totalCount, error } = await readFromSupabase(limit);
+    if (!error && records.length > 0) {
+      // Merge into in-memory store as well
+      const map = new Map<string, RealCompletedRecord>();
+      for (const r of accumulatedRealHistory) map.set(r.issueNumber, r);
+      for (const r of records) map.set(r.issueNumber, r);
+      accumulatedRealHistory = Array.from(map.values()).sort((a, b) => b.issueNumber.localeCompare(a.issueNumber));
+      if (accumulatedRealHistory.length > 1000) accumulatedRealHistory = accumulatedRealHistory.slice(0, 1000);
+
+      return res.json({
+        success: true,
+        totalAvailable: totalCount,
+        returnedCount: records.length,
+        lastUpdated: new Date().toISOString(),
+        lastSyncTime: lastSupabaseSyncTime || new Date().toISOString(),
+        storage: 'supabase',
+        source: 'COMPLETED REAL HISTORY',
+        results: records,
+        error: null,
+      });
+    }
+  }
+
+  // Fallback to in-memory store if Supabase is not configured or empty
+  const sliceCount = limit === 'all' ? accumulatedRealHistory.length : limit;
   res.json({
     success: true,
     totalAvailable: accumulatedRealHistory.length,
-    returnedCount: Math.min(limit, accumulatedRealHistory.length),
+    returnedCount: Math.min(sliceCount, accumulatedRealHistory.length),
     lastUpdated: new Date(lastRealFetchTime || Date.now()).toISOString(),
-    error: accumulatedRealHistory.length === 0
-      ? 'Vercel server proxy is disabled (upstream blocks datacenter IPs with Cloudflare HTTP 403). Live history is fetched directly from client browser.'
-      : null,
+    lastSyncTime: lastSupabaseSyncTime,
+    storage: supabaseClient ? 'supabase-empty-fallback' : 'in-memory-fallback',
+    error: supabaseClient
+      ? null
+      : 'Supabase server environment variables (SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY) not set. Using in-memory fallback.',
     source: 'COMPLETED REAL HISTORY',
-    results: accumulatedRealHistory.slice(0, limit),
+    results: accumulatedRealHistory.slice(0, sliceCount),
   });
 });
 
-// POST /api/real/history (Sync client-fetched records into server memory if needed)
-app.post('/api/real/history', (req, res) => {
-  const incoming = Array.isArray(req.body.results) ? req.body.results : [];
-  if (incoming.length > 0) {
-    const existingMap = new Map<string, RealCompletedRecord>();
-    for (const item of accumulatedRealHistory) {
-      existingMap.set(item.periodNumber, item);
-    }
-    for (const item of incoming) {
-      if (item && item.issueNumber) {
-        const num = Number(item.winningNumber ?? item.number);
-        existingMap.set(String(item.issueNumber), {
-          issueNumber: String(item.issueNumber),
-          periodNumber: String(item.issueNumber),
-          winningNumber: isNaN(num) ? 0 : num,
-          size: num >= 5 ? 'Big' : 'Small',
-          colors: parseRealColors(item.color, num),
+// POST /api/real/history & POST /api/real/sync (Upserts records into Supabase & in-memory cache)
+const handleSyncHistory = async (req: express.Request, res: express.Response) => {
+  const incoming = Array.isArray(req.body.results)
+    ? req.body.results
+    : Array.isArray(req.body.records)
+    ? req.body.records
+    : [];
+
+  if (incoming.length === 0) {
+    return res.status(400).json({ success: false, message: 'No records provided in body' });
+  }
+
+  const validRecords: RealCompletedRecord[] = [];
+  for (const item of incoming) {
+    if (item && (item.issueNumber || item.issue_number || item.periodNumber)) {
+      const issue = String(item.issueNumber || item.issue_number || item.periodNumber).trim();
+      const rawNum =
+        item.winningNumber !== undefined
+          ? item.winningNumber
+          : item.winning_number !== undefined
+          ? item.winning_number
+          : item.number;
+      const num = Number(rawNum);
+      if (issue && !isNaN(num) && num >= 0 && num <= 9) {
+        validRecords.push({
+          issueNumber: issue,
+          periodNumber: issue,
+          winningNumber: num,
+          size: (item.size as 'Big' | 'Small') || (num >= 5 ? 'Big' : 'Small'),
+          colors: parseRealColors(item.color || (Array.isArray(item.colors) ? item.colors.join(',') : ''), num),
           premium: String(item.premium ?? num),
           sum: Number(item.sum ?? 0),
-          completedAt: item.completedAt || new Date().toISOString(),
+          completedAt: item.completedAt || item.created_at || new Date().toISOString(),
           source: 'COMPLETED REAL HISTORY',
         });
       }
     }
-
-    accumulatedRealHistory = Array.from(existingMap.values()).sort((a, b) => {
-      try {
-        const ba = BigInt(a.periodNumber);
-        const bb = BigInt(b.periodNumber);
-        return ba > bb ? -1 : ba < bb ? 1 : 0;
-      } catch {
-        return b.periodNumber.localeCompare(a.periodNumber);
-      }
-    });
-
-    if (accumulatedRealHistory.length > 1000) {
-      accumulatedRealHistory = accumulatedRealHistory.slice(0, 1000);
-    }
-    lastRealFetchTime = Date.now();
   }
 
+  // Deduplicate incoming batch by issueNumber
+  const dedupeMap = new Map<string, RealCompletedRecord>();
+  for (const r of validRecords) {
+    dedupeMap.set(r.issueNumber, r);
+  }
+  const cleanRecords = Array.from(dedupeMap.values());
+
+  let supabaseUpsertError: string | null = null;
+  const client = getSupabaseClient();
+  if (client) {
+    const { error } = await upsertToSupabase(cleanRecords);
+    if (error) {
+      supabaseUpsertError = error;
+    } else {
+      lastSupabaseSyncTime = new Date().toISOString();
+    }
+  }
+
+  // Merge into in-memory store as cache
+  const memoryMap = new Map<string, RealCompletedRecord>();
+  for (const r of accumulatedRealHistory) memoryMap.set(r.issueNumber, r);
+  for (const r of cleanRecords) memoryMap.set(r.issueNumber, r);
+  accumulatedRealHistory = Array.from(memoryMap.values()).sort((a, b) => b.issueNumber.localeCompare(a.issueNumber));
+  if (accumulatedRealHistory.length > 1000) accumulatedRealHistory = accumulatedRealHistory.slice(0, 1000);
+  lastRealFetchTime = Date.now();
+
   res.json({
-    success: true,
+    success: !supabaseUpsertError,
+    upsertedCount: cleanRecords.length,
     totalAvailable: accumulatedRealHistory.length,
+    storage: client ? (supabaseUpsertError ? 'supabase-error' : 'supabase') : 'in-memory-fallback',
+    lastSyncTime: lastSupabaseSyncTime,
+    error: supabaseUpsertError,
   });
-});
+};
+
+app.post('/api/real/history', handleSyncHistory);
+app.post('/api/real/sync', handleSyncHistory);
 
 // GET /api/real/history/export?format=csv|json
 app.get('/api/real/history/export', (req, res) => {

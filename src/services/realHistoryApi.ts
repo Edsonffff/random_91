@@ -40,6 +40,8 @@ export interface RealHistoryApiResponse {
   totalAvailable: number;
   returnedCount: number;
   lastUpdated: string;
+  lastSyncTime?: string | null;
+  storage?: string;
   error?: string | null;
   source: 'COMPLETED REAL HISTORY';
   results: RealGameRecord[];
@@ -268,11 +270,61 @@ export async function fetchRealScheduleFallback(): Promise<RealGameSchedule> {
   return (await response.json()) as RealGameSchedule;
 }
 
+/**
+ * Send real history records to server to upsert into Supabase public.real_wingo_30s_history.
+ * Duplicate key: (game_code, issue_number).
+ */
+export async function syncRealHistoryToSupabase(
+  records: RealGameRecord[]
+): Promise<{
+  success: boolean;
+  upsertedCount: number;
+  totalAvailable: number;
+  storage?: string;
+  lastSyncTime?: string;
+  error?: string | null;
+}> {
+  const endpointUrl = `${BASE_URL}/sync`;
+  const response = await fetch(endpointUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ records }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Sync HTTP error: ${response.status}`);
+  }
+
+  return await response.json();
+}
+
+/**
+ * Read persistent real history records from Supabase via server /api/real/history.
+ */
+export async function fetchRealHistoryFromSupabase(
+  limit: number | 'all' = 50
+): Promise<RealHistoryApiResponse> {
+  const params = new URLSearchParams();
+  if (limit !== undefined) {
+    params.set('limit', String(limit));
+  }
+  const endpointUrl = `${BASE_URL}/history?${params.toString()}`;
+  const response = await fetch(endpointUrl);
+  if (!response.ok) {
+    throw new Error(`Failed to load Supabase history: HTTP ${response.status}`);
+  }
+  return (await response.json()) as RealHistoryApiResponse;
+}
+
 export const realHistoryApiService = {
   fetchOfficialHistoryFromBrowser,
   fetchOfficialScheduleFromBrowser,
   fetchRealHistoryFallback,
   fetchRealScheduleFallback,
+  syncRealHistoryToSupabase,
+  fetchRealHistoryFromSupabase,
 
   /**
    * Primary fetcher for real history: direct browser fetch with server fallback.

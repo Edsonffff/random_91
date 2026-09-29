@@ -16,6 +16,7 @@ export interface RealHistoryPagination {
 }
 
 export type ConnectionMode = 'browser-direct' | 'server-fallback' | 'imported' | 'cached' | 'idle';
+export type SupabaseSyncStatus = 'synced' | 'syncing' | 'error' | 'idle';
 
 export interface RealHistoryContextType {
   realHistory: RealGameRecord[];
@@ -25,12 +26,15 @@ export interface RealHistoryContextType {
   autoRefresh: boolean;
   setAutoRefresh: (val: boolean) => void;
   lastUpdated: string | null;
+  lastSupabaseSyncTime: string | null;
+  supabaseStatus: SupabaseSyncStatus;
   isLoading: boolean;
   error: string | null;
   pagination: RealHistoryPagination | null;
   connectionMode: ConnectionMode;
   refreshRealResults: (force?: boolean) => Promise<void>;
   refreshSchedule: () => Promise<void>;
+  syncAllToSupabase: () => Promise<void>;
   importRealHistoryCurlJson: (rawJsonText: string) => boolean;
 }
 
@@ -75,6 +79,8 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
   const [selectedLimit, setSelectedLimit] = useState<10 | 50 | 100 | 'all'>(10);
   const [autoRefresh, setAutoRefresh] = useState<boolean>(true);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
+  const [lastSupabaseSyncTime, setLastSupabaseSyncTime] = useState<string | null>(null);
+  const [supabaseStatus, setSupabaseStatus] = useState<SupabaseSyncStatus>('idle');
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [pagination, setPagination] = useState<RealHistoryPagination | null>(null);
@@ -99,6 +105,33 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
       // Non-blocking
     }
   }, []);
+
+  const syncAllToSupabase = useCallback(async () => {
+    if (realHistoryRef.current.length === 0) {
+      showToast('No records available to sync to Supabase.', 'warning');
+      return;
+    }
+    setSupabaseStatus('syncing');
+    try {
+      const res = await realHistoryApiService.syncRealHistoryToSupabase(realHistoryRef.current);
+      if (res.success) {
+        const time = res.lastSyncTime || new Date().toISOString();
+        setLastSupabaseSyncTime(time);
+        setSupabaseStatus('synced');
+        showToast(
+          `Successfully upserted ${res.upsertedCount} records into Supabase public.real_wingo_30s_history!`,
+          'success'
+        );
+      } else {
+        setSupabaseStatus('error');
+        showToast(`Supabase sync warning: ${res.error || 'Check environment variables'}`, 'warning');
+      }
+    } catch (err: unknown) {
+      setSupabaseStatus('error');
+      const msg = err instanceof Error ? err.message : 'Sync failed';
+      showToast(`Supabase sync failed: ${msg}`, 'error');
+    }
+  }, [showToast]);
 
   const refreshRealResults = useCallback(
     async (force: boolean = false) => {
@@ -137,6 +170,22 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
           } catch {
             // LocalStorage fallback
           }
+
+          // Step 2: Automatically upsert newly completed results into Supabase
+          realHistoryApiService
+            .syncRealHistoryToSupabase(directResult.records)
+            .then((syncRes) => {
+              if (syncRes.success) {
+                setLastSupabaseSyncTime(syncRes.lastSyncTime || new Date().toISOString());
+                setSupabaseStatus('synced');
+              } else if (syncRes.error) {
+                console.warn('[Supabase Sync Notice]:', syncRes.error);
+                setSupabaseStatus('error');
+              }
+            })
+            .catch((syncErr) => {
+              console.warn('[Supabase Sync Warning]:', syncErr);
+            });
 
           if (force) {
             showToast(
@@ -187,15 +236,18 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
         const directErrMsg = err instanceof Error ? err.message : 'Unknown direct fetch error';
         console.warn('[RealHistoryContext] Direct browser fetch failed:', directErrMsg);
 
-        // Step 2: Attempt fallback to server /api/real/history endpoint as fallback/status
+        // Step 3: Attempt fallback to server /api/real/history endpoint as fallback/status
         let fallbackSucceeded = false;
         try {
-          const fallbackData = await realHistoryApiService.fetchRealHistoryFallback(50, force);
+          const fallbackData = await realHistoryApiService.fetchRealHistoryFromSupabase(50);
           if (!controller.signal.aborted && fallbackData.results && fallbackData.results.length > 0) {
             const merged = mergeAndDeduplicate(realHistoryRef.current, fallbackData.results);
             setRealHistory(merged);
             setConnectionMode('server-fallback');
             setLastUpdated(fallbackData.lastUpdated || new Date().toISOString());
+            if (fallbackData.lastSyncTime) {
+              setLastSupabaseSyncTime(fallbackData.lastSyncTime);
+            }
             setError(null);
             fallbackSucceeded = true;
           }
@@ -298,6 +350,19 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
           // localStorage fallback
         }
 
+        // Automatically sync imported records into Supabase!
+        realHistoryApiService
+          .syncRealHistoryToSupabase(newRecords)
+          .then((syncRes) => {
+            if (syncRes.success) {
+              setLastSupabaseSyncTime(syncRes.lastSyncTime || new Date().toISOString());
+              setSupabaseStatus('synced');
+            }
+          })
+          .catch((syncErr) => {
+            console.warn('[Supabase Import Sync Warning]:', syncErr);
+          });
+
         // Derive active schedule from latest imported record
         const latest = merged[0];
         if (latest) {
@@ -334,10 +399,33 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
     [showToast]
   );
 
-  // Initial load
+  // Initial load: first load persistent history from Supabase, then refresh live from browser
   useEffect(() => {
-    refreshRealResults(false);
+    let isMounted = true;
+
+    const initializeData = async () => {
+      try {
+        const supabaseData = await realHistoryApiService.fetchRealHistoryFromSupabase(500);
+        if (isMounted && supabaseData.results && supabaseData.results.length > 0) {
+          setRealHistory((prev) => mergeAndDeduplicate(prev, supabaseData.results));
+          if (supabaseData.lastSyncTime) {
+            setLastSupabaseSyncTime(supabaseData.lastSyncTime);
+          }
+          setSupabaseStatus('synced');
+        }
+      } catch {
+        // Supabase initial load non-blocking
+      }
+
+      if (isMounted) {
+        refreshRealResults(false);
+      }
+    };
+
+    initializeData();
+
     return () => {
+      isMounted = false;
       if (activeAbortControllerRef.current) {
         activeAbortControllerRef.current.abort();
       }
@@ -385,12 +473,15 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
         autoRefresh,
         setAutoRefresh,
         lastUpdated,
+        lastSupabaseSyncTime,
+        supabaseStatus,
         isLoading,
         error,
         pagination,
         connectionMode,
         refreshRealResults,
         refreshSchedule,
+        syncAllToSupabase,
         importRealHistoryCurlJson,
       }}
     >
