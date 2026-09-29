@@ -9,6 +9,8 @@ import {
   Scale,
   AlertTriangle,
   Radio,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 
 interface RoundEntry {
@@ -63,6 +65,17 @@ export const AlgorithmAnalyzer: React.FC = () => {
   const { realHistory } = useRealHistory();
   const [dataSource, setDataSource] = useState<'realLive' | 'sample3' | 'sample2' | 'sample1' | 'live'>('realLive');
   const [activeTestTab, setActiveTestTab] = useState<'periodSum' | 'linearDelta' | 'alternation'>('periodSum');
+  const [expandedSources, setExpandedSources] = useState<Record<string, boolean>>({});
+  const showAllSequence = Boolean(expandedSources[dataSource]);
+
+  const toggleShowAllSequence = () => {
+    setExpandedSources((prev) => ({
+      ...prev,
+      [dataSource]: !prev[dataSource],
+    }));
+  };
+
+  const DEFAULT_VISIBLE_ROUNDS = 30;
 
   // Active dataset being analyzed (Backtesting strictly on completed results)
   const activeDataset: RoundEntry[] = useMemo(() => {
@@ -133,6 +146,12 @@ export const AlgorithmAnalyzer: React.FC = () => {
       topNumbers,
     };
   }, [activeDataset]);
+
+  const visibleSequenceStr = useMemo(() => {
+    if (!activeDataset || activeDataset.length === 0) return '';
+    const slice = showAllSequence ? activeDataset : activeDataset.slice(0, DEFAULT_VISIBLE_ROUNDS);
+    return slice.map((d) => d.number).join(' → ');
+  }, [activeDataset, showAllSequence]);
 
   // ==========================================
   // 2. TESTED FORMULAS (Mathematical Evaluations)
@@ -331,13 +350,71 @@ export const AlgorithmAnalyzer: React.FC = () => {
 
         {observedStats && (
           <div className="space-y-4">
-            {/* Sequence line */}
-            <div className="p-4 rounded-xl bg-[#06130F] border border-[#1E3A2B]">
-              <span className="text-[11px] text-[#8D9B95] uppercase font-semibold block mb-1.5">
-                Observed Draw Sequence ({observedStats.total} Rounds):
-              </span>
-              <div className="font-mono text-sm sm:text-base font-bold text-[#E7B93F] tracking-wide break-all">
-                {observedStats.sequenceStr}
+            {/* Sequence line with compact fixed-height scrollable container */}
+            <div className="p-4 rounded-xl bg-[#06130F] border border-[#1E3A2B] space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-[11px] text-[#8D9B95] uppercase font-semibold">
+                    Observed Draw Sequence:
+                  </span>
+                  <span className="px-2 py-0.5 rounded text-[11px] font-mono font-medium bg-[#1E3A2B]/50 text-[#E7B93F] border border-[#1E3A2B]">
+                    {observedStats.total > DEFAULT_VISIBLE_ROUNDS
+                      ? showAllSequence
+                        ? `Showing all ${observedStats.total} rounds`
+                        : `Showing latest ${DEFAULT_VISIBLE_ROUNDS} of ${observedStats.total} rounds`
+                      : `Showing all ${observedStats.total} rounds`}
+                  </span>
+                </div>
+
+                {observedStats.total > DEFAULT_VISIBLE_ROUNDS && (
+                  <button
+                    type="button"
+                    onClick={toggleShowAllSequence}
+                    className="px-2.5 py-1 text-xs font-mono font-semibold rounded-lg bg-[#071A14] hover:bg-[#1E3A2B] text-[#F5F5F5] hover:text-[#35B978] border border-[#1E3A2B] hover:border-[#35B978]/50 transition-colors cursor-pointer flex items-center gap-1.5"
+                  >
+                    {showAllSequence ? (
+                      <>
+                        <ChevronUp className="w-3.5 h-3.5 text-[#8D9B95]" />
+                        Collapse
+                      </>
+                    ) : (
+                      <>
+                        <ChevronDown className="w-3.5 h-3.5 text-[#8D9B95]" />
+                        Show All
+                      </>
+                    )}
+                  </button>
+                )}
+              </div>
+
+              {/* Compact fixed-height container (~140px tall) with vertical scrolling */}
+              <div
+                className="h-[140px] overflow-y-auto overflow-x-hidden p-3.5 rounded-lg bg-[#020806] border border-[#1E3A2B]/60 select-text"
+                style={{
+                  scrollbarWidth: 'thin',
+                  scrollbarColor: '#35B978 #020806',
+                }}
+              >
+                <div className="font-mono text-sm sm:text-base font-bold text-[#E7B93F] tracking-wide break-words whitespace-normal leading-relaxed">
+                  {visibleSequenceStr}
+                  {!showAllSequence && observedStats.total > DEFAULT_VISIBLE_ROUNDS && (
+                    <span className="text-[#8D9B95] font-normal"> → ...</span>
+                  )}
+                </div>
+              </div>
+
+              {/* Scroll indicator & metadata */}
+              <div className="flex items-center justify-between text-[11px] text-[#8D9B95] px-0.5">
+                <span className="flex items-center gap-1.5">
+                  <span className="inline-block w-1.5 h-1.5 rounded-full bg-[#35B978] animate-pulse" />
+                  <span>Vertical scroll enabled • Newest to oldest</span>
+                </span>
+                <span className="font-mono text-[10px] text-[#8D9B95]">
+                  {showAllSequence || observedStats.total <= DEFAULT_VISIBLE_ROUNDS
+                    ? `${observedStats.total} / ${observedStats.total}`
+                    : `${DEFAULT_VISIBLE_ROUNDS} / ${observedStats.total}`}{' '}
+                  rounds visible
+                </span>
               </div>
             </div>
 
