@@ -58,7 +58,11 @@ export const RealHistoryView: React.FC = () => {
     connectionMode,
     lastSupabaseSyncTime,
     supabaseStatus,
+    supabaseError,
+    dismissSupabaseError,
+    totalSupabaseRows,
     syncAllToSupabase,
+    testSingleSupabaseSync,
     refreshRealResults,
     importRealHistoryCurlJson,
   } = useRealHistory();
@@ -202,7 +206,7 @@ export const RealHistoryView: React.FC = () => {
                 title="Records persisted to Supabase public.real_wingo_30s_history"
               >
                 <Database className="w-3 h-3 text-teal-400" />
-                Supabase Synced ({new Date(lastSupabaseSyncTime).toLocaleTimeString()})
+                Supabase Synced {totalSupabaseRows !== null ? `(${totalSupabaseRows} rows) ` : ''}({new Date(lastSupabaseSyncTime).toLocaleTimeString()})
               </span>
             ) : supabaseStatus === 'syncing' ? (
               <span className="px-2.5 py-0.5 rounded text-[11px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 inline-flex items-center gap-1.5">
@@ -242,6 +246,17 @@ export const RealHistoryView: React.FC = () => {
               </button>
             ))}
           </div>
+
+          {/* Test 1 Record button (Requirement 13) */}
+          <button
+            onClick={testSingleSupabaseSync}
+            disabled={realHistory.length === 0 || supabaseStatus === 'syncing'}
+            className="px-3.5 py-2 rounded-xl bg-[#06130F] hover:bg-[#0E2E22] text-teal-300 border border-teal-500/40 text-xs font-bold transition-all cursor-pointer shadow flex items-center gap-1.5 disabled:opacity-50"
+            title="Test inserting 1 real record into Supabase to verify schema and RLS permissions"
+          >
+            <Database className="w-3.5 h-3.5 text-teal-400" />
+            Test 1 Record
+          </button>
 
           {/* Sync to Supabase button */}
           <button
@@ -319,6 +334,76 @@ export const RealHistoryView: React.FC = () => {
               Retry Direct Fetch
             </button>
           </div>
+        </div>
+      )}
+
+      {/* SUPABASE WRITE FAILURE DIAGNOSTIC BANNER */}
+      {supabaseError && (
+        <div className="p-4 rounded-xl bg-red-950/40 border border-red-500/50 text-xs text-red-200 shadow-xl space-y-3">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-start gap-2.5">
+              <AlertCircle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
+              <div>
+                <div className="font-bold text-red-300 text-sm flex flex-wrap items-center gap-2">
+                  <span>Supabase Write Diagnostic</span>
+                  {supabaseError.code && (
+                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-red-900/60 border border-red-500/40 text-red-200">
+                      Code: {supabaseError.code}
+                    </span>
+                  )}
+                  {supabaseError.status && (
+                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-red-900/60 border border-red-500/40 text-red-200">
+                      HTTP {supabaseError.status}
+                    </span>
+                  )}
+                  {supabaseError.stage && (
+                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-amber-900/40 border border-amber-500/30 text-amber-200">
+                      Stage: {supabaseError.stage}
+                    </span>
+                  )}
+                </div>
+                <div className="text-red-100 font-semibold mt-1">
+                  {supabaseError.message}
+                </div>
+                {supabaseError.details && (
+                  <div className="text-red-300/90 text-[11px] mt-0.5">
+                    <strong>Details:</strong> {supabaseError.details}
+                  </div>
+                )}
+                {supabaseError.hint && (
+                  <div className="text-amber-300 text-[11px] mt-0.5">
+                    <strong>Hint:</strong> {supabaseError.hint}
+                  </div>
+                )}
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                onClick={testSingleSupabaseSync}
+                disabled={supabaseStatus === 'syncing'}
+                className="px-3 py-1.5 rounded-lg bg-teal-600 hover:bg-teal-500 text-white font-bold text-xs cursor-pointer shadow flex items-center gap-1"
+                title="Run single record test write"
+              >
+                <Database className="w-3.5 h-3.5" />
+                Test 1 Record
+              </button>
+              <button
+                onClick={dismissSupabaseError}
+                className="px-2 py-1 rounded text-red-300 hover:text-white text-xs border border-red-700/50 hover:bg-red-900/40 cursor-pointer"
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+
+          {supabaseError.testedPayload && (
+            <div className="bg-[#050D0A] p-2.5 rounded-lg border border-red-900/40 text-[11px] font-mono">
+              <div className="text-[#8D9B95] mb-1 font-sans font-bold">Tested Payload (Target: public.real_wingo_30s_history):</div>
+              <pre className="text-teal-300 overflow-x-auto whitespace-pre-wrap">
+                {JSON.stringify(supabaseError.testedPayload, null, 2)}
+              </pre>
+            </div>
+          )}
         </div>
       )}
 

@@ -17,6 +17,15 @@ export interface RealHistoryPagination {
 
 export type ConnectionMode = 'browser-direct' | 'server-fallback' | 'imported' | 'cached' | 'idle';
 export type SupabaseSyncStatus = 'synced' | 'syncing' | 'error' | 'idle';
+export interface SupabaseSyncErrorDetails {
+  message: string;
+  details?: string | null;
+  hint?: string | null;
+  code?: string | null;
+  status?: number | null;
+  stage?: string | null;
+  testedPayload?: Record<string, unknown> | null;
+}
 
 export interface RealHistoryContextType {
   realHistory: RealGameRecord[];
@@ -28,6 +37,9 @@ export interface RealHistoryContextType {
   lastUpdated: string | null;
   lastSupabaseSyncTime: string | null;
   supabaseStatus: SupabaseSyncStatus;
+  supabaseError: SupabaseSyncErrorDetails | null;
+  dismissSupabaseError: () => void;
+  totalSupabaseRows: number | null;
   isLoading: boolean;
   error: string | null;
   pagination: RealHistoryPagination | null;
@@ -35,6 +47,7 @@ export interface RealHistoryContextType {
   refreshRealResults: (force?: boolean) => Promise<void>;
   refreshSchedule: () => Promise<void>;
   syncAllToSupabase: () => Promise<void>;
+  testSingleSupabaseSync: () => Promise<void>;
   importRealHistoryCurlJson: (rawJsonText: string) => boolean;
 }
 
@@ -81,6 +94,8 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [lastSupabaseSyncTime, setLastSupabaseSyncTime] = useState<string | null>(null);
   const [supabaseStatus, setSupabaseStatus] = useState<SupabaseSyncStatus>('idle');
+  const [supabaseError, setSupabaseError] = useState<SupabaseSyncErrorDetails | null>(null);
+  const [totalSupabaseRows, setTotalSupabaseRows] = useState<number | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [pagination, setPagination] = useState<RealHistoryPagination | null>(null);
@@ -96,6 +111,10 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
   }, [realHistory]);
 
   const activeAbortControllerRef = useRef<AbortController | null>(null);
+
+  const dismissSupabaseError = useCallback(() => {
+    setSupabaseError(null);
+  }, []);
 
   const refreshSchedule = useCallback(async () => {
     try {
@@ -118,18 +137,71 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
         const time = res.lastSyncTime || new Date().toISOString();
         setLastSupabaseSyncTime(time);
         setSupabaseStatus('synced');
+        setSupabaseError(null);
+        if (typeof res.totalTableRows === 'number') {
+          setTotalSupabaseRows(res.totalTableRows);
+        }
         showToast(
           `Successfully upserted ${res.upsertedCount} records into Supabase public.real_wingo_30s_history!`,
           'success'
         );
       } else {
         setSupabaseStatus('error');
-        showToast(`Supabase sync warning: ${res.error || 'Check environment variables'}`, 'warning');
+        setSupabaseError({
+          message: res.error || 'Failed to upsert records into Supabase',
+          details: res.details,
+          hint: res.hint,
+          code: res.code,
+          status: res.status,
+          stage: res.stage,
+          testedPayload: res.testedPayload,
+        });
+        showToast(`Supabase sync warning: ${res.error || 'Failed to upsert records'}`, 'warning');
       }
     } catch (err: unknown) {
       setSupabaseStatus('error');
       const msg = err instanceof Error ? err.message : 'Sync failed';
+      setSupabaseError({ message: msg });
       showToast(`Supabase sync failed: ${msg}`, 'error');
+    }
+  }, [showToast]);
+
+  const testSingleSupabaseSync = useCallback(async () => {
+    if (realHistoryRef.current.length === 0) {
+      showToast('No records available to test Supabase write.', 'warning');
+      return;
+    }
+    setSupabaseStatus('syncing');
+    try {
+      const single = [realHistoryRef.current[0]];
+      const res = await realHistoryApiService.syncRealHistoryToSupabase(single);
+      if (res.success) {
+        const time = res.lastSyncTime || new Date().toISOString();
+        setLastSupabaseSyncTime(time);
+        setSupabaseStatus('synced');
+        setSupabaseError(null);
+        if (typeof res.totalTableRows === 'number') {
+          setTotalSupabaseRows(res.totalTableRows);
+        }
+        showToast('Single record test passed! Row verified in Supabase.', 'success');
+      } else {
+        setSupabaseStatus('error');
+        setSupabaseError({
+          message: res.error || 'Single record test failed',
+          details: res.details,
+          hint: res.hint,
+          code: res.code,
+          status: res.status,
+          stage: res.stage,
+          testedPayload: res.testedPayload,
+        });
+        showToast(`Single record test failed: ${res.error}`, 'error');
+      }
+    } catch (err: unknown) {
+      setSupabaseStatus('error');
+      const msg = err instanceof Error ? err.message : 'Test failed';
+      setSupabaseError({ message: msg });
+      showToast(msg, 'error');
     }
   }, [showToast]);
 
@@ -178,9 +250,22 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
               if (syncRes.success) {
                 setLastSupabaseSyncTime(syncRes.lastSyncTime || new Date().toISOString());
                 setSupabaseStatus('synced');
+                setSupabaseError(null);
+                if (typeof syncRes.totalTableRows === 'number') {
+                  setTotalSupabaseRows(syncRes.totalTableRows);
+                }
               } else if (syncRes.error) {
-                console.warn('[Supabase Sync Notice]:', syncRes.error);
+                console.warn('[Supabase Sync Notice]:', syncRes.error, syncRes);
                 setSupabaseStatus('error');
+                setSupabaseError({
+                  message: syncRes.error,
+                  details: syncRes.details,
+                  hint: syncRes.hint,
+                  code: syncRes.code,
+                  status: syncRes.status,
+                  stage: syncRes.stage,
+                  testedPayload: syncRes.testedPayload,
+                });
               }
             })
             .catch((syncErr) => {
@@ -357,6 +442,22 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
             if (syncRes.success) {
               setLastSupabaseSyncTime(syncRes.lastSyncTime || new Date().toISOString());
               setSupabaseStatus('synced');
+              setSupabaseError(null);
+              if (typeof syncRes.totalTableRows === 'number') {
+                setTotalSupabaseRows(syncRes.totalTableRows);
+              }
+            } else if (syncRes.error) {
+              console.warn('[Supabase Import Sync Notice]:', syncRes.error, syncRes);
+              setSupabaseStatus('error');
+              setSupabaseError({
+                message: syncRes.error,
+                details: syncRes.details,
+                hint: syncRes.hint,
+                code: syncRes.code,
+                status: syncRes.status,
+                stage: syncRes.stage,
+                testedPayload: syncRes.testedPayload,
+              });
             }
           })
           .catch((syncErr) => {
@@ -475,6 +576,9 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
         lastUpdated,
         lastSupabaseSyncTime,
         supabaseStatus,
+        supabaseError,
+        dismissSupabaseError,
+        totalSupabaseRows,
         isLoading,
         error,
         pagination,
@@ -482,6 +586,7 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
         refreshRealResults,
         refreshSchedule,
         syncAllToSupabase,
+        testSingleSupabaseSync,
         importRealHistoryCurlJson,
       }}
     >

@@ -377,65 +377,197 @@ function parseRealColors(rawColor: string | undefined, num: number): ('red' | 'g
   return num % 2 === 0 ? ['red'] : ['green'];
 }
 
+// Helper to inspect Supabase JWT role without exposing secret key
+function getJwtRole(token?: string): string {
+  const key = token || process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+  try {
+    const parts = key.split('.');
+    if (parts.length === 3) {
+      const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
+      return payload.role || 'unknown';
+    }
+  } catch {
+    // ignore
+  }
+  return 'missing-or-invalid';
+}
+
+function getSanitizedSupabaseUrl(): string {
+  const url = process.env.SUPABASE_URL || '';
+  try {
+    const parsed = new URL(url);
+    return `${parsed.protocol}//${parsed.host}`;
+  } catch {
+    return url ? 'malformed-url' : 'not-set';
+  }
+}
+
 /**
- * Upsert records into public.real_wingo_30s_history with (game_code, issue_number) as duplicate key.
+ * Format a record with the EXACT 8 fields of public.real_wingo_30s_history:
+ * issue_number, number, color, premium, sum, game_code, source, source_time
  */
-async function upsertToSupabase(records: RealCompletedRecord[]): Promise<{ count: number; error: string | null }> {
+function formatRecordForSupabase(
+  r: RealCompletedRecord,
+  timeType: 'iso' | 'millis' = 'iso'
+): Record<string, unknown> {
+  const num = typeof r.winningNumber === 'number' ? r.winningNumber : parseInt(String(r.winningNumber ?? 0), 10);
+  const colorStr = Array.isArray(r.colors) ? r.colors.join(',') : String(r.colors || '');
+
+  return {
+    game_code: 'WinGo_30S',
+    issue_number: String(r.issueNumber),
+    number: isNaN(num) ? 0 : num,
+    color: colorStr,
+    premium: String(r.premium ?? num),
+    sum: typeof r.sum === 'number' ? r.sum : 0,
+    source: 'COMPLETED REAL HISTORY',
+    source_time:
+      timeType === 'millis'
+        ? Date.parse(r.completedAt) || Date.now()
+        : r.completedAt || new Date().toISOString(),
+  };
+}
+
+export interface SupabaseDetailedError {
+  message: string;
+  details?: string | null;
+  hint?: string | null;
+  code?: string | null;
+  status?: number | null;
+}
+
+export interface SupabaseUpsertResult {
+  success: boolean;
+  error?: SupabaseDetailedError | null;
+  verifiedRow?: Record<string, unknown> | null;
+  upsertedCount?: number;
+  totalTableRows?: number;
+  stage?: string;
+  testedPayload?: Record<string, unknown>;
+}
+
+/**
+ * Test single record upsert first, return exact error without hiding,
+ * then perform batch synchronization and verify row exists.
+ */
+async function syncRecordsToSupabase(records: RealCompletedRecord[]): Promise<SupabaseUpsertResult> {
   const client = getSupabaseClient();
   if (!client) {
-    return { count: 0, error: 'SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not configured' };
+    return {
+      success: false,
+      error: {
+        message: 'SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY environment variable is missing on server',
+        details: 'Check Vercel Project Settings > Environment Variables',
+        code: 'MISSING_ENV_VARS',
+      },
+      stage: 'client_initialization',
+    };
   }
 
   if (!records || records.length === 0) {
-    return { count: 0, error: null };
+    return { success: true, upsertedCount: 0 };
   }
 
-  const baseRows = records.map((r) => {
-    const colorStr = r.colors.join(',');
-    return {
-      game_code: 'WinGo_30S',
-      issue_number: String(r.issueNumber),
-      number: r.winningNumber,
-      winning_number: r.winningNumber,
-      size: r.size,
-      color: colorStr,
-      colors: r.colors,
-      premium: String(r.premium ?? r.winningNumber),
-      sum: Number(r.sum ?? 0),
-      created_at: r.completedAt || new Date().toISOString(),
-    };
-  });
+  // 1. Test with ONE real record first (Requirement 13 & 14)
+  let testPayload = formatRecordForSupabase(records[0], 'iso');
+  let singleResponse = await client
+    .from('real_wingo_30s_history')
+    .upsert([testPayload], { onConflict: 'game_code,issue_number' })
+    .select();
 
-  let candidateRows: Array<Record<string, unknown>> = baseRows;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const { error } = await client
+  // If failed with a timestamp type error, test millis fallback for source_time
+  if (
+    singleResponse.error &&
+    (singleResponse.error.code === '22007' || singleResponse.error.code === '22P02')
+  ) {
+    const millisPayload = formatRecordForSupabase(records[0], 'millis');
+    const retryRes = await client
       .from('real_wingo_30s_history')
-      .upsert(candidateRows, { onConflict: 'game_code,issue_number' });
+      .upsert([millisPayload], { onConflict: 'game_code,issue_number' })
+      .select();
 
-    if (!error) {
-      return { count: records.length, error: null };
+    if (!retryRes.error) {
+      testPayload = millisPayload;
+      singleResponse = retryRes;
     }
-
-    const msg = error.message || '';
-    const colMatch =
-      msg.match(/Could not find the '([^']+)' column/i) ||
-      msg.match(/column ["']?([^"'\s]+)["']?.*schema cache/i);
-    if (colMatch && colMatch[1]) {
-      const badCol = colMatch[1];
-      console.warn(`[Supabase Upsert] Column "${badCol}" not in real_wingo_30s_history. Retrying without it...`);
-      candidateRows = candidateRows.map((row) => {
-        const copy: Record<string, unknown> = { ...row };
-        delete copy[badCol];
-        return copy;
-      });
-      continue;
-    }
-
-    console.error('[Supabase Upsert Error]:', error);
-    return { count: 0, error: error.message };
   }
 
-  return { count: 0, error: 'Failed to upsert records into Supabase' };
+  if (singleResponse.error) {
+    console.error("SUPABASE UPSERT ERROR", {
+      message: singleResponse.error.message,
+      details: singleResponse.error.details,
+      hint: singleResponse.error.hint,
+      code: singleResponse.error.code,
+      status: singleResponse.status,
+    });
+
+    return {
+      success: false,
+      error: {
+        message: singleResponse.error.message,
+        details: singleResponse.error.details,
+        hint: singleResponse.error.hint,
+        code: singleResponse.error.code,
+        status: singleResponse.status,
+      },
+      testedPayload: testPayload,
+      stage: 'single_record_test',
+    };
+  }
+
+  // 2. Single record insert worked! Now execute batch upsert (Requirement 15)
+  const isMillisTime = typeof testPayload.source_time === 'number';
+  const batchPayload = records.map((r) =>
+    formatRecordForSupabase(r, isMillisTime ? 'millis' : 'iso')
+  );
+
+  const batchResponse = await client
+    .from('real_wingo_30s_history')
+    .upsert(batchPayload, { onConflict: 'game_code,issue_number' });
+
+  if (batchResponse.error) {
+    console.error("SUPABASE UPSERT ERROR", {
+      message: batchResponse.error.message,
+      details: batchResponse.error.details,
+      hint: batchResponse.error.hint,
+      code: batchResponse.error.code,
+      status: batchResponse.status,
+    });
+
+    return {
+      success: false,
+      error: {
+        message: batchResponse.error.message,
+        details: batchResponse.error.details,
+        hint: batchResponse.error.hint,
+        code: batchResponse.error.code,
+        status: batchResponse.status,
+      },
+      stage: 'batch_upsert',
+    };
+  }
+
+  // 3. Verify that an actual row exists in public.real_wingo_30s_history (Requirement 16 & 17)
+  const verifyRes = await client
+    .from('real_wingo_30s_history')
+    .select('issue_number, number, color, premium, sum, game_code, source, source_time')
+    .eq('game_code', 'WinGo_30S')
+    .eq('issue_number', String(testPayload.issue_number))
+    .limit(1);
+
+  const countRes = await client
+    .from('real_wingo_30s_history')
+    .select('*', { count: 'exact', head: true })
+    .eq('game_code', 'WinGo_30S');
+
+  const verifiedRow = verifyRes.data?.[0] || null;
+
+  return {
+    success: true,
+    upsertedCount: records.length,
+    totalTableRows: countRes.count ?? records.length,
+    verifiedRow,
+  };
 }
 
 /**
@@ -679,16 +811,8 @@ const handleSyncHistory = async (req: express.Request, res: express.Response) =>
   }
   const cleanRecords = Array.from(dedupeMap.values());
 
-  let supabaseUpsertError: string | null = null;
   const client = getSupabaseClient();
-  if (client) {
-    const { error } = await upsertToSupabase(cleanRecords);
-    if (error) {
-      supabaseUpsertError = error;
-    } else {
-      lastSupabaseSyncTime = new Date().toISOString();
-    }
-  }
+  const syncResult = await syncRecordsToSupabase(cleanRecords);
 
   // Merge into in-memory store as cache
   const memoryMap = new Map<string, RealCompletedRecord>();
@@ -698,18 +822,102 @@ const handleSyncHistory = async (req: express.Request, res: express.Response) =>
   if (accumulatedRealHistory.length > 1000) accumulatedRealHistory = accumulatedRealHistory.slice(0, 1000);
   lastRealFetchTime = Date.now();
 
+  if (!syncResult.success) {
+    console.error("SUPABASE UPSERT ERROR", {
+      message: syncResult.error?.message,
+      details: syncResult.error?.details,
+      hint: syncResult.error?.hint,
+      code: syncResult.error?.code,
+      status: syncResult.error?.status,
+      stage: syncResult.stage,
+      testedPayload: syncResult.testedPayload,
+    });
+
+    return res.status(200).json({
+      success: false,
+      upsertedCount: 0,
+      totalAvailable: accumulatedRealHistory.length,
+      storage: client ? 'supabase-error' : 'in-memory-fallback',
+      lastSyncTime: lastSupabaseSyncTime,
+      error: syncResult.error?.message || 'Supabase upsert failed',
+      details: syncResult.error?.details || null,
+      hint: syncResult.error?.hint || null,
+      code: syncResult.error?.code || null,
+      status: syncResult.error?.status || null,
+      stage: syncResult.stage || 'unknown',
+      testedPayload: syncResult.testedPayload || null,
+    });
+  }
+
+  lastSupabaseSyncTime = new Date().toISOString();
+
   res.json({
-    success: !supabaseUpsertError,
-    upsertedCount: cleanRecords.length,
+    success: true,
+    upsertedCount: syncResult.upsertedCount ?? cleanRecords.length,
     totalAvailable: accumulatedRealHistory.length,
-    storage: client ? (supabaseUpsertError ? 'supabase-error' : 'supabase') : 'in-memory-fallback',
+    totalTableRows: syncResult.totalTableRows,
+    storage: 'supabase',
     lastSyncTime: lastSupabaseSyncTime,
-    error: supabaseUpsertError,
+    verifiedRow: syncResult.verifiedRow,
+    error: null,
   });
 };
 
 app.post('/api/real/history', handleSyncHistory);
 app.post('/api/real/sync', handleSyncHistory);
+
+// GET /api/real/debug-supabase (Diagnostic endpoint for testing Supabase connectivity and schema)
+app.get('/api/real/debug-supabase', async (_req, res) => {
+  const client = getSupabaseClient();
+  const url = getSanitizedSupabaseUrl();
+  const jwtRole = getJwtRole();
+  const hasKey = Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY);
+
+  if (!client) {
+    return res.status(200).json({
+      configured: false,
+      supabaseUrl: url,
+      serviceRoleKeyPresent: hasKey,
+      jwtRole,
+      error: 'SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY missing from environment variables',
+    });
+  }
+
+  // Run test on single record
+  const sampleRecord: RealCompletedRecord = accumulatedRealHistory[0] || {
+    issueNumber: '202603290001',
+    periodNumber: '202603290001',
+    winningNumber: 5,
+    size: 'Big',
+    colors: ['green', 'violet'],
+    premium: '5',
+    sum: 5,
+    completedAt: new Date().toISOString(),
+    source: 'COMPLETED REAL HISTORY',
+  };
+
+  const testResult = await syncRecordsToSupabase([sampleRecord]);
+
+  return res.json({
+    configured: true,
+    supabaseUrl: url,
+    serviceRoleKeyPresent: hasKey,
+    jwtRole,
+    targetTable: 'public.real_wingo_30s_history',
+    conflictTarget: 'game_code,issue_number',
+    fieldsExpected: [
+      'issue_number',
+      'number',
+      'color',
+      'premium',
+      'sum',
+      'game_code',
+      'source',
+      'source_time',
+    ],
+    testResult,
+  });
+});
 
 // GET /api/real/history/export?format=csv|json
 app.get('/api/real/history/export', (req, res) => {

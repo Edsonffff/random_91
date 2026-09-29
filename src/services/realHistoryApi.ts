@@ -270,33 +270,68 @@ export async function fetchRealScheduleFallback(): Promise<RealGameSchedule> {
   return (await response.json()) as RealGameSchedule;
 }
 
+export interface SupabaseSyncResponse {
+  success: boolean;
+  upsertedCount: number;
+  totalAvailable: number;
+  totalTableRows?: number;
+  storage?: string;
+  lastSyncTime?: string;
+  error?: string | null;
+  details?: string | null;
+  hint?: string | null;
+  code?: string | null;
+  status?: number | null;
+  stage?: string;
+  testedPayload?: Record<string, unknown>;
+  verifiedRow?: Record<string, unknown>;
+}
+
 /**
  * Send real history records to server to upsert into Supabase public.real_wingo_30s_history.
  * Duplicate key: (game_code, issue_number).
  */
 export async function syncRealHistoryToSupabase(
   records: RealGameRecord[]
-): Promise<{
-  success: boolean;
-  upsertedCount: number;
-  totalAvailable: number;
-  storage?: string;
-  lastSyncTime?: string;
-  error?: string | null;
-}> {
+): Promise<SupabaseSyncResponse> {
   const endpointUrl = `${BASE_URL}/sync`;
-  const response = await fetch(endpointUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ records }),
-  });
+  try {
+    const response = await fetch(endpointUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ records }),
+    });
 
-  if (!response.ok) {
-    throw new Error(`Sync HTTP error: ${response.status}`);
+    const data = await response.json();
+    if (!response.ok && data.success === undefined) {
+      return {
+        success: false,
+        upsertedCount: 0,
+        totalAvailable: 0,
+        error: data.message || `Sync HTTP error: ${response.status}`,
+        status: response.status,
+      };
+    }
+    return data as SupabaseSyncResponse;
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      success: false,
+      upsertedCount: 0,
+      totalAvailable: 0,
+      error: msg,
+    };
   }
+}
 
+/**
+ * Inspect server-side Supabase configuration and trigger single-record test.
+ */
+export async function debugSupabaseBackend(): Promise<Record<string, unknown>> {
+  const endpointUrl = `${BASE_URL}/debug-supabase`;
+  const response = await fetch(endpointUrl);
   return await response.json();
 }
 
@@ -324,6 +359,7 @@ export const realHistoryApiService = {
   fetchRealHistoryFallback,
   fetchRealScheduleFallback,
   syncRealHistoryToSupabase,
+  debugSupabaseBackend,
   fetchRealHistoryFromSupabase,
 
   /**
