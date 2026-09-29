@@ -29,6 +29,8 @@ import { SignalSummaryPanel } from './SignalSummaryPanel';
 interface RoundEntry {
   period: string;
   number: number;
+  /** ISO timestamp from RealGameRecord.completedAt — only present for realLive source */
+  completedAt?: string;
 }
 
 interface StreakDistribution {
@@ -527,6 +529,7 @@ export const AlgorithmAnalyzer: React.FC = () => {
         return realHistory.map((r) => ({
           period: r.periodNumber,
           number: r.winningNumber,
+          completedAt: r.completedAt, // carry actual draw timestamp for Test 5
         }));
       }
       return SAMPLE_3_SCREEN; // Fallback to sample 3 if network pending
@@ -833,12 +836,12 @@ export const AlgorithmAnalyzer: React.FC = () => {
       { testNum: 2, label: 'Linear Recurrence', prediction: testLinearRecurrence.details.length > 0 ? testLinearRecurrence.details[testLinearRecurrence.details.length - 1]?.predictedSize ?? null : null },
       { testNum: 3, label: 'Alternating Flip', prediction: testAlternation.details.length > 0 ? testAlternation.details[testAlternation.details.length - 1]?.predictedSize ?? null : null },
       { testNum: 4, label: 'Adaptive Learning', prediction: adaptiveLearning.history.length > 0 ? adaptiveLearning.history[adaptiveLearning.history.length - 1]?.t4pred ?? null : null },
-      { testNum: 5, label: 'Time-of-Day', prediction: test5.latestPrediction },
-      { testNum: 6, label: 'Minute', prediction: test6.latestPrediction },
-      { testNum: 7, label: 'Time + Previous', prediction: test7.latestPrediction },
-      { testNum: 8, label: 'Time + Streak', prediction: test8.latestPrediction },
+      { testNum: 5, label: 'Time-of-Day', prediction: test5.unavailable ? null : test5.latestPrediction },
+      { testNum: 6, label: 'Round ID', prediction: test6.latestPrediction },
+      { testNum: 7, label: 'Round ID + Prev', prediction: test7.latestPrediction },
+      { testNum: 8, label: 'Round ID + Streak', prediction: test8.latestPrediction },
     ];
-  }, [testPeriodSum.details, testLinearRecurrence.details, testAlternation.details, adaptiveLearning.history, test5.latestPrediction, test6.latestPrediction, test7.latestPrediction, test8.latestPrediction]);
+  }, [testPeriodSum.details, testLinearRecurrence.details, testAlternation.details, adaptiveLearning.history, test5.unavailable, test5.latestPrediction, test6.latestPrediction, test7.latestPrediction, test8.latestPrediction]);
 
   return (
     <div className="space-y-8 animate-in fade-in duration-300">
