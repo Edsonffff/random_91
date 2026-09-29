@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { useRealHistory } from '../../context/RealHistoryContext';
+import React, { useState, useMemo } from 'react';
+import { useRealHistory, sortRealHistoryDescending } from '../../context/RealHistoryContext';
 import { useToast } from '../../context/ToastContext';
 import type { RealGameRecord } from '../../types/result';
 import {
@@ -82,8 +82,13 @@ export const RealHistoryView: React.FC = () => {
     ? new Date(lastUpdated).toLocaleTimeString()
     : 'Not yet updated';
 
+  // Strictly sort real history by issue_number numerically descending (Requirements 3, 5, 7)
+  const sortedHistory = useMemo(() => {
+    return sortRealHistoryDescending(realHistory);
+  }, [realHistory]);
+
   const recordsToDisplay =
-    selectedLimit === 'all' ? realHistory : realHistory.slice(0, selectedLimit);
+    selectedLimit === 'all' ? sortedHistory : sortedHistory.slice(0, selectedLimit);
 
   const handleImportSubmit = () => {
     if (!rawJsonText.trim()) return;
@@ -102,7 +107,7 @@ export const RealHistoryView: React.FC = () => {
   const handleDownload = (format: 'csv' | 'json') => {
     try {
       setIsDownloading(true);
-      if (realHistory.length === 0) {
+      if (sortedHistory.length === 0) {
         showToast('No real game records available to download.', 'warning');
         return;
       }
@@ -111,15 +116,15 @@ export const RealHistoryView: React.FC = () => {
       const filename = `wingo30s_real_history_${timestamp}.${format}`;
 
       if (format === 'csv') {
-        const csv = convertToCSV(realHistory);
+        const csv = convertToCSV(sortedHistory);
         triggerDownload(csv, filename, 'text/csv;charset=utf-8;');
       } else {
-        const json = JSON.stringify(realHistory, null, 2);
+        const json = JSON.stringify(sortedHistory, null, 2);
         triggerDownload(json, filename, 'application/json;charset=utf-8;');
       }
 
       showToast(
-        `Downloaded ${realHistory.length} real history records (${format.toUpperCase()})!`,
+        `Downloaded ${sortedHistory.length} real history records (${format.toUpperCase()})!`,
         'success'
       );
     } catch (err: unknown) {

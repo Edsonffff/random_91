@@ -55,28 +55,42 @@ export interface RealHistoryContextType {
 const RealHistoryContext = createContext<RealHistoryContextType | undefined>(undefined);
 
 /**
- * Deduplicate records strictly by issueNumber and sort newest first.
+ * Compare two issue numbers numerically descending (e.g. 50501 before 50500).
+ * Handles fixed-length and arbitrary text formats safely via BigInt or numeric collation.
  */
-function mergeAndDeduplicate(existing: RealGameRecord[], incoming: RealGameRecord[]): RealGameRecord[] {
+export function compareIssuesDesc(issueA: string | undefined, issueB: string | undefined): number {
+  const cleanA = String(issueA || '').trim();
+  const cleanB = String(issueB || '').trim();
+  try {
+    const diff = BigInt(cleanB) - BigInt(cleanA);
+    if (diff > 0n) return 1;
+    if (diff < 0n) return -1;
+    return 0;
+  } catch {
+    return cleanB.localeCompare(cleanA, undefined, { numeric: true });
+  }
+}
+
+export function sortRealHistoryDescending(records: RealGameRecord[]): RealGameRecord[] {
+  return [...records].sort((a, b) => compareIssuesDesc(a.issueNumber, b.issueNumber));
+}
+
+/**
+ * Deduplicate records strictly by issueNumber and sort newest first (numerically descending).
+ */
+export function mergeAndDeduplicate(existing: RealGameRecord[], incoming: RealGameRecord[]): RealGameRecord[] {
   const map = new Map<string, RealGameRecord>();
   for (const r of existing) {
     if (r.issueNumber) {
-      map.set(r.issueNumber, r);
+      map.set(String(r.issueNumber).trim(), r);
     }
   }
   for (const r of incoming) {
     if (r.issueNumber) {
-      map.set(r.issueNumber, r);
+      map.set(String(r.issueNumber).trim(), r);
     }
   }
-  return Array.from(map.values()).sort((a, b) => {
-    try {
-      const diff = BigInt(b.issueNumber) - BigInt(a.issueNumber);
-      return diff > 0n ? 1 : diff < 0n ? -1 : 0;
-    } catch {
-      return b.issueNumber.localeCompare(a.issueNumber);
-    }
-  });
+  return Array.from(map.values()).sort((a, b) => compareIssuesDesc(a.issueNumber, b.issueNumber));
 }
 
 export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -559,14 +573,15 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
       try {
         const supabaseData = await realHistoryApiService.fetchRealHistoryFromSupabase(500);
         if (isMounted && supabaseData.results && supabaseData.results.length > 0) {
+          const sorted = sortRealHistoryDescending(supabaseData.results);
           // Initialize synced issue numbers tracking with all records currently in Supabase
-          for (const r of supabaseData.results) {
-            syncedIssueNumbersRef.current.add(r.issueNumber);
+          for (const r of sorted) {
+            syncedIssueNumbersRef.current.add(String(r.issueNumber).trim());
           }
-          const latest = supabaseData.results[0]?.issueNumber || null;
+          const latest = sorted[0]?.issueNumber || null;
           setLastSyncedIssue(latest);
-          setTotalSupabaseRows(supabaseData.totalAvailable || supabaseData.results.length);
-          setRealHistory((prev) => mergeAndDeduplicate(prev, supabaseData.results));
+          setTotalSupabaseRows(supabaseData.totalAvailable || sorted.length);
+          setRealHistory((prev) => mergeAndDeduplicate(prev, sorted));
           if (supabaseData.lastSyncTime) {
             setLastSupabaseSyncTime(supabaseData.lastSyncTime);
           }

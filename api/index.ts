@@ -573,7 +573,28 @@ async function syncRecordsToSupabase(records: RealCompletedRecord[]): Promise<Su
 }
 
 /**
- * Read history from public.real_wingo_30s_history ordered by issue_number descending.
+ * Compare two issue numbers numerically descending (e.g. 50501 before 50500).
+ * Handles text format safely using BigInt or numeric locale comparison.
+ */
+function compareIssuesDesc(issueA: string, issueB: string): number {
+  const cleanA = String(issueA || '').trim();
+  const cleanB = String(issueB || '').trim();
+  try {
+    const diff = BigInt(cleanB) - BigInt(cleanA);
+    if (diff > 0n) return 1;
+    if (diff < 0n) return -1;
+    return 0;
+  } catch {
+    return cleanB.localeCompare(cleanA, undefined, { numeric: true });
+  }
+}
+
+function sortRealRecordsDescending(records: RealCompletedRecord[]): RealCompletedRecord[] {
+  return records.sort((a, b) => compareIssuesDesc(a.issueNumber, b.issueNumber));
+}
+
+/**
+ * Read history from public.real_wingo_30s_history strictly ordered by issue_number numerically descending.
  */
 async function readFromSupabase(
   limit: number | 'all' = 50
@@ -604,8 +625,8 @@ async function readFromSupabase(
     const colorStr = String(row.color || (Array.isArray(row.colors) ? row.colors.join(',') : '') || '');
 
     return {
-      issueNumber: String(row.issue_number),
-      periodNumber: String(row.issue_number),
+      issueNumber: String(row.issue_number).trim(),
+      periodNumber: String(row.issue_number).trim(),
       winningNumber: isNaN(num) ? 0 : num,
       size: (row.size as 'Big' | 'Small') || (num >= 5 ? 'Big' : 'Small'),
       colors: parseRealColors(colorStr, num),
@@ -615,6 +636,9 @@ async function readFromSupabase(
       source: 'COMPLETED REAL HISTORY',
     };
   });
+
+  // Explicitly ensure numeric descending sort (Requirement 3, 4, 5, 6)
+  sortRealRecordsDescending(records);
 
   return { records, totalCount: count ?? records.length, error: null };
 }
@@ -733,7 +757,7 @@ app.get('/api/real/history', async (req, res) => {
       const map = new Map<string, RealCompletedRecord>();
       for (const r of accumulatedRealHistory) map.set(r.issueNumber, r);
       for (const r of records) map.set(r.issueNumber, r);
-      accumulatedRealHistory = Array.from(map.values()).sort((a, b) => b.issueNumber.localeCompare(a.issueNumber));
+      accumulatedRealHistory = sortRealRecordsDescending(Array.from(map.values()));
       if (accumulatedRealHistory.length > 1000) accumulatedRealHistory = accumulatedRealHistory.slice(0, 1000);
 
       return res.json({
@@ -820,7 +844,7 @@ const handleSyncHistory = async (req: express.Request, res: express.Response) =>
   const memoryMap = new Map<string, RealCompletedRecord>();
   for (const r of accumulatedRealHistory) memoryMap.set(r.issueNumber, r);
   for (const r of cleanRecords) memoryMap.set(r.issueNumber, r);
-  accumulatedRealHistory = Array.from(memoryMap.values()).sort((a, b) => b.issueNumber.localeCompare(a.issueNumber));
+  accumulatedRealHistory = sortRealRecordsDescending(Array.from(memoryMap.values()));
   if (accumulatedRealHistory.length > 1000) accumulatedRealHistory = accumulatedRealHistory.slice(0, 1000);
   lastRealFetchTime = Date.now();
 
@@ -921,21 +945,33 @@ app.get('/api/real/debug-supabase', async (_req, res) => {
   });
 });
 
-// GET /api/real/history/export?format=csv|json
-app.get('/api/real/history/export', (req, res) => {
+// GET /api/real/history/export?format=csv|json (Requirement 7: CSV/JSON export sorted descending)
+app.get('/api/real/history/export', async (req, res) => {
   const format = (req.query.format as string) === 'json' ? 'json' : 'csv';
   const timestamp = new Date().toISOString().slice(0, 10);
   const filename = `wingo30s_real_history_${timestamp}.${format}`;
 
+  let exportRecords: RealCompletedRecord[] = accumulatedRealHistory;
+  const client = getSupabaseClient();
+  if (client) {
+    const { records, error } = await readFromSupabase('all');
+    if (!error && records.length > 0) {
+      exportRecords = records;
+    }
+  }
+
+  // Ensure strict numerical descending ordering (Requirement 3, 4, 5, 7)
+  const sortedRecords = sortRealRecordsDescending([...exportRecords]);
+
   if (format === 'json') {
     res.setHeader('Content-Type', 'application/json');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    return res.send(JSON.stringify(accumulatedRealHistory, null, 2));
+    return res.send(JSON.stringify(sortedRecords, null, 2));
   }
 
   // CSV format
   const headers = ['Period', 'WinningNumber', 'BigSmall', 'Colors', 'Premium', 'Sum', 'CompletedAt', 'Source'];
-  const rows = accumulatedRealHistory.map((r) => [
+  const rows = sortedRecords.map((r) => [
     `"${r.periodNumber}"`,
     r.winningNumber,
     `"${r.size}"`,
