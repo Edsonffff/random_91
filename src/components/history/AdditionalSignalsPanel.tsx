@@ -28,7 +28,7 @@
  */
 
 import React, { useState } from 'react';
-import { CheckCircle2, XCircle, ChevronDown, ChevronUp, AlertTriangle } from 'lucide-react';
+import { CheckCircle2, XCircle, ChevronDown, ChevronUp } from 'lucide-react';
 import { CollapsibleCard } from '../common/CollapsibleCard';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -103,36 +103,6 @@ function roundNumberFromPeriod(period: string): number | null {
   return isNaN(n) ? null : n;
 }
 
-/**
- * Parse HH, MM, SS from an ISO completedAt string.
- * Handles: "2026-09-28T10:15:30+05:30", "2026-09-28T10:15:30Z", etc.
- */
-function parseCompletedAt(completedAt: string): { hour: number; minute: number; second: number } | null {
-  try {
-    const d = new Date(completedAt);
-    if (isNaN(d.getTime())) return null;
-    return { hour: d.getUTCHours(), minute: d.getUTCMinutes(), second: d.getUTCSeconds() };
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Check whether the completedAt timestamps in the dataset are unique enough
- * to be used for time-of-day predictions.
- * Returns true only if at least 3 consecutive rounds have DIFFERENT HH:MM:SS.
- */
-function timestampsAreUnique(dataset: RoundEntryForTests[]): boolean {
-  const times = dataset
-    .map((r) => r.completedAt ? parseCompletedAt(r.completedAt) : null)
-    .filter((t): t is { hour: number; minute: number; second: number } => t !== null);
-
-  if (times.length < 3) return false;
-  // Check that not all times have the same total-seconds value
-  const first = times[0].hour * 3600 + times[0].minute * 60 + times[0].second;
-  const allSame = times.every((t) => t.hour * 3600 + t.minute * 60 + t.second === first);
-  return !allSame;
-}
 
 function streakStats(details: TimeTestDetail[]) {
   if (details.length === 0) {
@@ -168,60 +138,66 @@ function sortedAscending(dataset: RoundEntryForTests[]): RoundEntryForTests[] {
   });
 }
 
-const EMPTY_RESULT: TimeTestResult = {
-  hits: 0, total: 0, accuracy: 0, details: [],
-  currentHitStreak: 0, currentMissStreak: 0, longestHitStreak: 0, longestMissStreak: 0,
-  latestPrediction: null,
-};
 
-// ─── Test 5 — Time-of-Day Modulo ─────────────────────────────────────────────
-// Uses the actual completedAt ISO timestamp from RealGameRecord.
-// predictionNumber = (hour*3600 + minute*60 + second) % 10
+
+// ─── Test 5 — Digit Mix Formula ───────────────────────────────────────────────
+// R = roundNumber (last 7 digits of period string)
+// P = previous round's actual numeric result (anti-leakage: sorted[i-1])
+//
+// digitSum  = sum of individual digits of R
+// firstDigit = first digit of R (i.e. Math.floor(R / 10^(digits-1)))
+// lastDigit  = R % 10
+//
+// predictionNumber = (digitSum*3 + P*2 + firstDigit + lastDigit) % 10
+// 0–4 → SMALL, 5–9 → BIG
+
+function digitSumOf(n: number): number {
+  let s = 0;
+  let x = Math.abs(n);
+  if (x === 0) return 0;
+  while (x > 0) { s += x % 10; x = Math.floor(x / 10); }
+  return s;
+}
+
+function firstDigitOf(n: number): number {
+  let x = Math.abs(n);
+  while (x >= 10) x = Math.floor(x / 10);
+  return x;
+}
 
 export function computeTest5(dataset: RoundEntryForTests[]): TimeTestResult {
-  const withTimestamps = dataset.filter((r) => !!r.completedAt);
-
-  if (withTimestamps.length === 0) {
-    return {
-      ...EMPTY_RESULT,
-      unavailable: true,
-      unavailableReason: 'No server draw timestamp available. Switch to Real Live Feed to enable Test 5.',
-    };
-  }
-
-  if (!timestampsAreUnique(withTimestamps)) {
-    return {
-      ...EMPTY_RESULT,
-      unavailable: true,
-      unavailableReason:
-        'Invalid/non-unique draw timestamp — all rounds share the same HH:MM:SS value. ' +
-        'Test 5 disabled to prevent misleading predictions.',
-    };
-  }
-
+  const sorted = sortedAscending(dataset);
   let hits = 0;
   const details: TimeTestDetail[] = [];
 
-  for (const item of withTimestamps) {
-    const t = parseCompletedAt(item.completedAt!);
-    if (!t) continue;
-    const totalSeconds = t.hour * 3600 + t.minute * 60 + t.second;
-    const predNum = totalSeconds % 10;
+  for (let i = 1; i < sorted.length; i++) {
+    const item = sorted[i];
+    const prev = sorted[i - 1];
+    const roundNum = roundNumberFromPeriod(item.period);
+    if (roundNum === null) continue;
+
+    const dSum = digitSumOf(roundNum);
+    const fDigit = firstDigitOf(roundNum);
+    const lDigit = roundNum % 10;
+    const P = prev.number;
+
+    const predNum = (dSum * 3 + P * 2 + fDigit + lDigit) % 10;
     const predictedSize = toBigSmall(predNum);
     const actualSize = toBigSmall(item.number);
     const isHit = predictedSize === actualSize;
     if (isHit) hits++;
+
     details.push({
       period: item.period,
-      hour: t.hour,
-      minute: t.minute,
-      second: t.second,
+      hour: 0,
+      minute: 0,
+      second: 0,
       predictionNumber: predNum,
       predictedSize,
       actual: item.number,
       actualSize,
       isHit,
-      extra: { totalSeconds },
+      extra: { roundNumber: roundNum, digitSum: dSum, firstDigit: fDigit, lastDigit: lDigit, prevResult: P },
     });
   }
 
@@ -513,14 +489,6 @@ function StreakMini({ result }: { result: TimeTestResult }) {
   );
 }
 
-function UnavailableNotice({ reason }: { reason: string }) {
-  return (
-    <div className="flex items-start gap-2 p-3 rounded-lg bg-[#F04444]/10 border border-[#F04444]/30 text-xs font-sans">
-      <AlertTriangle className="w-4 h-4 text-[#F04444] shrink-0 mt-0.5" />
-      <span className="text-[#F5F5F5]">{reason}</span>
-    </div>
-  );
-}
 
 // ─── Main component ───────────────────────────────────────────────────────────
 
@@ -552,7 +520,7 @@ export const AdditionalSignalsPanel: React.FC<AdditionalSignalsPanelProps> = ({
           <span className="w-14 text-right">Latest</span>
           <span className="w-12 text-right">Acc%</span>
         </div>
-        <SignalRow testNum={5} label="Time-of-Day" formula="(H×3600+M×60+S)%10 → B/S" result={test5} accentColor={ACCENT_COLORS[0]} />
+        <SignalRow testNum={5} label="Digit Mix" formula="(dSum×3+P×2+first+last)%10 → B/S" result={test5} accentColor={ACCENT_COLORS[0]} />
         <SignalRow testNum={6} label="Round ID" formula="roundNum%10 → B/S" result={test6} accentColor={ACCENT_COLORS[1]} />
         <SignalRow testNum={7} label="Round ID + Prev" formula="(roundNum+prevResult)%10 → B/S" result={test7} accentColor={ACCENT_COLORS[2]} />
         <SignalRow testNum={8} label="Round ID + Streak" formula="(roundNum+streak)%10 → B/S" result={test8} accentColor={ACCENT_COLORS[3]} />
@@ -572,24 +540,27 @@ export const AdditionalSignalsPanel: React.FC<AdditionalSignalsPanelProps> = ({
 
           {/* Test 5 */}
           <CollapsibleCard id="test5_detail" variant="subcard"
-            title={<span className="font-mono text-xs font-bold text-[#35B978]">Test 5 — Time-of-Day Modulo</span>}
-            subtitle={
-              test5.unavailable
-                ? 'Unavailable'
-                : `${test5.total} predictions · ${test5.accuracy}% accuracy · Cur Hit: ${test5.currentHitStreak} · Cur Miss: ${test5.currentMissStreak}`
-            }
+            title={<span className="font-mono text-xs font-bold text-[#35B978]">Test 5 — Digit Mix Formula</span>}
+            subtitle={`${test5.total} predictions · ${test5.accuracy}% accuracy · Cur Hit: ${test5.currentHitStreak} · Cur Miss: ${test5.currentMissStreak}`}
           >
-            {test5.unavailable ? (
-              <UnavailableNotice reason={test5.unavailableReason ?? 'Test 5 is unavailable.'} />
-            ) : (
-              <div className="space-y-3">
-                <StreakMini result={test5} />
-                <DetailTable result={test5} showTime={true}
-                  extraHeaders={['Total Secs']}
-                  extraCells={(row) => [row.extra?.totalSeconds ?? '—']}
-                />
+            <div className="space-y-3">
+              {/* Formula reference box */}
+              <div className="p-3 rounded-lg bg-[#071A14] border border-[#1E3A2B] text-[11px] font-mono text-[#8D9B95] space-y-0.5">
+                <span className="text-[#35B978] font-bold block">Formula</span>
+                <span>R = round ID (last 7 digits of period)</span>
+                <span className="block">predNum = (digitSum(R)×3 + P×2 + firstDigit(R) + lastDigit(R)) % 10</span>
+                <span className="block text-[#8D9B95]">P = previous round's actual result · 0–4→SMALL · 5–9→BIG</span>
               </div>
-            )}
+              <StreakMini result={test5} />
+              <DetailTable result={test5}
+                extraHeaders={['Round #', 'Digit Sum', 'Prev']}
+                extraCells={(row) => [
+                  row.extra?.roundNumber ?? '—',
+                  row.extra?.digitSum ?? '—',
+                  row.extra?.prevResult ?? '—',
+                ]}
+              />
+            </div>
           </CollapsibleCard>
 
           {/* Test 6 */}
