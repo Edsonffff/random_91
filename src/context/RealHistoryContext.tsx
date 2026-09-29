@@ -36,6 +36,7 @@ export interface RealHistoryContextType {
   setAutoRefresh: (val: boolean) => void;
   lastUpdated: string | null;
   lastSupabaseSyncTime: string | null;
+  lastSyncedIssue: string | null;
   supabaseStatus: SupabaseSyncStatus;
   supabaseError: SupabaseSyncErrorDetails | null;
   dismissSupabaseError: () => void;
@@ -93,6 +94,7 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
   const [autoRefresh, setAutoRefresh] = useState<boolean>(true);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [lastSupabaseSyncTime, setLastSupabaseSyncTime] = useState<string | null>(null);
+  const [lastSyncedIssue, setLastSyncedIssue] = useState<string | null>(null);
   const [supabaseStatus, setSupabaseStatus] = useState<SupabaseSyncStatus>('idle');
   const [supabaseError, setSupabaseError] = useState<SupabaseSyncErrorDetails | null>(null);
   const [totalSupabaseRows, setTotalSupabaseRows] = useState<number | null>(null);
@@ -110,7 +112,15 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
     realHistoryRef.current = realHistory;
   }, [realHistory]);
 
-  const activeAbortControllerRef = useRef<AbortController | null>(null);
+  const realScheduleRef = useRef<RealGameSchedule | null>(null);
+  useEffect(() => {
+    realScheduleRef.current = realSchedule;
+  }, [realSchedule]);
+
+  // Tracks all issue numbers confirmed to be persisted in Supabase to avoid duplicate writes (Requirement 3b, 11)
+  const syncedIssueNumbersRef = useRef<Set<string>>(new Set());
+  // Prevents overlapping polling requests (Requirement 13)
+  const isPollingOrSyncingRef = useRef<boolean>(false);
 
   const dismissSupabaseError = useCallback(() => {
     setSupabaseError(null);
@@ -120,11 +130,13 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
     try {
       const schedule = await realHistoryApiService.fetchRealSchedule();
       setRealSchedule(schedule);
+      realScheduleRef.current = schedule;
     } catch {
       // Non-blocking
     }
   }, []);
 
+  // Manual "Sync to Supabase" button (Requirement 2)
   const syncAllToSupabase = useCallback(async () => {
     if (realHistoryRef.current.length === 0) {
       showToast('No records available to sync to Supabase.', 'warning');
@@ -134,6 +146,12 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
     try {
       const res = await realHistoryApiService.syncRealHistoryToSupabase(realHistoryRef.current);
       if (res.success) {
+        for (const r of realHistoryRef.current) {
+          syncedIssueNumbersRef.current.add(r.issueNumber);
+        }
+        if (realHistoryRef.current[0]) {
+          setLastSyncedIssue(realHistoryRef.current[0].issueNumber);
+        }
         const time = res.lastSyncTime || new Date().toISOString();
         setLastSupabaseSyncTime(time);
         setSupabaseStatus('synced');
@@ -166,6 +184,7 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
     }
   }, [showToast]);
 
+  // Single-record test button
   const testSingleSupabaseSync = useCallback(async () => {
     if (realHistoryRef.current.length === 0) {
       showToast('No records available to test Supabase write.', 'warning');
@@ -176,6 +195,8 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
       const single = [realHistoryRef.current[0]];
       const res = await realHistoryApiService.syncRealHistoryToSupabase(single);
       if (res.success) {
+        syncedIssueNumbersRef.current.add(single[0].issueNumber);
+        setLastSyncedIssue(single[0].issueNumber);
         const time = res.lastSyncTime || new Date().toISOString();
         setLastSupabaseSyncTime(time);
         setSupabaseStatus('synced');
@@ -205,27 +226,91 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
     }
   }, [showToast]);
 
+  /**
+   * Main polling & auto-synchronization cycle (Requirements 3, 4, 5, 6, 11, 12, 13, 14)
+   * Fetches official browser feed -> detects newly completed issues -> upserts to Supabase -> updates UI
+   */
   const refreshRealResults = useCallback(
     async (force: boolean = false) => {
-      // Abort previous running request if a new refresh starts
-      if (activeAbortControllerRef.current) {
-        activeAbortControllerRef.current.abort();
-        activeAbortControllerRef.current = null;
+      // Requirement 13: Prevent overlapping polling requests
+      if (isPollingOrSyncingRef.current) {
+        return;
       }
-
-      const controller = new AbortController();
-      activeAbortControllerRef.current = controller;
-      setIsLoading(true);
+      isPollingOrSyncingRef.current = true;
+      if (force) setIsLoading(true);
 
       try {
-        // Step 1: Direct browser fetch from the official endpoint
+        // Step 1: Direct browser fetch from official feed (Requirement 1, 3a)
         const directResult: BrowserFetchHistoryResult =
-          await realHistoryApiService.fetchOfficialHistoryFromBrowser(controller.signal);
+          await realHistoryApiService.fetchOfficialHistoryFromBrowser();
 
-        if (controller.signal.aborted) return;
+        console.log('[AUTO SYNC] feed fetched');
 
-        // Process successful direct browser records
         if (directResult.records && directResult.records.length > 0) {
+          const latestCompleted = directResult.records[0]?.issueNumber;
+          console.log(`[AUTO SYNC] latest completed issue: ${latestCompleted || 'none'}`);
+
+          // Step 2: Determine which issue numbers are newly completed and un-synced (Requirement 3b, 4, 5, 11)
+          const activeRound = realScheduleRef.current?.currentIssue;
+          const newRecords = directResult.records.filter((r) => {
+            // Must be completed draw with valid number 0-9 (Requirement 4)
+            if (typeof r.winningNumber !== 'number' || isNaN(r.winningNumber) || r.winningNumber < 0 || r.winningNumber > 9) {
+              return false;
+            }
+            // Do not store the currently active/unsettled issue (Requirement 4)
+            if (activeRound && r.issueNumber === activeRound) {
+              return false;
+            }
+            // Filter out already synced issue numbers (Requirement 3b, 11)
+            return !syncedIssueNumbersRef.current.has(r.issueNumber);
+          });
+
+          if (newRecords.length === 0) {
+            console.log('[AUTO SYNC] no new records');
+          } else {
+            console.log(`[AUTO SYNC] new records detected: ${newRecords.length}`);
+            console.log(`[AUTO SYNC] upserting ${newRecords.length} records`);
+
+            // Step 3: Automatically send new completed records to Supabase (Requirement 3c, 3d, 3e, 6)
+            try {
+              const syncRes = await realHistoryApiService.syncRealHistoryToSupabase(newRecords);
+              if (syncRes.success) {
+                console.log(`[AUTO SYNC] Supabase success: ${syncRes.upsertedCount} records`);
+                for (const r of newRecords) {
+                  syncedIssueNumbersRef.current.add(r.issueNumber);
+                }
+                const newest = newRecords[0].issueNumber;
+                setLastSyncedIssue(newest);
+                const syncTime = syncRes.lastSyncTime || new Date().toISOString();
+                setLastSupabaseSyncTime(syncTime);
+                setSupabaseStatus('synced');
+                setSupabaseError(null);
+                if (typeof syncRes.totalTableRows === 'number') {
+                  setTotalSupabaseRows(syncRes.totalTableRows);
+                }
+              } else {
+                console.error('[AUTO SYNC] Supabase error:', syncRes.error);
+                setSupabaseStatus('error');
+                setSupabaseError({
+                  message: syncRes.error || 'Failed to upsert records into Supabase',
+                  details: syncRes.details,
+                  hint: syncRes.hint,
+                  code: syncRes.code,
+                  status: syncRes.status,
+                  stage: syncRes.stage,
+                  testedPayload: syncRes.testedPayload,
+                });
+                // Crucial (Requirement 12): Do NOT add to syncedIssueNumbersRef, so it retries on next poll
+              }
+            } catch (syncErr: unknown) {
+              const errMsg = syncErr instanceof Error ? syncErr.message : String(syncErr);
+              console.error('[AUTO SYNC] Supabase error:', errMsg);
+              setSupabaseStatus('error');
+              setSupabaseError({ message: errMsg });
+            }
+          }
+
+          // Step 4: Update UI state (Requirement 6)
           const merged = mergeAndDeduplicate(realHistoryRef.current, directResult.records);
           setRealHistory(merged);
           setPagination({
@@ -237,41 +322,6 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
           setLastUpdated(new Date().toISOString());
           setError(null);
 
-          try {
-            localStorage.setItem(REAL_HISTORY_STORAGE_KEY, JSON.stringify(merged));
-          } catch {
-            // LocalStorage fallback
-          }
-
-          // Step 2: Automatically upsert newly completed results into Supabase
-          realHistoryApiService
-            .syncRealHistoryToSupabase(directResult.records)
-            .then((syncRes) => {
-              if (syncRes.success) {
-                setLastSupabaseSyncTime(syncRes.lastSyncTime || new Date().toISOString());
-                setSupabaseStatus('synced');
-                setSupabaseError(null);
-                if (typeof syncRes.totalTableRows === 'number') {
-                  setTotalSupabaseRows(syncRes.totalTableRows);
-                }
-              } else if (syncRes.error) {
-                console.warn('[Supabase Sync Notice]:', syncRes.error, syncRes);
-                setSupabaseStatus('error');
-                setSupabaseError({
-                  message: syncRes.error,
-                  details: syncRes.details,
-                  hint: syncRes.hint,
-                  code: syncRes.code,
-                  status: syncRes.status,
-                  stage: syncRes.stage,
-                  testedPayload: syncRes.testedPayload,
-                });
-              }
-            })
-            .catch((syncErr) => {
-              console.warn('[Supabase Sync Warning]:', syncErr);
-            });
-
           if (force) {
             showToast(
               `Live official history refreshed (${directResult.records.length} draws fetched directly).`,
@@ -282,18 +332,18 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
         // Fetch or derive schedule concurrently
         try {
-          const sched = await realHistoryApiService.fetchRealSchedule(controller.signal);
-          if (!controller.signal.aborted && sched && sched.success) {
+          const sched = await realHistoryApiService.fetchRealSchedule();
+          if (sched && sched.success) {
             setRealSchedule(sched);
+            realScheduleRef.current = sched;
           }
         } catch {
-          // Derive schedule from latest settled period if live schedule request fails
           if (directResult.records && directResult.records.length > 0) {
             const latest = directResult.records[0];
             try {
               const currentIssue = (BigInt(latest.issueNumber) + 1n).toString();
               const nextIssue = (BigInt(latest.issueNumber) + 2n).toString();
-              setRealSchedule((prev) => ({
+              const derivedSched: RealGameSchedule = {
                 success: true,
                 gameCode: 'WinGo_30S',
                 intervalMinute: 0.5,
@@ -301,31 +351,28 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
                 currentIssue,
                 startTime: Date.now(),
                 endTime: Date.now() + 30000,
-                remainingSeconds: prev ? prev.remainingSeconds : 25,
+                remainingSeconds: 25,
                 previousIssue: latest.issueNumber,
                 nextIssue,
                 source: 'CURRENT ISSUE',
                 lastUpdated: new Date().toISOString(),
-              }));
+              };
+              setRealSchedule(derivedSched);
+              realScheduleRef.current = derivedSched;
             } catch {
               // ignore BigInt parsing issues
             }
           }
         }
       } catch (err: unknown) {
-        if (err instanceof DOMException && err.name === 'AbortError') {
-          // Request intentionally aborted by a newer refresh
-          return;
-        }
-
         const directErrMsg = err instanceof Error ? err.message : 'Unknown direct fetch error';
         console.warn('[RealHistoryContext] Direct browser fetch failed:', directErrMsg);
 
-        // Step 3: Attempt fallback to server /api/real/history endpoint as fallback/status
+        // Attempt fallback to server /api/real/history
         let fallbackSucceeded = false;
         try {
           const fallbackData = await realHistoryApiService.fetchRealHistoryFromSupabase(50);
-          if (!controller.signal.aborted && fallbackData.results && fallbackData.results.length > 0) {
+          if (fallbackData.results && fallbackData.results.length > 0) {
             const merged = mergeAndDeduplicate(realHistoryRef.current, fallbackData.results);
             setRealHistory(merged);
             setConnectionMode('server-fallback');
@@ -340,17 +387,15 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
           // Fallback also unavailable
         }
 
-        if (!controller.signal.aborted && !fallbackSucceeded) {
+        if (!fallbackSucceeded) {
           setError(directErrMsg);
           if (force) {
             showToast(directErrMsg, 'error');
           }
         }
       } finally {
-        if (activeAbortControllerRef.current === controller) {
-          activeAbortControllerRef.current = null;
-          setIsLoading(false);
-        }
+        isPollingOrSyncingRef.current = false;
+        if (force) setIsLoading(false);
       }
     },
     [showToast]
@@ -440,6 +485,12 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
           .syncRealHistoryToSupabase(newRecords)
           .then((syncRes) => {
             if (syncRes.success) {
+              for (const r of newRecords) {
+                syncedIssueNumbersRef.current.add(r.issueNumber);
+              }
+              if (newRecords[0]) {
+                setLastSyncedIssue(newRecords[0].issueNumber);
+              }
               setLastSupabaseSyncTime(syncRes.lastSyncTime || new Date().toISOString());
               setSupabaseStatus('synced');
               setSupabaseError(null);
@@ -500,7 +551,7 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
     [showToast]
   );
 
-  // Initial load: first load persistent history from Supabase, then refresh live from browser
+  // Initial load: load persistent history from Supabase, seed synced issue numbers, then poll
   useEffect(() => {
     let isMounted = true;
 
@@ -508,14 +559,21 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
       try {
         const supabaseData = await realHistoryApiService.fetchRealHistoryFromSupabase(500);
         if (isMounted && supabaseData.results && supabaseData.results.length > 0) {
+          // Initialize synced issue numbers tracking with all records currently in Supabase
+          for (const r of supabaseData.results) {
+            syncedIssueNumbersRef.current.add(r.issueNumber);
+          }
+          const latest = supabaseData.results[0]?.issueNumber || null;
+          setLastSyncedIssue(latest);
+          setTotalSupabaseRows(supabaseData.totalAvailable || supabaseData.results.length);
           setRealHistory((prev) => mergeAndDeduplicate(prev, supabaseData.results));
           if (supabaseData.lastSyncTime) {
             setLastSupabaseSyncTime(supabaseData.lastSyncTime);
           }
           setSupabaseStatus('synced');
         }
-      } catch {
-        // Supabase initial load non-blocking
+      } catch (err) {
+        console.warn('[RealHistoryContext] Initial Supabase load notice:', err);
       }
 
       if (isMounted) {
@@ -527,25 +585,30 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
     return () => {
       isMounted = false;
-      if (activeAbortControllerRef.current) {
-        activeAbortControllerRef.current.abort();
-      }
     };
   }, [refreshRealResults]);
 
-  // Auto-refresh interval (every 8 seconds when active, cancelling overlapping requests)
+  // Requirement 14: Tab visibility change handling (immediately sync when user returns to tab)
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && autoRefresh) {
+        refreshRealResults(false);
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [autoRefresh, refreshRealResults]);
+
+  // Requirement 3: Auto-refresh interval (polling every 5 seconds for new completed draws)
   useEffect(() => {
     if (!autoRefresh) return;
     const interval = setInterval(() => {
       refreshRealResults(false);
-    }, 8000);
+    }, 5000);
 
-    return () => {
-      clearInterval(interval);
-      if (activeAbortControllerRef.current) {
-        activeAbortControllerRef.current.abort();
-      }
-    };
+    return () => clearInterval(interval);
   }, [autoRefresh, refreshRealResults]);
 
   // Local second-by-second countdown decrement for schedule
@@ -575,6 +638,7 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
         setAutoRefresh,
         lastUpdated,
         lastSupabaseSyncTime,
+        lastSyncedIssue,
         supabaseStatus,
         supabaseError,
         dismissSupabaseError,

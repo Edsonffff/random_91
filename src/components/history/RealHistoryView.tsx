@@ -57,6 +57,7 @@ export const RealHistoryView: React.FC = () => {
     pagination,
     connectionMode,
     lastSupabaseSyncTime,
+    lastSyncedIssue,
     supabaseStatus,
     supabaseError,
     dismissSupabaseError,
@@ -199,14 +200,34 @@ export const RealHistoryView: React.FC = () => {
                 Server Fallback
               </span>
             )}
-            {/* Supabase Status Indicator */}
+            {/* Auto Sync Indicator (Requirement 10) */}
+            <span
+              className={`px-2.5 py-0.5 rounded text-[11px] font-mono font-bold border inline-flex items-center gap-1.5 ${
+                autoRefresh
+                  ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                  : 'bg-zinc-800/60 text-zinc-400 border-zinc-700/40'
+              }`}
+            >
+              <Radio className={`w-3 h-3 ${autoRefresh ? 'text-emerald-400 animate-pulse' : 'text-zinc-500'}`} />
+              Auto Sync: {autoRefresh ? 'ON' : 'OFF'}
+            </span>
+
+            {/* Supabase Status Indicator (Requirement 10) */}
             {lastSupabaseSyncTime ? (
               <span
-                className="px-2.5 py-0.5 rounded text-[11px] font-mono font-bold bg-teal-500/20 text-teal-300 border border-teal-500/40 inline-flex items-center gap-1.5"
+                className="px-2.5 py-0.5 rounded text-[11px] font-mono font-bold bg-teal-500/20 text-teal-300 border border-teal-500/40 inline-flex flex-wrap items-center gap-2"
                 title="Records persisted to Supabase public.real_wingo_30s_history"
               >
                 <Database className="w-3 h-3 text-teal-400" />
-                Supabase Synced {totalSupabaseRows !== null ? `(${totalSupabaseRows} rows) ` : ''}({new Date(lastSupabaseSyncTime).toLocaleTimeString()})
+                <span>Supabase Synced {totalSupabaseRows !== null ? `(${totalSupabaseRows} rows)` : ''}</span>
+                <span className="text-teal-400/50">•</span>
+                <span>Last sync: {new Date(lastSupabaseSyncTime).toLocaleTimeString()}</span>
+                {lastSyncedIssue && (
+                  <>
+                    <span className="text-teal-400/50">•</span>
+                    <span className="text-teal-200">Last issue: {lastSyncedIssue}</span>
+                  </>
+                )}
               </span>
             ) : supabaseStatus === 'syncing' ? (
               <span className="px-2.5 py-0.5 rounded text-[11px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 inline-flex items-center gap-1.5">
@@ -219,7 +240,7 @@ export const RealHistoryView: React.FC = () => {
                 title="Supabase ready"
               >
                 <Database className="w-3 h-3 text-[#8D9B95]" />
-                Supabase Table Ready
+                Supabase Ready {totalSupabaseRows !== null ? `(${totalSupabaseRows} rows)` : ''}
               </span>
             )}
           </div>
@@ -279,7 +300,7 @@ export const RealHistoryView: React.FC = () => {
             Import Curl JSON
           </button>
 
-          {/* Auto Refresh Toggle */}
+          {/* Auto Refresh Toggle (Requirement 10) */}
           <button
             onClick={() => setAutoRefresh(!autoRefresh)}
             className={`px-3 py-1.5 rounded-xl border font-mono text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
@@ -287,10 +308,10 @@ export const RealHistoryView: React.FC = () => {
                 ? 'bg-[#35B978]/15 text-[#35B978] border-[#35B978]/30 shadow'
                 : 'bg-[#06130F] text-[#8D9B95] border-[#1E3A2B]'
             }`}
-            title="Automatically poll for completed results every 8 seconds"
+            title="Automatically poll and persist newly completed results to Supabase every 5 seconds"
           >
             <Radio className={`w-3.5 h-3.5 ${autoRefresh ? 'animate-pulse' : ''}`} />
-            Auto: {autoRefresh ? 'ON' : 'OFF'}
+            Auto Sync: {autoRefresh ? 'ON' : 'OFF'}
           </button>
 
           {/* Manual Refresh Button */}

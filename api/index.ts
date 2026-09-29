@@ -515,36 +515,38 @@ async function syncRecordsToSupabase(records: RealCompletedRecord[]): Promise<Su
     };
   }
 
-  // 2. Single record insert worked! Now execute batch upsert (Requirement 15)
-  const isMillisTime = typeof testPayload.source_time === 'number';
-  const batchPayload = records.map((r) =>
-    formatRecordForSupabase(r, isMillisTime ? 'millis' : 'iso')
-  );
+  // 2. Single record insert worked! If more than 1 record, execute batch upsert
+  if (records.length > 1) {
+    const isMillisTime = typeof testPayload.source_time === 'number';
+    const batchPayload = records.map((r) =>
+      formatRecordForSupabase(r, isMillisTime ? 'millis' : 'iso')
+    );
 
-  const batchResponse = await client
-    .from('real_wingo_30s_history')
-    .upsert(batchPayload, { onConflict: 'game_code,issue_number' });
+    const batchResponse = await client
+      .from('real_wingo_30s_history')
+      .upsert(batchPayload, { onConflict: 'game_code,issue_number' });
 
-  if (batchResponse.error) {
-    console.error("SUPABASE UPSERT ERROR", {
-      message: batchResponse.error.message,
-      details: batchResponse.error.details,
-      hint: batchResponse.error.hint,
-      code: batchResponse.error.code,
-      status: batchResponse.status,
-    });
-
-    return {
-      success: false,
-      error: {
+    if (batchResponse.error) {
+      console.error("SUPABASE UPSERT ERROR", {
         message: batchResponse.error.message,
         details: batchResponse.error.details,
         hint: batchResponse.error.hint,
         code: batchResponse.error.code,
         status: batchResponse.status,
-      },
-      stage: 'batch_upsert',
-    };
+      });
+
+      return {
+        success: false,
+        error: {
+          message: batchResponse.error.message,
+          details: batchResponse.error.details,
+          hint: batchResponse.error.hint,
+          code: batchResponse.error.code,
+          status: batchResponse.status,
+        },
+        stage: 'batch_upsert',
+      };
+    }
   }
 
   // 3. Verify that an actual row exists in public.real_wingo_30s_history (Requirement 16 & 17)
