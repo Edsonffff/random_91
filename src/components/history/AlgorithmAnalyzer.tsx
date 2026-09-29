@@ -17,6 +17,14 @@ import { CollapsibleCard } from '../common/CollapsibleCard';
 import { useAdaptiveLearning } from '../../hooks/useAdaptiveLearning';
 import type { Test4InputRow } from '../../hooks/useAdaptiveLearning';
 import { AdaptiveLearningPanel } from './AdaptiveLearningPanel';
+import {
+  AdditionalSignalsPanel,
+  computeTest5,
+  computeTest6,
+  computeTest7,
+  computeTest8,
+} from './AdditionalSignalsPanel';
+import { SignalSummaryPanel } from './SignalSummaryPanel';
 
 interface RoundEntry {
   period: string;
@@ -499,7 +507,7 @@ export const AlgorithmAnalyzer: React.FC = () => {
   const { results, loadBigMumbaiSample } = useResults();
   const { realHistory } = useRealHistory();
   const [dataSource, setDataSource] = useState<'realLive' | 'sample3' | 'sample2' | 'sample1' | 'live'>('realLive');
-  const [activeTestTab, setActiveTestTab] = useState<'periodSum' | 'linearDelta' | 'alternation' | 'adaptive'>('periodSum');
+  const [activeTestTab, setActiveTestTab] = useState<'periodSum' | 'linearDelta' | 'alternation' | 'adaptive' | 'additional'>('periodSum');
   const [expandedSources, setExpandedSources] = useState<Record<string, boolean>>({});
   const showAllSequence = Boolean(expandedSources[dataSource]);
 
@@ -804,6 +812,34 @@ export const AlgorithmAnalyzer: React.FC = () => {
 
   const adaptiveLearning = useAdaptiveLearning(test4Inputs);
 
+  // ==========================================
+  // 5–8. TIME-BASED SIGNAL TESTS
+  // ==========================================
+  // All four tests derive the prediction timestamp directly from the
+  // 17-character period string (YYYYMMDDHHMMSS + 3-digit seq).
+  // No actual result is used in generating the same round's prediction.
+
+  const test5 = useMemo(() => computeTest5(activeDataset), [activeDataset]);
+  const test6 = useMemo(() => computeTest6(activeDataset), [activeDataset]);
+  const test7 = useMemo(() => computeTest7(activeDataset), [activeDataset]);
+  const test8 = useMemo(() => computeTest8(activeDataset), [activeDataset]);
+
+  // ==========================================
+  // ALL-8 SIGNAL SUMMARY
+  // ==========================================
+  const signalSummaryData = useMemo(() => {
+    return [
+      { testNum: 1, label: 'Period Digit Sum', prediction: testPeriodSum.details.length > 0 ? testPeriodSum.details[testPeriodSum.details.length - 1]?.predictedSize ?? null : null },
+      { testNum: 2, label: 'Linear Recurrence', prediction: testLinearRecurrence.details.length > 0 ? testLinearRecurrence.details[testLinearRecurrence.details.length - 1]?.predictedSize ?? null : null },
+      { testNum: 3, label: 'Alternating Flip', prediction: testAlternation.details.length > 0 ? testAlternation.details[testAlternation.details.length - 1]?.predictedSize ?? null : null },
+      { testNum: 4, label: 'Adaptive Learning', prediction: adaptiveLearning.history.length > 0 ? adaptiveLearning.history[adaptiveLearning.history.length - 1]?.t4pred ?? null : null },
+      { testNum: 5, label: 'Time-of-Day', prediction: test5.latestPrediction },
+      { testNum: 6, label: 'Minute', prediction: test6.latestPrediction },
+      { testNum: 7, label: 'Time + Previous', prediction: test7.latestPrediction },
+      { testNum: 8, label: 'Time + Streak', prediction: test8.latestPrediction },
+    ];
+  }, [testPeriodSum.details, testLinearRecurrence.details, testAlternation.details, adaptiveLearning.history, test5.latestPrediction, test6.latestPrediction, test7.latestPrediction, test8.latestPrediction]);
+
   return (
     <div className="space-y-8 animate-in fade-in duration-300">
       {/* Header Bar */}
@@ -1079,6 +1115,17 @@ export const AlgorithmAnalyzer: React.FC = () => {
             }`}
           >
             ✦ Test 4: Adaptive Self-Learning
+          </button>
+
+          <button
+            onClick={() => setActiveTestTab('additional')}
+            className={`px-3 py-1.5 rounded-lg font-medium transition-colors cursor-pointer ${
+              activeTestTab === 'additional'
+                ? 'bg-[#35B978] text-[#020806] font-bold shadow'
+                : 'bg-[#06130F] text-[#35B978] hover:text-[#F5F5F5] border border-[#35B978]/40'
+            }`}
+          >
+            ⏱ Tests 5–8: Time Signals
           </button>
         </div>
 
@@ -1370,6 +1417,43 @@ export const AlgorithmAnalyzer: React.FC = () => {
             <AdaptiveLearningPanel data={adaptiveLearning} />
           </CollapsibleCard>
         )}
+
+        {/* Tests 5–8: Time-Based Additional Signals */}
+        {activeTestTab === 'additional' && (
+          <CollapsibleCard
+            id="tests5to8_additional"
+            variant="subcard"
+            title={
+              <div className="flex items-center gap-2">
+                <span className="px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-[#35B978]/15 text-[#35B978] border border-[#35B978]/30">
+                  TESTS 5–8
+                </span>
+                <span className="font-mono text-xs font-bold text-[#F5F5F5]">
+                  Additional Time-Based Signals
+                </span>
+              </div>
+            }
+            subtitle="Time-of-day, minute, time+previous result, time+streak formulae"
+          >
+            <AdditionalSignalsPanel
+              test5={test5}
+              test6={test6}
+              test7={test7}
+              test8={test8}
+            />
+          </CollapsibleCard>
+        )}
+
+        {/* All-8 Signal Summary — always visible inside Category 2 */}
+        <CollapsibleCard
+          id="signal_summary_all8"
+          variant="subcard"
+          title={<span className="font-mono text-xs font-bold text-[#F5F5F5]">📊 All-8 Signal Summary</span>}
+          subtitle="Latest prediction from every test — majority BIG/SMALL vote"
+          defaultExpanded={true}
+        >
+          <SignalSummaryPanel signals={signalSummaryData} />
+        </CollapsibleCard>
 
         {/* Scientific Conclusion Box */}
         <div className="p-4 rounded-xl bg-[#06130F] border border-[#1E3A2B] text-xs">
