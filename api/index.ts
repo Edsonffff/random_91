@@ -1025,6 +1025,52 @@ app.get('/api/real/history/export', async (req, res) => {
   return res.send(csvContent);
 });
 
+// GET /api/real/t7-signals
+// Returns stored WingoAI signals from wingo_t7_signals (period_id, signal, confidence, fetched_at).
+// The auth token is NEVER returned or exposed — only the stored signal/confidence values.
+app.get('/api/real/t7-signals', async (_req, res) => {
+  const supabaseClient = getSupabaseClient();
+  if (!supabaseClient) {
+    return res.json({
+      success: false,
+      signals: [],
+      error: 'Supabase not configured on backend',
+    });
+  }
+
+  // Paginate to fetch all stored signals (no artificial limit)
+  const BATCH = 1000;
+  let from = 0;
+  const allSignals: { period_id: string; signal: string; confidence: number | null; fetched_at: string }[] = [];
+
+  while (true) {
+    const { data, error } = await supabaseClient
+      .from('wingo_t7_signals')
+      .select('period_id, signal, confidence, fetched_at')
+      .order('period_id', { ascending: false })
+      .range(from, from + BATCH - 1);
+
+    if (error) {
+      return res.json({
+        success: false,
+        signals: [],
+        error: error.message,
+      });
+    }
+
+    if (!data || data.length === 0) break;
+    for (const row of data) allSignals.push(row);
+    if (data.length < BATCH) break;
+    from += data.length;
+  }
+
+  return res.json({
+    success: true,
+    count: allSignals.length,
+    signals: allSignals,
+  });
+});
+
 // Health / Root info endpoint
 app.get('/api', (_req, res) => {
   res.json({
@@ -1033,6 +1079,7 @@ app.get('/api', (_req, res) => {
     endpoints: [
       '/api/real/current',
       '/api/real/history',
+      '/api/real/t7-signals',
       '/api/real/history/export',
       '/api/test/current-period',
       '/api/test/results',

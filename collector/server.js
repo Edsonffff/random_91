@@ -11,6 +11,10 @@ const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS || '30000', 10);
 const RETRY_DELAY_MS = parseInt(process.env.RETRY_DELAY_MS || '10000', 10);
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : null;
 
+// WingoAI signal API — token is ONLY stored here on the backend, never in frontend
+const WINGOAI_API_TOKEN = process.env.WINGOAI_API_TOKEN || '';
+const WINGOAI_SIGNAL_URL = 'https://server.wingoaibot.com/signals/current?room=30sec&type=standard';
+
 const OFFICIAL_WINGO_HISTORY_URL = 'https://draw.ar-lottery01.com/WinGo/WinGo_30S/GetHistoryIssuePage.json';
 
 function getTimestamp() {
@@ -63,6 +67,78 @@ function formatRecordForSupabase(item, serviceTime, timeType = 'iso') {
         ? Date.parse(completedAt) || Date.now()
         : completedAt,
   };
+}
+
+/**
+ * Fetch the current WingoAI signal.
+ * Returns null if the API is unavailable, the token is not set, or signalReady is false.
+ * The token is NEVER logged, stored in Supabase, or sent to the frontend.
+ */
+async function fetchWingoAISignal() {
+  if (!WINGOAI_API_TOKEN) {
+    // Token not configured — skip silently
+    return null;
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+  try {
+    const response = await fetch(WINGOAI_SIGNAL_URL, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${WINGOAI_API_TOKEN}`,
+        'Accept': 'application/json',
+      },
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      logError(`WingoAI API returned HTTP ${response.status} — skipping signal for this cycle`);
+      return null;
+    }
+
+    const data = await response.json();
+
+    // Only use signal when signalReady === true and signal is BIG or SMALL
+    if (
+      data?.signalReady !== true ||
+      (data?.signal !== 'BIG' && data?.signal !== 'SMALL') ||
+      !data?.periodId
+    ) {
+      log(`WingoAI signal not ready or invalid (signalReady=${data?.signalReady}, signal=${data?.signal}) — skipping`);
+      return null;
+    }
+
+    return {
+      period_id: String(data.periodId).trim(),
+      signal: data.signal,          // 'BIG' or 'SMALL'
+      confidence: typeof data.confidence === 'number' ? data.confidence : null,
+      fetched_at: new Date().toISOString(),
+    };
+  } catch (err) {
+    clearTimeout(timeoutId);
+    const msg = err instanceof Error ? err.message : String(err);
+    logError(`WingoAI API request failed: ${msg} — skipping signal for this cycle`);
+    return null;
+  }
+}
+
+/**
+ * Upsert a WingoAI signal row into public.wingo_t7_signals.
+ * Conflict target is period_id — so the same period will update (never duplicate).
+ */
+async function storeWingoAISignal(supabaseClient, signalRow) {
+  const { error } = await supabaseClient
+    .from('wingo_t7_signals')
+    .upsert([signalRow], { onConflict: 'period_id' });
+
+  if (error) {
+    logError(`Failed to store WingoAI signal for period ${signalRow.period_id}: ${error.message}`);
+  } else {
+    log(`WingoAI signal stored (period: ${signalRow.period_id}, signal: ${signalRow.signal}, confidence: ${signalRow.confidence ?? 'N/A'}%)`);
+  }
 }
 
 let running = true;
@@ -256,6 +332,19 @@ async function startCollector() {
           const size = num >= 5 ? 'Big' : 'Small';
           log(`New result → inserted (Period: ${issueNumber}, Number: ${num}, Size: ${size})`);
         }
+      }
+
+      // ── WingoAI Signal fetch (non-fatal — errors here never stop WinGo collection) ──
+      // Fetch AFTER processing results so the signal is associated with the NEXT period
+      // that is about to be drawn, not the one already settled.
+      try {
+        const wingoSignal = await fetchWingoAISignal();
+        if (wingoSignal) {
+          await storeWingoAISignal(supabaseClient, wingoSignal);
+        }
+      } catch (signalErr) {
+        const signalMsg = signalErr instanceof Error ? signalErr.message : String(signalErr);
+        logError(`WingoAI signal cycle error (non-fatal): ${signalMsg}`);
       }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);

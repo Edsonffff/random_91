@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useResults } from '../../context/ResultContext';
 import { useRealHistory, compareIssuesAsc } from '../../context/RealHistoryContext';
 import {
@@ -24,6 +24,7 @@ import {
   computeTest7,
   computeTest8,
 } from './AdditionalSignalsPanel';
+import type { WingoAIT7Signal } from './AdditionalSignalsPanel';
 import { SignalSummaryPanel } from './SignalSummaryPanel';
 
 interface RoundEntry {
@@ -513,6 +514,41 @@ export const AlgorithmAnalyzer: React.FC = () => {
   const [expandedSources, setExpandedSources] = useState<Record<string, boolean>>({});
   const showAllSequence = Boolean(expandedSources[dataSource]);
 
+  // ── WingoAI T7 signals (fetched from backend, never contains auth token) ──
+  const [t7SignalsMap, setT7SignalsMap] = useState<Map<string, WingoAIT7Signal>>(new Map());
+
+  useEffect(() => {
+    const apiBase = (import.meta.env.VITE_API_BASE_URL as string | undefined) || '';
+    let cancelled = false;
+
+    async function loadT7Signals() {
+      try {
+        const resp = await fetch(`${apiBase}/api/real/t7-signals`);
+        if (!resp.ok) return;
+        const json = await resp.json();
+        if (!json.success || !Array.isArray(json.signals)) return;
+        if (cancelled) return;
+        const newMap = new Map<string, WingoAIT7Signal>();
+        for (const s of json.signals) {
+          if (s.period_id && (s.signal === 'BIG' || s.signal === 'SMALL')) {
+            newMap.set(String(s.period_id), s as WingoAIT7Signal);
+          }
+        }
+        setT7SignalsMap(newMap);
+      } catch {
+        // Non-fatal — T7 will show as unavailable until signals arrive
+      }
+    }
+
+    loadT7Signals();
+    // Re-fetch every 60 s so new signals appear without a page refresh
+    const interval = setInterval(loadT7Signals, 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
+
   const toggleShowAllSequence = () => {
     setExpandedSources((prev) => ({
       ...prev,
@@ -795,7 +831,7 @@ export const AlgorithmAnalyzer: React.FC = () => {
 
   const test5 = useMemo(() => computeTest5(activeDataset), [activeDataset]);
   const test6 = useMemo(() => computeTest6(activeDataset), [activeDataset]);
-  const test7 = useMemo(() => computeTest7(activeDataset), [activeDataset]);
+  const test7 = useMemo(() => computeTest7(activeDataset, t7SignalsMap), [activeDataset, t7SignalsMap]);
   const test8 = useMemo(() => computeTest8(activeDataset), [activeDataset]);
 
   // ==========================================
@@ -827,7 +863,9 @@ export const AlgorithmAnalyzer: React.FC = () => {
     }
 
     const t7Map = new Map<string, 'Big' | 'Small'>();
-    for (const d of test7.details) t7Map.set(d.period, d.predictedSize);
+    for (const d of test7.details) {
+      if (!d.noSignal) t7Map.set(d.period, d.predictedSize);
+    }
 
     const t8Map = new Map<string, 'Big' | 'Small'>();
     for (const d of test8.details) t8Map.set(d.period, d.predictedSize);
@@ -880,7 +918,7 @@ export const AlgorithmAnalyzer: React.FC = () => {
       { testNum: 4, label: 'Adaptive Learning', prediction: adaptiveLearning.history.length > 0 ? adaptiveLearning.history[adaptiveLearning.history.length - 1]?.t4pred ?? null : null },
       { testNum: 5, label: 'Digit Mix', prediction: test5.latestPrediction },
       { testNum: 6, label: 'SMA-10', prediction: test6.latestPrediction },
-      { testNum: 7, label: 'Round ID + Prev', prediction: test7.latestPrediction },
+      { testNum: 7, label: 'WingoAI Signal', prediction: test7.latestPrediction },
       { testNum: 8, label: 'Round ID + Streak', prediction: test8.latestPrediction },
     ];
   }, [testPeriodSum.details, testLinearRecurrence.latestPrediction, testAlternation.details, adaptiveLearning.history, test5.latestPrediction, test6.latestPrediction, test7.latestPrediction, test8.latestPrediction]);

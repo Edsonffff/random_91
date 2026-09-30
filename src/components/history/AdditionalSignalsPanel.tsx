@@ -273,46 +273,105 @@ export function computeTest6(
   };
 }
 
-// ─── Test 7 — Round ID + Previous Result ─────────────────────────────────────
-// predictionNumber = (roundNumber + previousActualNumber) % 10
-// Anti-leakage: "previous" = sorted[i-1], never sorted[i]
+// ─── Test 7 — WingoAI External Signal ────────────────────────────────────────
+// Source: https://server.wingoaibot.com/signals/current?room=30sec&type=standard
+//
+// The backend collector fetches the WingoAI signal each polling cycle and stores
+// it in Supabase (wingo_t7_signals).  The frontend reads those stored signals via
+// GET /api/real/t7-signals and passes them here as a Map<period_id → WingoAIT7Signal>.
+//
+// Rules:
+//  · Only periods where a stored signal exists are evaluated.
+//  · signal 'BIG'   → predictedSize = 'Big'
+//  · signal 'SMALL' → predictedSize = 'Small'
+//  · Periods with no stored signal → noSignal = true (excluded from accuracy & Test 4)
+//
+// Authentication: The Bearer token is STORED ONLY IN THE BACKEND COLLECTOR ENV.
+// It is NEVER sent to the frontend, logged, or stored in Supabase.
 
-export function computeTest7(dataset: RoundEntryForTests[]): TimeTestResult {
+export interface WingoAIT7Signal {
+  period_id: string;
+  signal: 'BIG' | 'SMALL';
+  confidence: number | null;
+  fetched_at: string;
+}
+
+export function computeTest7(
+  dataset: RoundEntryForTests[],
+  t7Signals?: Map<string, WingoAIT7Signal>
+): TimeTestResult {
   const sorted = sortedAscending(dataset);
   let hits = 0;
+  let total = 0;
   const details: TimeTestDetail[] = [];
 
-  for (let i = 1; i < sorted.length; i++) {
+  // If no signals have been fetched yet, return an unavailable result
+  if (!t7Signals || t7Signals.size === 0) {
+    return {
+      hits: 0,
+      total: 0,
+      accuracy: 0,
+      details: [],
+      currentHitStreak: 0,
+      currentMissStreak: 0,
+      longestHitStreak: 0,
+      longestMissStreak: 0,
+      latestPrediction: null,
+      unavailable: true,
+      unavailableReason: 'WingoAI signals not yet available — backend collector will populate them as new rounds settle.',
+    };
+  }
+
+  for (let i = 0; i < sorted.length; i++) {
     const item = sorted[i];
-    const prev = sorted[i - 1];
-    const roundNum = roundNumberFromPeriod(item.period);
-    if (roundNum === null) continue;
-    const prevNumber = prev.number;
-    const predNum = (roundNum + prevNumber) % 10;
-    const predictedSize = toBigSmall(predNum);
-    const actualSize = toBigSmall(item.number);
+    const stored = t7Signals.get(item.period);
+
+    const actualSize: BigSmall = toBigSmall(item.number);
+
+    if (!stored) {
+      // No signal recorded for this period — mark noSignal, exclude from accuracy
+      details.push({
+        period: item.period,
+        hour: 0, minute: 0, second: 0,
+        predictionNumber: 0,
+        predictedSize: 'Big',   // placeholder, irrelevant — noSignal=true
+        actual: item.number,
+        actualSize,
+        isHit: false,
+        noSignal: true,
+        extra: { source: 'WingoAI', signal: 'N/A', confidence: -1 },
+      });
+      continue;
+    }
+
+    const predictedSize: BigSmall = stored.signal === 'BIG' ? 'Big' : 'Small';
     const isHit = predictedSize === actualSize;
     if (isHit) hits++;
+    total++;
+
     details.push({
       period: item.period,
-      hour: 0,
-      minute: 0,
-      second: 0,
-      predictionNumber: predNum,
+      hour: 0, minute: 0, second: 0,
+      predictionNumber: stored.signal === 'BIG' ? 7 : 3,  // representative placeholder numbers
       predictedSize,
       actual: item.number,
       actualSize,
       isHit,
-      extra: { roundNumber: roundNum, prevNumber },
+      noSignal: false,
+      extra: {
+        source: 'WingoAI',
+        signal: stored.signal,
+        confidence: stored.confidence !== null ? stored.confidence : -1,
+      },
     });
   }
 
-  const total = details.length;
   const accuracy = total > 0 ? Math.round((hits / total) * 100) : 0;
+  const validDetails = details.filter((d) => !d.noSignal);
   return {
     hits, total, accuracy, details,
-    ...streakStats(details),
-    latestPrediction: details.length > 0 ? details[details.length - 1].predictedSize : null,
+    ...streakStats(validDetails),
+    latestPrediction: validDetails.length > 0 ? validDetails[validDetails.length - 1].predictedSize : null,
   };
 }
 
@@ -534,7 +593,7 @@ export const AdditionalSignalsPanel: React.FC<AdditionalSignalsPanelProps> = ({
         </div>
         <SignalRow testNum={5} label="Digit Mix" formula="(dSum×3+P×2+first+last)%10 → B/S" result={test5} accentColor={ACCENT_COLORS[0]} />
         <SignalRow testNum={6} label="SMA-10" formula="avg(prev 10 states)>0.5→BIG, <0.5→SML" result={test6} accentColor={ACCENT_COLORS[1]} />
-        <SignalRow testNum={7} label="Round ID + Prev" formula="(roundNum+prevResult)%10 → B/S" result={test7} accentColor={ACCENT_COLORS[2]} />
+        <SignalRow testNum={7} label="WingoAI Signal" formula="External API signal: BIG→Big · SMALL→Small" result={test7} accentColor={ACCENT_COLORS[2]} />
         <SignalRow testNum={8} label="Round ID + Streak" formula="(roundNum+streak)%10 → B/S" result={test8} accentColor={ACCENT_COLORS[3]} />
       </div>
 
@@ -620,15 +679,38 @@ export const AdditionalSignalsPanel: React.FC<AdditionalSignalsPanelProps> = ({
 
           {/* Test 7 */}
           <CollapsibleCard id="test7_detail" variant="subcard"
-            title={<span className="font-mono text-xs font-bold text-[#F59E0B]">Test 7 — Round ID + Previous Result</span>}
-            subtitle={`${test7.total} predictions · ${test7.accuracy}% accuracy · Cur Hit: ${test7.currentHitStreak} · Cur Miss: ${test7.currentMissStreak}`}
+            title={<span className="font-mono text-xs font-bold text-[#F59E0B]">Test 7 — WingoAI Signal</span>}
+            subtitle={test7.unavailable
+              ? 'Awaiting WingoAI signals from backend collector...'
+              : `${test7.total} predictions · ${test7.accuracy}% accuracy · Cur Hit: ${test7.currentHitStreak} · Cur Miss: ${test7.currentMissStreak}`}
           >
             <div className="space-y-3">
-              <StreakMini result={test7} />
-              <DetailTable result={test7}
-                extraHeaders={['Round #', 'Prev Result']}
-                extraCells={(row) => [row.extra?.roundNumber ?? '—', row.extra?.prevNumber ?? '—']}
-              />
+              {/* Source info box */}
+              <div className="p-3 rounded-lg bg-[#071A14] border border-[#1E3A2B] text-[11px] font-mono text-[#8D9B95] space-y-1">
+                <span className="text-[#F59E0B] font-bold block">Source: WingoAI External API</span>
+                <span className="block">signal = BIG → prediction = Big · signal = SMALL → prediction = Small</span>
+                <span className="block text-[#8D9B95]">
+                  Signals are fetched every ~30s by the backend collector and stored in Supabase.
+                  Rounds without a stored signal are marked NO SIGNAL and excluded from accuracy and Test 4.
+                  Confidence is the provider's reported value — independently verified by actual HIT/MISS performance.
+                </span>
+              </div>
+              {test7.unavailable ? (
+                <div className="p-3 rounded-lg bg-[#071A14] border border-[#F59E0B]/30 text-[11px] font-mono text-[#F59E0B]">
+                  {test7.unavailableReason}
+                </div>
+              ) : (
+                <>
+                  <StreakMini result={test7} />
+                  <DetailTable result={test7}
+                    extraHeaders={['Signal', 'Confidence']}
+                    extraCells={(row) => [
+                      row.noSignal ? '—' : String(row.extra?.signal ?? '—'),
+                      row.noSignal || Number(row.extra?.confidence) === -1 ? '—' : `${row.extra?.confidence}%`,
+                    ]}
+                  />
+                </>
+              )}
             </div>
           </CollapsibleCard>
 
