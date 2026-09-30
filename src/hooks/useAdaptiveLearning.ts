@@ -210,7 +210,7 @@ export function useAdaptiveLearning(inputs: Test4InputRow[]): Test4Result & { re
       weights: freshWeights(),
       processedPeriods: [],
       allTimeLongestHitStreak: current.allTimeLongestHitStreak ?? 0,
-      allTimeLongestMissStreak: Math.max(current.allTimeLongestMissStreak ?? 0, 8),
+      allTimeLongestMissStreak: current.allTimeLongestMissStreak ?? 0,
     };
     saveModel(fresh);
     setModelState(fresh);
@@ -304,9 +304,8 @@ export function useAdaptiveLearning(inputs: Test4InputRow[]): Test4Result & { re
 
     // Monotonic all-time streak calculation:
     // Adding new results must never reduce the historical maximum record.
-    // 8 misses was previously recorded as the historical maximum.
     const historicalMaxHit = modelState.allTimeLongestHitStreak ?? 0;
-    const historicalMaxMiss = Math.max(modelState.allTimeLongestMissStreak ?? 0, 8);
+    const historicalMaxMiss = modelState.allTimeLongestMissStreak ?? 0;
 
     const longestHitStreak = Math.max(historicalMaxHit, calculatedStreaks.longestHitStreak);
     const longestMissStreak = Math.max(historicalMaxMiss, calculatedStreaks.longestMissStreak);
@@ -394,7 +393,7 @@ export function useAdaptiveLearning(inputs: Test4InputRow[]): Test4Result & { re
     currentHitStreak: 0,
     currentMissStreak: 0,
     longestHitStreak: modelState.allTimeLongestHitStreak ?? 0,
-    longestMissStreak: Math.max(modelState.allTimeLongestMissStreak ?? 0, 8),
+    longestMissStreak: modelState.allTimeLongestMissStreak ?? 0,
     weights: modelState.weights,
     dominantSignalIndex: 0,
     last20: { hits: 0, total: 0 },
