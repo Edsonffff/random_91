@@ -1025,44 +1025,116 @@ app.get('/api/real/history/export', async (req, res) => {
   return res.send(csvContent);
 });
 
-// GET /api/real/t7-signals
-// Returns stored WingoAI signals from wingo_t7_signals (period_id, signal, confidence, fetched_at).
-// The auth token is NEVER returned or exposed — only the stored signal/confidence values.
-app.get('/api/real/t7-signals', async (_req, res) => {
-  const supabaseClient = getSupabaseClient();
-  if (!supabaseClient) {
-    return res.json({
-      success: false,
-      signals: [],
-      error: 'Supabase not configured on backend',
-    });
+// ─── WingoAI T7 Signals (Historical & Live) ──────────────────────────────────
+interface StoredT7Signal {
+  period_id: string;
+  signal: 'BIG' | 'SMALL';
+  confidence: number | null;
+  fetched_at: string;
+}
+
+let cachedT7Signals = new Map<string, StoredT7Signal>();
+let lastT7HistoryFetchTime = 0;
+
+/**
+ * Fetch up to 500 historical WingoAI prediction records from /history/30sec.
+ * The endpoint is confirmed to provide genuine pre-settlement predictions.
+ * Cached in memory on the server for 60 seconds.
+ * Auth token is used if set in environment, but endpoint also works without it.
+ * Token is NEVER exposed to the frontend or clients.
+ */
+async function fetchHistoricalWingoAISignals(): Promise<StoredT7Signal[]> {
+  const now = Date.now();
+  if (cachedT7Signals.size > 0 && now - lastT7HistoryFetchTime < 60000) {
+    return Array.from(cachedT7Signals.values());
   }
 
-  // Paginate to fetch all stored signals (no artificial limit)
-  const BATCH = 1000;
-  let from = 0;
-  const allSignals: { period_id: string; signal: string; confidence: number | null; fetched_at: string }[] = [];
+  const token = process.env.WINGOAI_API_TOKEN;
+  const headers: Record<string, string> = { 'Accept': 'application/json' };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
 
-  while (true) {
-    const { data, error } = await supabaseClient
-      .from('wingo_t7_signals')
-      .select('period_id, signal, confidence, fetched_at')
-      .order('period_id', { ascending: false })
-      .range(from, from + BATCH - 1);
-
-    if (error) {
-      return res.json({
-        success: false,
-        signals: [],
-        error: error.message,
-      });
+  try {
+    const PAGE_SIZE = 100;
+    for (let page = 1; page <= 5; page++) {
+      const url = `https://server.wingoaibot.com/history/30sec?page=${page}&limit=${PAGE_SIZE}`;
+      const res = await fetch(url, { headers });
+      if (!res.ok) break;
+      const data = await res.json();
+      const rows = Array.isArray(data?.rows) ? data.rows : [];
+      if (rows.length === 0) break;
+      for (const r of rows) {
+        if (!r.period || !r.prediction) continue;
+        const sig = String(r.prediction).toUpperCase();
+        if (sig === 'BIG' || sig === 'SMALL') {
+          const pid = String(r.period).trim();
+          if (!cachedT7Signals.has(pid)) {
+            cachedT7Signals.set(pid, {
+              period_id: pid,
+              signal: sig as 'BIG' | 'SMALL',
+              confidence: null,
+              fetched_at: new Date().toISOString(),
+            });
+          }
+        }
+      }
+      if (rows.length < PAGE_SIZE) break;
     }
-
-    if (!data || data.length === 0) break;
-    for (const row of data) allSignals.push(row);
-    if (data.length < BATCH) break;
-    from += data.length;
+    lastT7HistoryFetchTime = now;
+  } catch (err) {
+    console.error('Failed to fetch historical WingoAI signals:', err);
   }
+
+  return Array.from(cachedT7Signals.values());
+}
+
+// GET /api/real/t7-signals
+// Returns WingoAI signals (historical from /history/30sec + live from collector).
+// Auth token is NEVER returned or exposed — only period_id, signal, confidence, fetched_at.
+app.get('/api/real/t7-signals', async (_req, res) => {
+  const signalMap = new Map<string, StoredT7Signal>();
+
+  // 1. Fetch & merge historical signals (from memory cache or /history/30sec)
+  const historical = await fetchHistoricalWingoAISignals();
+  for (const s of historical) signalMap.set(s.period_id, s);
+
+  // 2. Query Supabase (contains live signals saved by collector)
+  const supabaseClient = getSupabaseClient();
+  if (supabaseClient) {
+    try {
+      const BATCH = 1000;
+      let from = 0;
+      while (true) {
+        const { data, error } = await supabaseClient
+          .from('wingo_t7_signals')
+          .select('period_id, signal, confidence, fetched_at')
+          .order('period_id', { ascending: false })
+          .range(from, from + BATCH - 1);
+
+        if (error) {
+          // Table may not exist yet in Supabase — graceful fallback to historical cache
+          break;
+        }
+
+        if (!data || data.length === 0) break;
+        for (const row of data) {
+          if (row.period_id && (row.signal === 'BIG' || row.signal === 'SMALL')) {
+            signalMap.set(String(row.period_id), {
+              period_id: String(row.period_id),
+              signal: row.signal as 'BIG' | 'SMALL',
+              confidence: row.confidence ?? null,
+              fetched_at: row.fetched_at,
+            });
+          }
+        }
+        if (data.length < BATCH) break;
+        from += data.length;
+      }
+    } catch {
+      // Non-fatal — Supabase unavailable, return cached signals
+    }
+  }
+
+  const allSignals = Array.from(signalMap.values()).sort((a, b) => b.period_id.localeCompare(a.period_id));
 
   return res.json({
     success: true,

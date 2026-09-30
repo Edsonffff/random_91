@@ -368,10 +368,21 @@ export function computeTest7(
 
   const accuracy = total > 0 ? Math.round((hits / total) * 100) : 0;
   const validDetails = details.filter((d) => !d.noSignal);
+
+  let upcomingPrediction: BigSmall | null = null;
+  if (sorted.length > 0) {
+    const newestPeriod = sorted[sorted.length - 1].period;
+    for (const [period, sig] of t7Signals.entries()) {
+      if (compareIssuesAsc(period, newestPeriod) > 0) {
+        upcomingPrediction = sig.signal === 'BIG' ? 'Big' : 'Small';
+      }
+    }
+  }
+
   return {
     hits, total, accuracy, details,
     ...streakStats(validDetails),
-    latestPrediction: validDetails.length > 0 ? validDetails[validDetails.length - 1].predictedSize : null,
+    latestPrediction: upcomingPrediction || (validDetails.length > 0 ? validDetails[validDetails.length - 1].predictedSize : null),
   };
 }
 

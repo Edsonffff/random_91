@@ -75,21 +75,18 @@ function formatRecordForSupabase(item, serviceTime, timeType = 'iso') {
  * The token is NEVER logged, stored in Supabase, or sent to the frontend.
  */
 async function fetchWingoAISignal() {
-  if (!WINGOAI_API_TOKEN) {
-    // Token not configured — skip silently
-    return null;
-  }
-
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 10000);
 
   try {
+    const headers = { 'Accept': 'application/json' };
+    if (WINGOAI_API_TOKEN) {
+      headers['Authorization'] = `Bearer ${WINGOAI_API_TOKEN}`;
+    }
+
     const response = await fetch(WINGOAI_SIGNAL_URL, {
       method: 'GET',
-      headers: {
-        'Authorization': `Bearer ${WINGOAI_API_TOKEN}`,
-        'Accept': 'application/json',
-      },
+      headers,
       signal: controller.signal,
     });
     clearTimeout(timeoutId);
@@ -139,6 +136,122 @@ async function storeWingoAISignal(supabaseClient, signalRow) {
   } else {
     log(`WingoAI signal stored (period: ${signalRow.period_id}, signal: ${signalRow.signal}, confidence: ${signalRow.confidence ?? 'N/A'}%)`);
   }
+}
+
+/**
+ * Batch-upsert multiple WingoAI signal rows (more efficient than one-by-one).
+ */
+async function storeWingoAISignalBatch(supabaseClient, rows) {
+  if (rows.length === 0) return { stored: 0, errors: 0 };
+  const { error } = await supabaseClient
+    .from('wingo_t7_signals')
+    .upsert(rows, { onConflict: 'period_id' });
+  if (error) {
+    logError(`Batch upsert of ${rows.length} WingoAI signals failed: ${error.message}`);
+    return { stored: 0, errors: rows.length };
+  }
+  return { stored: rows.length, errors: 0 };
+}
+
+/**
+ * Backfill historical WingoAI signals from /history/30sec on startup.
+ *
+ * Investigation findings (2026-09-30):
+ *  - Empirically verified: live signal for period 20260930100051896 (BIG) matched
+ *    history row pred (BIG) exactly once the period settled (number: 3, result: SMALL).
+ *  - The `prediction` field is confirmed to be a genuine pre-settlement prediction.
+ *  - All 500 records are from today (the rolling 500-period window the API keeps)
+ *  - Period strings are 17-digit and match real_wingo_30s_history.issue_number exactly
+ *  - confidence is not returned by /history — stored as null for historical rows
+ *
+ * This is safe to call on every restart: upsert is idempotent on period_id.
+ */
+async function backfillWingoAIHistory(supabaseClient) {
+  log('Starting WingoAI historical backfill from /history/30sec...');
+
+  const HISTORY_URL = 'https://server.wingoaibot.com/history/30sec';
+  const PAGE_SIZE = 100;
+  let page = 1;
+  let totalFetched = 0;
+  let totalStored = 0;
+  let totalSkipped = 0;
+
+  const headers = { 'Accept': 'application/json' };
+  if (WINGOAI_API_TOKEN) {
+    headers['Authorization'] = `Bearer ${WINGOAI_API_TOKEN}`;
+  }
+
+  while (true) {
+    const url = `${HISTORY_URL}?page=${page}&limit=${PAGE_SIZE}`;
+    let data;
+
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 15000);
+      const resp = await fetch(url, {
+        method: 'GET',
+        headers,
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      if (!resp.ok) {
+        logError(`WingoAI history page ${page} returned HTTP ${resp.status} — stopping backfill`);
+        break;
+      }
+      data = await resp.json();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logError(`WingoAI history page ${page} fetch failed: ${msg} — stopping backfill`);
+      break;
+    }
+
+    const rows = Array.isArray(data?.rows) ? data.rows : [];
+    if (rows.length === 0) break;
+
+    totalFetched += rows.length;
+
+    // Build upsert batch — skip entries with null prediction
+    const batch = [];
+    for (const row of rows) {
+      if (!row.period || !row.prediction) {
+        totalSkipped++;
+        continue;
+      }
+      const signal = String(row.prediction).toUpperCase();
+      if (signal !== 'BIG' && signal !== 'SMALL') {
+        totalSkipped++;
+        continue;
+      }
+      batch.push({
+        period_id: String(row.period).trim(),
+        signal,
+        confidence: null,   // /history endpoint does not return confidence
+        fetched_at: new Date().toISOString(),
+      });
+    }
+
+    if (batch.length > 0) {
+      const { stored, errors } = await storeWingoAISignalBatch(supabaseClient, batch);
+      totalStored += stored;
+      if (errors > 0) {
+        logError(`Backfill page ${page}: ${errors} rows failed to upsert`);
+      }
+    }
+
+    log(`WingoAI backfill page ${page}: fetched=${rows.length}, stored=${batch.length}, skipped=${rows.length - batch.length}`);
+
+    // Check if there are more pages
+    const totalRecords = typeof data?.totalRecords === 'number' ? data.totalRecords : 0;
+    const totalPages = Math.ceil(totalRecords / PAGE_SIZE);
+    if (page >= totalPages || rows.length < PAGE_SIZE) break;
+    page++;
+
+    // Small delay between pages to avoid rate-limiting
+    await sleep(500);
+  }
+
+  log(`WingoAI historical backfill complete: fetched=${totalFetched}, stored=${totalStored}, skipped=${totalSkipped}`);
 }
 
 let running = true;
@@ -226,6 +339,15 @@ async function startCollector() {
   log(`Connecting to Supabase at: ${process.env.SUPABASE_URL.replace(/https?:\/\//, '').split('.')[0]}...`);
   const { known: knownPeriods, totalRows, newestPeriod } = await loadExistingPeriods(supabaseClient);
   log(`Initialized. Preserved ${totalRows} existing records in Supabase. Newest period: ${newestPeriod || 'None'}`);
+
+  // Backfill historical WingoAI signals (non-fatal, runs once on startup)
+  try {
+    await backfillWingoAIHistory(supabaseClient);
+  } catch (backfillErr) {
+    const backfillMsg = backfillErr instanceof Error ? backfillErr.message : String(backfillErr);
+    logError(`Historical WingoAI backfill error (non-fatal): ${backfillMsg}`);
+  }
+
   log(`Starting 24/7 continuous polling loop (interval: ${POLL_INTERVAL_MS / 1000}s)...`);
 
   // Optional HTTP health-check server for platforms like Render/Railway Web Services
