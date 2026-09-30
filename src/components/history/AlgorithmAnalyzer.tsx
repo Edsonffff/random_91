@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { useResults } from '../../context/ResultContext';
-import { useRealHistory } from '../../context/RealHistoryContext';
+import { useRealHistory, compareIssuesAsc } from '../../context/RealHistoryContext';
 import {
   CheckCircle2,
   XCircle,
@@ -606,7 +606,8 @@ export const AlgorithmAnalyzer: React.FC = () => {
   const testPeriodSum = useMemo(() => {
     let hits = 0;
     const toBigSmall = (n: number): 'Big' | 'Small' => (n >= 5 ? 'Big' : 'Small');
-    const details = activeDataset.map((item) => {
+    const sorted = [...activeDataset].sort((a, b) => compareIssuesAsc(a.period, b.period));
+    const details = sorted.map((item) => {
       const sum = item.period
         .split('')
         .reduce((acc, char) => acc + parseInt(char, 10), 0);
@@ -639,7 +640,7 @@ export const AlgorithmAnalyzer: React.FC = () => {
 
     // Sort ascending so we can process chronologically
     const sorted = [...activeDataset].sort(
-      (a, b) => (parseInt(a.period.slice(-7), 10) || 0) - (parseInt(b.period.slice(-7), 10) || 0)
+      (a, b) => compareIssuesAsc(a.period, b.period)
     );
 
     // 2×2 matrix: matrix[prev][cur] = transition count
@@ -732,19 +733,7 @@ export const AlgorithmAnalyzer: React.FC = () => {
       }
     }
 
-    const sortedPeriods = Array.from(roundByPeriod.keys()).sort((a, b) => {
-      try {
-        const diff = BigInt(a) - BigInt(b);
-        if (diff > 0n) return 1;
-        if (diff < 0n) return -1;
-        return 0;
-      } catch {
-        return a.localeCompare(b, undefined, { numeric: true });
-      }
-    });
-
-    const periodIndexInSorted = new Map<string, number>();
-    sortedPeriods.forEach((p, idx) => periodIndexInSorted.set(p, idx));
+    const sortedPeriods = Array.from(roundByPeriod.keys()).sort((a, b) => compareIssuesAsc(a, b));
 
     let hits = 0;
     const details: Array<{
@@ -755,47 +744,18 @@ export const AlgorithmAnalyzer: React.FC = () => {
       isHit: boolean;
     }> = [];
 
-    for (let i = 0; i < activeDataset.length; i++) {
-      const item = activeDataset[i];
-      const currentPeriod = String(item.period).trim();
-
-      // 1. Match explicit preceding period (e.g. period - 1)
-      let prevPeriod: string | null = null;
-      try {
-        const currentBig = BigInt(currentPeriod);
-        const candidate = String(currentBig - 1n).padStart(currentPeriod.length, '0');
-        if (roundByPeriod.has(candidate)) {
-          prevPeriod = candidate;
-        }
-      } catch {
-        // Non-BigInt format
-      }
-
-      // 2. Fallback to period immediately preceding in sorted chronological order
-      if (!prevPeriod) {
-        const sortIdx = periodIndexInSorted.get(currentPeriod);
-        if (sortIdx !== undefined && sortIdx > 0) {
-          prevPeriod = sortedPeriods[sortIdx - 1];
-        }
-      }
-
-      if (!prevPeriod) continue;
+    for (let i = 1; i < sortedPeriods.length; i++) {
+      const currentPeriod = sortedPeriods[i];
+      const prevPeriod = sortedPeriods[i - 1];
+      const item = roundByPeriod.get(currentPeriod);
       const prevRound = roundByPeriod.get(prevPeriod);
-      if (!prevRound) continue;
+      if (!item || !prevRound) continue;
 
       const previousActual: 'Big' | 'Small' = prevRound.number >= 5 ? 'Big' : 'Small';
       const actualSize: 'Big' | 'Small' = item.number >= 5 ? 'Big' : 'Small';
       const prediction: 'Big' | 'Small' = previousActual === 'Big' ? 'Small' : 'Big';
       const isHit = prediction === actualSize;
       if (isHit) hits++;
-
-      // Temporary console logging as requested
-      console.log('[Test 3]', {
-        currentPeriod,
-        previousPeriod: prevPeriod,
-        previousActual,
-        prediction,
-      });
 
       details.push({
         period: item.period,
@@ -1269,7 +1229,7 @@ export const AlgorithmAnalyzer: React.FC = () => {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#1E3A2B]/40">
-                    {testPeriodSum.details.map((row, i) => (
+                    {[...testPeriodSum.details].reverse().map((row, i) => (
                       <tr key={i} className="hover:bg-[#06130F]/80">
                         <td className="py-2 px-4 text-gray-300">{row.period}</td>
                         <td className="py-2 px-4 font-bold text-[#E7B93F]">
@@ -1487,7 +1447,7 @@ export const AlgorithmAnalyzer: React.FC = () => {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#1E3A2B]/40">
-                    {testAlternation.details.map((row, i) => (
+                    {[...testAlternation.details].reverse().map((row, i) => (
                       <tr key={i} className="hover:bg-[#06130F]/80">
                         <td className="py-2 px-4 text-gray-300">{row.period}</td>
                         <td className="py-2 px-4 text-gray-400">{row.prevSize}</td>

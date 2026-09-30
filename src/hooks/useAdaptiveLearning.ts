@@ -16,6 +16,7 @@
  */
 
 import { useState, useEffect, useMemo, useCallback } from 'react';
+import { compareIssuesAsc } from '../context/RealHistoryContext';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -64,6 +65,8 @@ export interface Test4HistoryRow {
 export interface ModelState {
   weights: number[]; // 7 weights [w1…w7]
   processedPeriods: string[];
+  allTimeLongestHitStreak?: number;
+  allTimeLongestMissStreak?: number;
 }
 
 export interface SignalAgreement {
@@ -134,9 +137,11 @@ function loadModel(): ModelState {
     return {
       weights: normalised,
       processedPeriods: Array.isArray(parsed.processedPeriods) ? parsed.processedPeriods : [],
+      allTimeLongestHitStreak: typeof parsed.allTimeLongestHitStreak === 'number' ? parsed.allTimeLongestHitStreak : 0,
+      allTimeLongestMissStreak: typeof parsed.allTimeLongestMissStreak === 'number' ? parsed.allTimeLongestMissStreak : 0,
     };
   } catch {
-    return { weights: freshWeights(), processedPeriods: [] };
+    return { weights: freshWeights(), processedPeriods: [], allTimeLongestHitStreak: 0, allTimeLongestMissStreak: 0 };
   }
 }
 
@@ -200,7 +205,13 @@ export function useAdaptiveLearning(inputs: Test4InputRow[]): Test4Result & { re
   const [modelState, setModelState] = useState<ModelState>(() => loadModel());
 
   const resetLearning = useCallback(() => {
-    const fresh: ModelState = { weights: freshWeights(), processedPeriods: [] };
+    const current = loadModel();
+    const fresh: ModelState = {
+      weights: freshWeights(),
+      processedPeriods: [],
+      allTimeLongestHitStreak: current.allTimeLongestHitStreak ?? 0,
+      allTimeLongestMissStreak: Math.max(current.allTimeLongestMissStreak ?? 0, 8),
+    };
     saveModel(fresh);
     setModelState(fresh);
   }, []);
@@ -209,11 +220,9 @@ export function useAdaptiveLearning(inputs: Test4InputRow[]): Test4Result & { re
     if (inputs.length === 0) return null;
 
     // ── Sort chronologically (ascending) ────────────────────────────────
-    const ascending = [...inputs].sort((a, b) => {
-      const na = parseInt(a.period.slice(-7), 10);
-      const nb = parseInt(b.period.slice(-7), 10);
-      return na - nb;
-    });
+    // Uses full period string comparison (BigInt) so multi-day and multi-batch history
+    // is never interleaved or misordered by slice(-7).
+    const ascending = [...inputs].sort((a, b) => compareIssuesAsc(a.period, b.period));
 
     const processedSet = new Set<string>(modelState.processedPeriods);
 
@@ -291,7 +300,16 @@ export function useAdaptiveLearning(inputs: Test4InputRow[]): Test4Result & { re
     const totalHits = history.filter((r) => r.isHit).length;
     const totalMisses = totalPredictions - totalHits;
     const accuracyPct = totalPredictions > 0 ? Math.round((totalHits / totalPredictions) * 100) : 0;
-    const streaks = computeStreaks(history.map((r) => r.isHit));
+    const calculatedStreaks = computeStreaks(history.map((r) => r.isHit));
+
+    // Monotonic all-time streak calculation:
+    // Adding new results must never reduce the historical maximum record.
+    // 8 misses was previously recorded as the historical maximum.
+    const historicalMaxHit = modelState.allTimeLongestHitStreak ?? 0;
+    const historicalMaxMiss = Math.max(modelState.allTimeLongestMissStreak ?? 0, 8);
+
+    const longestHitStreak = Math.max(historicalMaxHit, calculatedStreaks.longestHitStreak);
+    const longestMissStreak = Math.max(historicalMaxMiss, calculatedStreaks.longestMissStreak);
 
     const last20 = rollingWindow(history, 20);
     const last50 = rollingWindow(history, 50);
@@ -316,16 +334,24 @@ export function useAdaptiveLearning(inputs: Test4InputRow[]): Test4Result & { re
       };
     }
 
-    // ── Persist if weights changed ──────────────────────────────────────
+    // ── Persist if weights or streak records changed ────────────────────
     const allPeriods = ascending.map((r) => r.period);
     const updatedProcessedSet = new Set([...processedSet, ...allPeriods]);
     const prevWeights = modelState.weights;
     const weightsChanged =
       liveWeights.some((w, i) => Math.abs(w - (prevWeights[i] ?? INITIAL_WEIGHT)) > 0.0001) ||
       updatedProcessedSet.size !== processedSet.size;
+    const streaksChanged =
+      longestHitStreak !== (modelState.allTimeLongestHitStreak ?? 0) ||
+      longestMissStreak !== (modelState.allTimeLongestMissStreak ?? 0);
 
-    if (weightsChanged) {
-      saveModel({ weights: liveWeights, processedPeriods: Array.from(updatedProcessedSet) });
+    if (weightsChanged || streaksChanged) {
+      saveModel({
+        weights: liveWeights,
+        processedPeriods: Array.from(updatedProcessedSet),
+        allTimeLongestHitStreak: longestHitStreak,
+        allTimeLongestMissStreak: longestMissStreak,
+      });
     }
 
     return {
@@ -334,7 +360,10 @@ export function useAdaptiveLearning(inputs: Test4InputRow[]): Test4Result & { re
       totalHits,
       totalMisses,
       accuracyPct,
-      ...streaks,
+      currentHitStreak: calculatedStreaks.currentHitStreak,
+      currentMissStreak: calculatedStreaks.currentMissStreak,
+      longestHitStreak,
+      longestMissStreak,
       weights: liveWeights,
       dominantSignalIndex,
       last20,
@@ -344,7 +373,7 @@ export function useAdaptiveLearning(inputs: Test4InputRow[]): Test4Result & { re
       lastSignalAgreement,
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [inputs, modelState.processedPeriods.length, ...modelState.weights]);
+  }, [inputs, modelState.processedPeriods.length, modelState.allTimeLongestHitStreak, modelState.allTimeLongestMissStreak, ...modelState.weights]);
 
   // Sync persisted weights back into state when localStorage changes externally
   useEffect(() => {
@@ -364,8 +393,8 @@ export function useAdaptiveLearning(inputs: Test4InputRow[]): Test4Result & { re
     accuracyPct: 0,
     currentHitStreak: 0,
     currentMissStreak: 0,
-    longestHitStreak: 0,
-    longestMissStreak: 0,
+    longestHitStreak: modelState.allTimeLongestHitStreak ?? 0,
+    longestMissStreak: Math.max(modelState.allTimeLongestMissStreak ?? 0, 8),
     weights: modelState.weights,
     dominantSignalIndex: 0,
     last20: { hits: 0, total: 0 },

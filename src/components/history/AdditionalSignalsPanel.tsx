@@ -30,6 +30,7 @@
 import React, { useState } from 'react';
 import { CheckCircle2, XCircle, ChevronDown, ChevronUp } from 'lucide-react';
 import { CollapsibleCard } from '../common/CollapsibleCard';
+import { compareIssuesAsc } from '../../context/RealHistoryContext';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -126,12 +127,7 @@ function streakStats(details: TimeTestDetail[]) {
 }
 
 function sortedAscending(dataset: RoundEntryForTests[]): RoundEntryForTests[] {
-  return [...dataset].sort((a, b) => {
-    // Sort by last-7-digit round number (safe from precision issues)
-    const na = roundNumberFromPeriod(a.period) ?? 0;
-    const nb = roundNumberFromPeriod(b.period) ?? 0;
-    return na - nb;
-  });
+  return [...dataset].sort((a, b) => compareIssuesAsc(a.period, b.period));
 }
 
 

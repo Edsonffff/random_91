@@ -71,6 +71,14 @@ export function compareIssuesDesc(issueA: string | undefined, issueB: string | u
   }
 }
 
+/**
+ * Compare two issue numbers numerically ascending (e.g. 50500 before 50501).
+ * Handles fixed-length and arbitrary text formats safely via BigInt or numeric collation.
+ */
+export function compareIssuesAsc(issueA: string | undefined, issueB: string | undefined): number {
+  return compareIssuesDesc(issueB, issueA);
+}
+
 export function sortRealHistoryDescending(records: RealGameRecord[]): RealGameRecord[] {
   return [...records].sort((a, b) => compareIssuesDesc(a.issueNumber, b.issueNumber));
 }
