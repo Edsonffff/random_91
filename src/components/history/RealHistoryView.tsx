@@ -203,7 +203,8 @@ export const RealHistoryView: React.FC = () => {
             )}
             {connectionMode === 'server-fallback' && (
               <span className="px-2.5 py-0.5 rounded text-[11px] font-mono font-bold bg-blue-500/20 text-blue-300 border border-blue-500/40 inline-flex items-center gap-1.5">
-                Server Fallback
+                <Globe2 className="w-3 h-3 text-blue-400" />
+                Backend Worker Feed (Supabase)
               </span>
             )}
             {/* Auto Sync Indicator (Requirement 10) */}
@@ -251,7 +252,7 @@ export const RealHistoryView: React.FC = () => {
             )}
           </div>
           <p className="text-xs text-[#8D9B95]">
-            Direct browser feed from <code className="text-[#35B978]">draw.ar-lottery01.com</code> with persistence in{' '}
+            24/7 backend worker feed from <code className="text-[#35B978]">draw.ar-lottery01.com</code> with persistence in{' '}
             <code className="text-teal-400">public.real_wingo_30s_history</code>.
           </p>
         </div>

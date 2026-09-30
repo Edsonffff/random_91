@@ -3,7 +3,6 @@ import type { RealGameRecord, RealGameSchedule } from '../types/result';
 import {
   realHistoryApiService,
   parseOfficialColors,
-  type BrowserFetchHistoryResult,
 } from '../services/realHistoryApi';
 import { useToast } from './ToastContext';
 
@@ -249,12 +248,12 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
   }, [showToast]);
 
   /**
-   * Main polling & auto-synchronization cycle (Requirements 3, 4, 5, 6, 11, 12, 13, 14)
-   * Fetches official browser feed -> detects newly completed issues -> upserts to Supabase -> updates UI
+   * Dashboard synchronization cycle (Read-only from Supabase):
+   * Reads latest completed records directly from Supabase via server API.
+   * Browser does NOT poll external lottery API; collection is handled 24/7 by backend worker.
    */
   const refreshRealResults = useCallback(
     async (force: boolean = false) => {
-      // Requirement 13: Prevent overlapping polling requests
       if (isPollingOrSyncingRef.current) {
         return;
       }
@@ -262,158 +261,79 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
       if (force) setIsLoading(true);
 
       try {
-        // Step 1: Direct browser fetch from official feed (Requirement 1, 3a)
-        const directResult: BrowserFetchHistoryResult =
-          await realHistoryApiService.fetchOfficialHistoryFromBrowser();
+        const supabaseData = await realHistoryApiService.fetchRealHistoryFromSupabase('all');
 
-        console.log('[AUTO SYNC] feed fetched');
+        if (supabaseData.results && supabaseData.results.length > 0) {
+          const sorted = sortRealHistoryDescending(supabaseData.results);
+          for (const r of sorted) {
+            syncedIssueNumbersRef.current.add(String(r.issueNumber).trim());
+          }
 
-        if (directResult.records && directResult.records.length > 0) {
-          const latestCompleted = directResult.records[0]?.issueNumber;
-          console.log(`[AUTO SYNC] latest completed issue: ${latestCompleted || 'none'}`);
-
-          // Step 2: Determine which issue numbers are newly completed and un-synced (Requirement 3b, 4, 5, 11)
-          const activeRound = realScheduleRef.current?.currentIssue;
-          const newRecords = directResult.records.filter((r) => {
-            // Must be completed draw with valid number 0-9 (Requirement 4)
-            if (typeof r.winningNumber !== 'number' || isNaN(r.winningNumber) || r.winningNumber < 0 || r.winningNumber > 9) {
-              return false;
-            }
-            // Do not store the currently active/unsettled issue (Requirement 4)
-            if (activeRound && r.issueNumber === activeRound) {
-              return false;
-            }
-            // Filter out already synced issue numbers (Requirement 3b, 11)
-            return !syncedIssueNumbersRef.current.has(r.issueNumber);
+          const latest = sorted[0]?.issueNumber || null;
+          setLastSyncedIssue(latest);
+          setTotalSupabaseRows(supabaseData.totalAvailable || sorted.length);
+          setRealHistory(sorted);
+          setPagination({
+            pageNo: 1,
+            totalPage: 1,
+            totalCount: supabaseData.totalAvailable || sorted.length,
           });
+          setConnectionMode('server-fallback');
+          setLastUpdated(supabaseData.lastUpdated || new Date().toISOString());
+          if (supabaseData.lastSyncTime) {
+            setLastSupabaseSyncTime(supabaseData.lastSyncTime);
+          }
+          setSupabaseStatus('synced');
+          setSupabaseError(null);
+          setError(null);
 
-          if (newRecords.length === 0) {
-            console.log('[AUTO SYNC] no new records');
-          } else {
-            console.log(`[AUTO SYNC] new records detected: ${newRecords.length}`);
-            console.log(`[AUTO SYNC] upserting ${newRecords.length} records`);
-
-            // Step 3: Automatically send new completed records to Supabase (Requirement 3c, 3d, 3e, 6)
-            try {
-              const syncRes = await realHistoryApiService.syncRealHistoryToSupabase(newRecords);
-              if (syncRes.success) {
-                console.log(`[AUTO SYNC] Supabase success: ${syncRes.upsertedCount} records`);
-                for (const r of newRecords) {
-                  syncedIssueNumbersRef.current.add(r.issueNumber);
-                }
-                const newest = newRecords[0].issueNumber;
-                setLastSyncedIssue(newest);
-                const syncTime = syncRes.lastSyncTime || new Date().toISOString();
-                setLastSupabaseSyncTime(syncTime);
-                setSupabaseStatus('synced');
-                setSupabaseError(null);
-                if (typeof syncRes.totalTableRows === 'number') {
-                  setTotalSupabaseRows(syncRes.totalTableRows);
-                }
-              } else {
-                console.error('[AUTO SYNC] Supabase error:', syncRes.error);
-                setSupabaseStatus('error');
-                setSupabaseError({
-                  message: syncRes.error || 'Failed to upsert records into Supabase',
-                  details: syncRes.details,
-                  hint: syncRes.hint,
-                  code: syncRes.code,
-                  status: syncRes.status,
-                  stage: syncRes.stage,
-                  testedPayload: syncRes.testedPayload,
-                });
-                // Crucial (Requirement 12): Do NOT add to syncedIssueNumbersRef, so it retries on next poll
+          // Update active round schedule from the latest completed draw
+          try {
+            const sched = await realHistoryApiService.fetchRealSchedule();
+            if (sched && sched.success) {
+              setRealSchedule(sched);
+              realScheduleRef.current = sched;
+            }
+          } catch {
+            if (sorted[0]) {
+              try {
+                const currentIssue = (BigInt(sorted[0].issueNumber) + 1n).toString();
+                const nextIssue = (BigInt(sorted[0].issueNumber) + 2n).toString();
+                const derivedSched: RealGameSchedule = {
+                  success: true,
+                  gameCode: 'WinGo_30S',
+                  intervalMinute: 0.5,
+                  state: 1,
+                  currentIssue,
+                  startTime: Date.now(),
+                  endTime: Date.now() + 30000,
+                  remainingSeconds: 25,
+                  previousIssue: sorted[0].issueNumber,
+                  nextIssue,
+                  source: 'CURRENT ISSUE',
+                  lastUpdated: new Date().toISOString(),
+                };
+                setRealSchedule(derivedSched);
+                realScheduleRef.current = derivedSched;
+              } catch {
+                // ignore BigInt parsing issues
               }
-            } catch (syncErr: unknown) {
-              const errMsg = syncErr instanceof Error ? syncErr.message : String(syncErr);
-              console.error('[AUTO SYNC] Supabase error:', errMsg);
-              setSupabaseStatus('error');
-              setSupabaseError({ message: errMsg });
             }
           }
 
-          // Step 4: Update UI state (Requirement 6)
-          const merged = mergeAndDeduplicate(realHistoryRef.current, directResult.records);
-          setRealHistory(merged);
-          setPagination({
-            pageNo: directResult.pageNo,
-            totalPage: directResult.totalPage,
-            totalCount: directResult.totalCount,
-          });
-          setConnectionMode('browser-direct');
-          setLastUpdated(new Date().toISOString());
-          setError(null);
-
           if (force) {
             showToast(
-              `Live official history refreshed (${directResult.records.length} draws fetched directly).`,
+              `Live official history refreshed (${sorted.length} draws loaded from Supabase).`,
               'success'
             );
           }
         }
-
-        // Fetch or derive schedule concurrently
-        try {
-          const sched = await realHistoryApiService.fetchRealSchedule();
-          if (sched && sched.success) {
-            setRealSchedule(sched);
-            realScheduleRef.current = sched;
-          }
-        } catch {
-          if (directResult.records && directResult.records.length > 0) {
-            const latest = directResult.records[0];
-            try {
-              const currentIssue = (BigInt(latest.issueNumber) + 1n).toString();
-              const nextIssue = (BigInt(latest.issueNumber) + 2n).toString();
-              const derivedSched: RealGameSchedule = {
-                success: true,
-                gameCode: 'WinGo_30S',
-                intervalMinute: 0.5,
-                state: 1,
-                currentIssue,
-                startTime: Date.now(),
-                endTime: Date.now() + 30000,
-                remainingSeconds: 25,
-                previousIssue: latest.issueNumber,
-                nextIssue,
-                source: 'CURRENT ISSUE',
-                lastUpdated: new Date().toISOString(),
-              };
-              setRealSchedule(derivedSched);
-              realScheduleRef.current = derivedSched;
-            } catch {
-              // ignore BigInt parsing issues
-            }
-          }
-        }
       } catch (err: unknown) {
-        const directErrMsg = err instanceof Error ? err.message : 'Unknown direct fetch error';
-        console.warn('[RealHistoryContext] Direct browser fetch failed:', directErrMsg);
-
-        // Attempt fallback to server /api/real/history
-        let fallbackSucceeded = false;
-        try {
-          const fallbackData = await realHistoryApiService.fetchRealHistoryFromSupabase('all');
-          if (fallbackData.results && fallbackData.results.length > 0) {
-            const merged = mergeAndDeduplicate(realHistoryRef.current, fallbackData.results);
-            setRealHistory(merged);
-            setConnectionMode('server-fallback');
-            setLastUpdated(fallbackData.lastUpdated || new Date().toISOString());
-            if (fallbackData.lastSyncTime) {
-              setLastSupabaseSyncTime(fallbackData.lastSyncTime);
-            }
-            setError(null);
-            fallbackSucceeded = true;
-          }
-        } catch {
-          // Fallback also unavailable
-        }
-
-        if (!fallbackSucceeded) {
-          setError(directErrMsg);
-          if (force) {
-            showToast(directErrMsg, 'error');
-          }
+        const errMsg = err instanceof Error ? err.message : 'Failed to load Supabase history';
+        console.warn('[RealHistoryContext] Supabase refresh notice:', errMsg);
+        setError(errMsg);
+        if (force) {
+          showToast(errMsg, 'error');
         }
       } finally {
         isPollingOrSyncingRef.current = false;
@@ -573,39 +493,12 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
     [showToast]
   );
 
-  // Initial load: load persistent history from Supabase, seed synced issue numbers, then poll
+  // Initial load: load persistent history from Supabase
   useEffect(() => {
     let isMounted = true;
-
-    const initializeData = async () => {
-      try {
-        const supabaseData = await realHistoryApiService.fetchRealHistoryFromSupabase('all');
-        if (isMounted && supabaseData.results && supabaseData.results.length > 0) {
-          const sorted = sortRealHistoryDescending(supabaseData.results);
-          // Initialize synced issue numbers tracking with all records currently in Supabase
-          for (const r of sorted) {
-            syncedIssueNumbersRef.current.add(String(r.issueNumber).trim());
-          }
-          const latest = sorted[0]?.issueNumber || null;
-          setLastSyncedIssue(latest);
-          setTotalSupabaseRows(supabaseData.totalAvailable || sorted.length);
-          setRealHistory((prev) => mergeAndDeduplicate(prev, sorted));
-          if (supabaseData.lastSyncTime) {
-            setLastSupabaseSyncTime(supabaseData.lastSyncTime);
-          }
-          setSupabaseStatus('synced');
-        }
-      } catch (err) {
-        console.warn('[RealHistoryContext] Initial Supabase load notice:', err);
-      }
-
-      if (isMounted) {
-        refreshRealResults(false);
-      }
-    };
-
-    initializeData();
-
+    if (isMounted) {
+      refreshRealResults(false);
+    }
     return () => {
       isMounted = false;
     };
