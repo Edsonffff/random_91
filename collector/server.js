@@ -351,22 +351,35 @@ async function startCollector() {
   log(`Starting 24/7 continuous polling loop (interval: ${POLL_INTERVAL_MS / 1000}s)...`);
 
   // Optional HTTP health-check server for platforms like Render/Railway Web Services
-  if (PORT) {
-    const server = http.createServer((_req, res) => {
+  const portToListen = PORT || 8080;
+  const server = http.createServer((req, res) => {
+    if (req.method === 'POST' && (req.url === '/reset' || req.url === '/api/reset')) {
+      const previousCount = knownPeriods.size;
+      knownPeriods.clear();
+      log(`[Collector Reset] In-memory known periods cleared (${previousCount} -> 0). Collector continuing 24/7 polling.`);
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(
-        JSON.stringify({
-          status: 'running',
-          service: 'wingo-collector',
-          totalKnownPeriods: knownPeriods.size,
-          lastCheck: getTimestamp(),
-        })
-      );
-    });
-    server.listen(PORT, () => {
-      log(`Health-check HTTP server listening on port ${PORT}`);
-    });
-  }
+      return res.end(JSON.stringify({ success: true, previousCount, active: true }));
+    }
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(
+      JSON.stringify({
+        status: 'running',
+        service: 'wingo-collector',
+        totalKnownPeriods: knownPeriods.size,
+        lastCheck: getTimestamp(),
+      })
+    );
+  });
+
+  server.on('error', (err) => {
+    // Port in use or permission error — log warning, collector keeps running
+    logError(`Collector HTTP server warning: ${err.message}`);
+  });
+
+  server.listen(portToListen, () => {
+    log(`Health-check & reset HTTP server listening on port ${portToListen}`);
+  });
 
   while (running) {
     if (isFetching) {
@@ -378,6 +391,21 @@ async function startCollector() {
     let nextDelay = POLL_INTERVAL_MS;
 
     try {
+      // If knownPeriods has entries, verify Supabase was not reset to 0
+      if (knownPeriods.size > 0) {
+        try {
+          const { count: currentDbCount, error: checkErr } = await supabaseClient
+            .from('real_wingo_30s_history')
+            .select('issue_number', { count: 'exact', head: true });
+          if (!checkErr && currentDbCount === 0) {
+            log(`[Database Reset Detected] Supabase history table is empty. Cleared ${knownPeriods.size} cached periods from memory.`);
+            knownPeriods.clear();
+          }
+        } catch {
+          // Non-fatal check
+        }
+      }
+
       log('Fetch started');
 
       const controller = new AbortController();

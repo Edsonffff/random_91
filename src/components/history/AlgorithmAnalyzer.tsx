@@ -12,6 +12,9 @@ import {
   ChevronDown,
   ChevronUp,
   Flame,
+  Trash2,
+  RotateCcw,
+  ShieldCheck,
 } from 'lucide-react';
 import { CollapsibleCard } from '../common/CollapsibleCard';
 import { useAdaptiveLearning } from '../../hooks/useAdaptiveLearning';
@@ -508,11 +511,16 @@ const SAMPLE_3_SCREEN: RoundEntry[] = [
 
 export const AlgorithmAnalyzer: React.FC = () => {
   const { results, loadBigMumbaiSample } = useResults();
-  const { realHistory } = useRealHistory();
+  const { realHistory, resetAllSystemData } = useRealHistory();
   const [dataSource, setDataSource] = useState<'realLive' | 'sample3' | 'sample2' | 'sample1' | 'live'>('realLive');
-  const [activeTestTab, setActiveTestTab] = useState<'periodSum' | 'linearDelta' | 'alternation' | 'adaptive' | 'additional'>('periodSum');
+  const [activeTestTab, setActiveTestTab] = useState<'periodSum' | 'linearDelta' | 'alternation' | 'additional'>('periodSum');
   const [expandedSources, setExpandedSources] = useState<Record<string, boolean>>({});
   const showAllSequence = Boolean(expandedSources[dataSource]);
+
+  // ── Reset confirmation modal state ──────────────────────────────────────────
+  const [showResetModal, setShowResetModal] = useState(false);
+  const [isResetting, setIsResetting] = useState(false);
+  const [resetError, setResetError] = useState<string | null>(null);
 
   // ── WingoAI T7 signals (fetched from backend, never contains auth token) ──
   const [t7SignalsMap, setT7SignalsMap] = useState<Map<string, WingoAIT7Signal>>(new Map());
@@ -835,12 +843,12 @@ export const AlgorithmAnalyzer: React.FC = () => {
   const test8 = useMemo(() => computeTest8(activeDataset), [activeDataset]);
 
   // ==========================================
-  // 4. ADAPTIVE SELF-LEARNING ENGINE (Test 4)
+  // ADAPTIVE LEARNING MAIN DECISION ENGINE
   // ==========================================
-  // Build aligned input rows for Test 4.
+  // Build aligned input rows for Adaptive Learning.
   // T1/T2/T3 + actual are required; T5–T8 are optional.
   // Missing T5–T8 are excluded from that round's vote inside the hook.
-  const test4Inputs = useMemo((): Test4InputRow[] => {
+  const adaptiveInputs = useMemo((): Test4InputRow[] => {
     if (testPeriodSum.details.length === 0) return [];
 
     const t1Map = new Map<string, 'Big' | 'Small'>();
@@ -905,23 +913,56 @@ export const AlgorithmAnalyzer: React.FC = () => {
     activeDataset,
   ]);
 
-  const adaptiveLearning = useAdaptiveLearning(test4Inputs);
+  const adaptiveLearning = useAdaptiveLearning(adaptiveInputs);
 
   // ==========================================
-  // ALL-8 SIGNAL SUMMARY
+  // INPUT SIGNALS SUMMARY (Tests 1, 2, 3, 5, 6, 7, 8)
   // ==========================================
   const signalSummaryData = useMemo(() => {
     return [
       { testNum: 1, label: 'Period Digit Sum', prediction: testPeriodSum.details.length > 0 ? testPeriodSum.details[testPeriodSum.details.length - 1]?.predictedSize ?? null : null },
       { testNum: 2, label: 'Markov Chain', prediction: testLinearRecurrence.latestPrediction },
       { testNum: 3, label: 'Alternating Flip', prediction: testAlternation.details.length > 0 ? testAlternation.details[testAlternation.details.length - 1]?.predictedSize ?? null : null },
-      { testNum: 4, label: 'Adaptive Learning', prediction: adaptiveLearning.history.length > 0 ? adaptiveLearning.history[adaptiveLearning.history.length - 1]?.t4pred ?? null : null },
       { testNum: 5, label: 'Digit Mix', prediction: test5.latestPrediction },
       { testNum: 6, label: 'SMA-10', prediction: test6.latestPrediction },
       { testNum: 7, label: 'WingoAI Signal', prediction: test7.latestPrediction },
       { testNum: 8, label: 'Round ID + Streak', prediction: test8.latestPrediction },
     ];
-  }, [testPeriodSum.details, testLinearRecurrence.latestPrediction, testAlternation.details, adaptiveLearning.history, test5.latestPrediction, test6.latestPrediction, test7.latestPrediction, test8.latestPrediction]);
+  }, [testPeriodSum.details, testLinearRecurrence.latestPrediction, testAlternation.details, test5.latestPrediction, test6.latestPrediction, test7.latestPrediction, test8.latestPrediction]);
+
+  const handleFullReset = async () => {
+    setIsResetting(true);
+    setResetError(null);
+    try {
+      const res = await resetAllSystemData();
+      if (!res.success) {
+        setResetError(res.error || 'Reset operation failed on backend.');
+        setIsResetting(false);
+        return;
+      }
+
+      // 1. Reset adaptive learning model state with full clean slate (streaks = 0, weights = initial)
+      adaptiveLearning.resetLearning(true);
+
+      // 2. Clear WingoAI signals map
+      setT7SignalsMap(new Map());
+
+      // 3. Clear local storage caches
+      try {
+        localStorage.removeItem('wingo_adaptive_model_v5');
+        localStorage.removeItem('wingo_test4_model_v4');
+        localStorage.removeItem('wingo_real_history_cache_v1');
+      } catch {}
+
+      // 4. Close modal
+      setShowResetModal(false);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setResetError(`Reset error: ${msg}`);
+    } finally {
+      setIsResetting(false);
+    }
+  };
 
   return (
     <div className="space-y-8 animate-in fade-in duration-300">
@@ -1003,8 +1044,42 @@ export const AlgorithmAnalyzer: React.FC = () => {
             <Zap className="w-3.5 h-3.5" />
             Sync Screen to Simulator
           </button>
+
+          <button
+            onClick={() => setShowResetModal(true)}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-[#F04444]/15 hover:bg-[#F04444]/25 text-[#F04444] border border-[#F04444]/40 font-mono text-xs font-black transition-all cursor-pointer shadow"
+            title="Full reset of collected history, predictions, hit/miss records, and adaptive learning state"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+            RESET ALL DATA
+          </button>
         </div>
       </div>
+
+      {/* ======================================================== */}
+      {/* MAIN DECISION ENGINE: ADAPTIVE LEARNING                  */}
+      {/* ======================================================== */}
+      <CollapsibleCard
+        id="main_adaptive_learning_engine"
+        title={
+          <div className="flex items-center gap-2.5">
+            <span className="px-2.5 py-0.5 rounded text-[11px] font-mono font-extrabold bg-[#35B978]/20 text-[#35B978] border border-[#35B978]/50 flex items-center gap-1.5">
+              <ShieldCheck className="w-3.5 h-3.5" /> MAIN DECISION SYSTEM
+            </span>
+            <h3 className="text-base font-extrabold text-[#F5F5F5] uppercase tracking-wider">
+              ADAPTIVE LEARNING
+            </h3>
+          </div>
+        }
+        headerRight={
+          <span className="text-xs text-[#8D9B95] font-mono">
+            Online Adaptive Ensemble of Supporting Tests (1, 2, 3, 5, 6, 7, 8)
+          </span>
+        }
+        defaultExpanded={true}
+      >
+        <AdaptiveLearningPanel data={adaptiveLearning} />
+      </CollapsibleCard>
 
       {/* ======================================================== */}
       {/* CATEGORY 1: OBSERVED (What Actually Appears)             */}
@@ -1134,7 +1209,7 @@ export const AlgorithmAnalyzer: React.FC = () => {
       </CollapsibleCard>
 
       {/* ======================================================== */}
-      {/* CATEGORY 2: TESTED (Formula & Statistical Tests Run)      */}
+      {/* CATEGORY 2: SUPPORTING SIGNALS (Independent Test Models)  */}
       {/* ======================================================== */}
       <CollapsibleCard
         id="analyzer_category_2"
@@ -1144,13 +1219,13 @@ export const AlgorithmAnalyzer: React.FC = () => {
               CATEGORY 2
             </span>
             <h3 className="text-sm font-bold text-[#F5F5F5] uppercase tracking-wider">
-              TESTED (Mathematical & Formula Evaluations)
+              SUPPORTING SIGNALS & FORMULA TESTS
             </h3>
           </div>
         }
         headerRight={
           <span className="text-xs text-[#8D9B95]">
-            Statistical tests run against the observed history
+            Tests 1, 2, 3, 5, 6, 7, 8 — independent input signals feeding into Adaptive Learning
           </span>
         }
       >
@@ -1190,17 +1265,6 @@ export const AlgorithmAnalyzer: React.FC = () => {
           </button>
 
           <button
-            onClick={() => setActiveTestTab('adaptive')}
-            className={`px-3 py-1.5 rounded-lg font-medium transition-colors cursor-pointer ${
-              activeTestTab === 'adaptive'
-                ? 'bg-[#C94DDA] text-white font-bold shadow'
-                : 'bg-[#06130F] text-[#C94DDA] hover:text-[#F5F5F5] border border-[#C94DDA]/40'
-            }`}
-          >
-            ✦ Test 4: Adaptive Self-Learning
-          </button>
-
-          <button
             onClick={() => setActiveTestTab('additional')}
             className={`px-3 py-1.5 rounded-lg font-medium transition-colors cursor-pointer ${
               activeTestTab === 'additional'
@@ -1208,7 +1272,7 @@ export const AlgorithmAnalyzer: React.FC = () => {
                 : 'bg-[#06130F] text-[#35B978] hover:text-[#F5F5F5] border border-[#35B978]/40'
             }`}
           >
-            ⏱ Tests 5–8: Time Signals
+            ⏱ Tests 5–8: Additional Signals (incl. WingoAI)
           </button>
         </div>
 
@@ -1424,7 +1488,7 @@ export const AlgorithmAnalyzer: React.FC = () => {
                   </tbody>
                 </table>
               </div>
-              <p className="text-[10px] text-[#8D9B95] font-sans mt-1.5">INSUFF. = fewer than 5 transitions observed from prior state — prediction excluded from accuracy and Test 4.</p>
+              <p className="text-[10px] text-[#8D9B95] font-sans mt-1.5">INSUFF. = fewer than 5 transitions observed from prior state — prediction excluded from accuracy and Adaptive Learning.</p>
             </CollapsibleCard>
           </div>
         )}
@@ -1511,28 +1575,7 @@ export const AlgorithmAnalyzer: React.FC = () => {
           </div>
         )}
 
-        {/* Test 4: Adaptive Self-Learning */}
-        {activeTestTab === 'adaptive' && (
-          <CollapsibleCard
-            id="test4_adaptive"
-            variant="subcard"
-            title={
-              <div className="flex items-center gap-2">
-                <span className="px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-[#C94DDA]/15 text-[#C94DDA] border border-[#C94DDA]/30">
-                  TEST 4
-                </span>
-                <span className="font-mono text-xs font-bold text-[#F5F5F5]">
-                  Adaptive Self-Learning
-                </span>
-              </div>
-            }
-            subtitle="Continuously learns from Test 1, Test 2 and Test 3 performance"
-          >
-            <AdaptiveLearningPanel data={adaptiveLearning} />
-          </CollapsibleCard>
-        )}
-
-        {/* Tests 5–8: Time-Based Additional Signals */}
+        {/* Tests 5–8: Time-Based & External Additional Signals */}
         {activeTestTab === 'additional' && (
           <CollapsibleCard
             id="tests5to8_additional"
@@ -1543,11 +1586,11 @@ export const AlgorithmAnalyzer: React.FC = () => {
                   TESTS 5–8
                 </span>
                 <span className="font-mono text-xs font-bold text-[#F5F5F5]">
-                  Additional Time-Based Signals
+                  Additional & External Signals (Digit Mix, SMA-10, WingoAI, Streak)
                 </span>
               </div>
             }
-            subtitle="Time-of-day, minute, time+previous result, time+streak formulae"
+            subtitle="Time-of-day, minute, SMA-10, WingoAI API signal (Test 7), and streak formulas"
           >
             <AdditionalSignalsPanel
               test5={test5}
@@ -1558,12 +1601,12 @@ export const AlgorithmAnalyzer: React.FC = () => {
           </CollapsibleCard>
         )}
 
-        {/* All-8 Signal Summary — always visible inside Category 2 */}
+        {/* Input Signals Summary — always visible inside Category 2 */}
         <CollapsibleCard
-          id="signal_summary_all8"
+          id="signal_summary_inputs"
           variant="subcard"
-          title={<span className="font-mono text-xs font-bold text-[#F5F5F5]">📊 All-8 Signal Summary</span>}
-          subtitle="Latest prediction from every test — majority BIG/SMALL vote"
+          title={<span className="font-mono text-xs font-bold text-[#F5F5F5]">📊 Input Signals Vote Summary (Tests 1, 2, 3, 5, 6, 7, 8)</span>}
+          subtitle="Latest prediction from each supporting test — input signals feeding into Adaptive Learning"
           defaultExpanded={true}
         >
           <SignalSummaryPanel signals={signalSummaryData} />
@@ -1766,6 +1809,61 @@ export const AlgorithmAnalyzer: React.FC = () => {
           </div>
         </div>
       </CollapsibleCard>
+
+      {/* ── Confirmation Dialog for FULL RESET ────────────────────────── */}
+      {showResetModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="w-full max-w-md p-6 rounded-2xl bg-[#06130F] border-2 border-[#F04444]/60 shadow-2xl space-y-4">
+            <div className="flex items-center gap-3 text-[#F04444]">
+              <AlertTriangle className="w-7 h-7 shrink-0" />
+              <h3 className="text-lg font-mono font-extrabold uppercase tracking-wide">
+                RESET ALL DATA?
+              </h3>
+            </div>
+            <p className="text-xs font-mono text-[#F5F5F5] leading-relaxed">
+              This will permanently delete the collected history, predictions, hit/miss records, WingoAI signal history, and adaptive learning state.
+            </p>
+            <p className="text-xs font-mono text-[#F04444] font-bold">
+              This cannot be undone.
+            </p>
+
+            {resetError && (
+              <div className="p-3 rounded-lg bg-[#F04444]/15 border border-[#F04444]/40 text-xs font-mono text-[#F04444]">
+                {resetError}
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-3 pt-2 border-t border-[#1E3A2B]/60">
+              <button
+                type="button"
+                disabled={isResetting}
+                onClick={() => {
+                  setShowResetModal(false);
+                  setResetError(null);
+                }}
+                className="px-4 py-2 rounded-xl bg-[#071A14] border border-[#1E3A2B] text-xs font-mono font-bold text-[#8D9B95] hover:text-[#F5F5F5] transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={isResetting}
+                onClick={handleFullReset}
+                className="px-4 py-2 rounded-xl bg-[#F04444] hover:bg-[#d63030] text-white text-xs font-mono font-extrabold transition-colors cursor-pointer flex items-center gap-2 shadow-lg shadow-[#F04444]/20"
+              >
+                {isResetting ? (
+                  <>
+                    <RotateCcw className="w-3.5 h-3.5 animate-spin" />
+                    RESETTING...
+                  </>
+                ) : (
+                  'RESET EVERYTHING'
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

@@ -929,6 +929,97 @@ const handleSyncHistory = async (req: express.Request, res: express.Response) =>
 app.post('/api/real/history', handleSyncHistory);
 app.post('/api/real/sync', handleSyncHistory);
 
+// POST /api/real/reset
+// Server-side protected reset of application data in Supabase & memory.
+// Clears: public.real_wingo_30s_history and public.wingo_t7_signals.
+// Does NOT delete unrelated tables or user accounts.
+// Clears server in-memory caches and notifies the collector worker.
+app.post('/api/real/reset', async (_req, res) => {
+  const client = getSupabaseClient();
+  const deletedTables: string[] = [];
+
+  if (client) {
+    try {
+      // 1. Delete all records from public.real_wingo_30s_history
+      const { error: histDelErr } = await client
+        .from('real_wingo_30s_history')
+        .delete()
+        .neq('issue_number', '');
+
+      if (histDelErr) {
+        console.error('Failed to clear real_wingo_30s_history in Supabase:', histDelErr);
+        return res.status(500).json({
+          success: false,
+          error: `Failed to clear real_wingo_30s_history: ${histDelErr.message}`,
+        });
+      }
+      deletedTables.push('public.real_wingo_30s_history');
+
+      // 2. Delete all records from public.wingo_t7_signals (if table exists)
+      const { error: t7DelErr } = await client
+        .from('wingo_t7_signals')
+        .delete()
+        .neq('period_id', '');
+
+      if (t7DelErr && t7DelErr.code !== '42P01') {
+        // 42P01 = table does not exist in Supabase (non-fatal if migration was not run yet)
+        console.error('Failed to clear wingo_t7_signals in Supabase:', t7DelErr);
+        return res.status(500).json({
+          success: false,
+          error: `Failed to clear wingo_t7_signals: ${t7DelErr.message}`,
+        });
+      }
+      if (!t7DelErr) {
+        deletedTables.push('public.wingo_t7_signals');
+      }
+
+      // 3. Verify deletion in Supabase
+      const { count: histCount, error: countErr } = await client
+        .from('real_wingo_30s_history')
+        .select('issue_number', { count: 'exact', head: true });
+
+      if (!countErr && typeof histCount === 'number' && histCount > 0) {
+        return res.status(500).json({
+          success: false,
+          error: `Verification failed: real_wingo_30s_history still contains ${histCount} records.`,
+        });
+      }
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      return res.status(500).json({
+        success: false,
+        error: `Supabase deletion error: ${errMsg}`,
+      });
+    }
+  }
+
+  // 4. Clear server in-memory store
+  accumulatedRealHistory = [];
+  lastRealFetchTime = 0;
+  lastSupabaseSyncTime = null;
+  cachedT7Signals.clear();
+  lastT7HistoryFetchTime = 0;
+
+  // 5. Notify backend collector if reachable
+  const collectorPort = process.env.COLLECTOR_PORT || process.env.PORT || '8080';
+  const collectorUrl = process.env.COLLECTOR_URL || `http://127.0.0.1:${collectorPort}/reset`;
+  try {
+    const cCtrl = new AbortController();
+    const cTimeout = setTimeout(() => cCtrl.abort(), 2000);
+    await fetch(collectorUrl, { method: 'POST', signal: cCtrl.signal }).catch(() => null);
+    clearTimeout(cTimeout);
+  } catch {
+    // Non-fatal — collector also actively detects empty Supabase table on next poll
+  }
+
+  return res.json({
+    success: true,
+    message: 'All application data, history records, and predictions have been successfully reset.',
+    deletedTables,
+    timestamp: new Date().toISOString(),
+  });
+});
+
 // GET /api/real/debug-supabase (Diagnostic endpoint for testing Supabase connectivity and schema)
 app.get('/api/real/debug-supabase', async (_req, res) => {
   const client = getSupabaseClient();
@@ -1151,6 +1242,7 @@ app.get('/api', (_req, res) => {
     endpoints: [
       '/api/real/current',
       '/api/real/history',
+      '/api/real/reset',
       '/api/real/t7-signals',
       '/api/real/history/export',
       '/api/test/current-period',

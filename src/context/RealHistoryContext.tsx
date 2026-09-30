@@ -49,6 +49,7 @@ export interface RealHistoryContextType {
   syncAllToSupabase: () => Promise<void>;
   testSingleSupabaseSync: () => Promise<void>;
   importRealHistoryCurlJson: (rawJsonText: string) => boolean;
+  resetAllSystemData: () => Promise<{ success: boolean; message?: string; error?: string }>;
 }
 
 const RealHistoryContext = createContext<RealHistoryContextType | undefined>(undefined);
@@ -543,6 +544,37 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
     return () => clearInterval(timer);
   }, []);
 
+  const resetAllSystemData = useCallback(async (): Promise<{ success: boolean; message?: string; error?: string }> => {
+    setIsLoading(true);
+    try {
+      const res = await realHistoryApiService.resetAllApplicationData();
+      if (!res.success) {
+        showToast(res.error || 'Reset failed on backend', 'error');
+        return { success: false, error: res.error };
+      }
+
+      // Clear local memory & storage
+      setRealHistory([]);
+      setTotalSupabaseRows(0);
+      setLastSupabaseSyncTime(null);
+      setLastSyncedIssue(null);
+      setPagination(null);
+      try {
+        sessionStorage.removeItem('wingo_real_history_cache_v1');
+        localStorage.removeItem('wingo_real_history_cache_v1');
+      } catch {}
+
+      showToast('All application data and history reset successfully!', 'success');
+      return { success: true, message: res.message };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      showToast(`Reset error: ${msg}`, 'error');
+      return { success: false, error: msg };
+    } finally {
+      setIsLoading(false);
+    }
+  }, [showToast]);
+
   return (
     <RealHistoryContext.Provider
       value={{
@@ -568,6 +600,7 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
         syncAllToSupabase,
         testSingleSupabaseSync,
         importRealHistoryCurlJson,
+        resetAllSystemData,
       }}
     >
       {children}

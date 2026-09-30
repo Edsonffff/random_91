@@ -1,7 +1,8 @@
 /**
- * useAdaptiveLearning — Test 4 Adaptive Self-Learning Engine (v3)
+ * useAdaptiveLearning — Adaptive Learning Main Decision Engine
  *
- * Now learns from ALL seven input signals: Tests 1, 2, 3, 5, 6, 7, 8.
+ * Learns from all seven input signals: Tests 1, 2, 3, 5, 6, 7, 8.
+ * Generates the MAIN ADAPTIVE DECISION (BIG / SMALL).
  *
  * Key design decisions
  * ────────────────────
@@ -11,7 +12,7 @@
  * • Anti-leakage: prediction for round i uses weights from rounds 0…i-1.
  * • Deterministic replay: every render rebuilds history from INITIAL_WEIGHT
  *   chronologically, so the displayed table is always consistent.
- * • Persistence: final live weights stored in localStorage (v3 key).
+ * • Persistence: final live weights stored in localStorage.
  * • Duplicate protection: same period never processed twice.
  */
 
@@ -30,7 +31,7 @@ const STORAGE_KEY = 'wingo_test4_model_v4'; // v4 = 7-signal model with Markov &
 
 export type BigSmall = 'Big' | 'Small';
 
-export interface Test4InputRow {
+export interface AdaptiveInputRow {
   period: string;
   t1pred: BigSmall;
   t2pred: BigSmall;
@@ -42,7 +43,10 @@ export interface Test4InputRow {
   actual: BigSmall;
 }
 
-export interface Test4HistoryRow {
+// Backwards compatibility alias
+export type Test4InputRow = AdaptiveInputRow;
+
+export interface AdaptiveHistoryRow {
   period: string;
   t1pred: BigSmall;
   t2pred: BigSmall;
@@ -51,7 +55,8 @@ export interface Test4HistoryRow {
   t6pred: BigSmall | null;
   t7pred: BigSmall | null;
   t8pred: BigSmall | null;
-  t4pred: BigSmall; // prediction made BEFORE seeing actual
+  adaptiveDecision: BigSmall; // main decision generated BEFORE seeing actual
+  t4pred: BigSmall; // backwards compatibility alias for adaptiveDecision
   actual: BigSmall;
   isHit: boolean;
   probBig: number; // 0–100 %
@@ -61,6 +66,9 @@ export interface Test4HistoryRow {
   /** How many signals were available for this round */
   signalsAvailable: number;
 }
+
+// Backwards compatibility alias
+export type Test4HistoryRow = AdaptiveHistoryRow;
 
 export interface ModelState {
   weights: number[]; // 7 weights [w1…w7]
@@ -76,8 +84,9 @@ export interface SignalAgreement {
   majority: BigSmall | null;
 }
 
-export interface Test4Result {
-  history: Test4HistoryRow[];
+export interface AdaptiveResult {
+  history: AdaptiveHistoryRow[];
+  finalDecision: BigSmall | null;
 
   totalPredictions: number;
   totalHits: number;
@@ -101,8 +110,11 @@ export interface Test4Result {
   /** Latest signal agreement (from last row) */
   lastSignalAgreement: SignalAgreement;
 
-  resetLearning: () => void;
+  resetLearning: (fullCleanSlate?: boolean) => void;
 }
+
+// Backwards compatibility alias
+export type Test4Result = AdaptiveResult;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -201,18 +213,24 @@ function rowPredictions(row: Test4InputRow): Array<BigSmall | null> {
 
 // ─── Hook ────────────────────────────────────────────────────────────────────
 
-export function useAdaptiveLearning(inputs: Test4InputRow[]): Test4Result & { resetLearning: () => void } {
+export function useAdaptiveLearning(inputs: Test4InputRow[]): AdaptiveResult {
   const [modelState, setModelState] = useState<ModelState>(() => loadModel());
 
-  const resetLearning = useCallback(() => {
+  const resetLearning = useCallback((fullCleanSlate = false) => {
     const current = loadModel();
     const fresh: ModelState = {
       weights: freshWeights(),
       processedPeriods: [],
-      allTimeLongestHitStreak: current.allTimeLongestHitStreak ?? 0,
-      allTimeLongestMissStreak: current.allTimeLongestMissStreak ?? 0,
+      allTimeLongestHitStreak: fullCleanSlate ? 0 : (current.allTimeLongestHitStreak ?? 0),
+      allTimeLongestMissStreak: fullCleanSlate ? 0 : (current.allTimeLongestMissStreak ?? 0),
     };
-    saveModel(fresh);
+    if (fullCleanSlate) {
+      try {
+        localStorage.removeItem(STORAGE_KEY);
+      } catch {}
+    } else {
+      saveModel(fresh);
+    }
     setModelState(fresh);
   }, []);
 
@@ -275,6 +293,7 @@ export function useAdaptiveLearning(inputs: Test4InputRow[]): Test4Result & { re
         t6pred: row.t6pred ?? null,
         t7pred: row.t7pred ?? null,
         t8pred: row.t8pred ?? null,
+        adaptiveDecision: t4pred,
         t4pred,
         actual: row.actual,
         isHit,
@@ -353,8 +372,11 @@ export function useAdaptiveLearning(inputs: Test4InputRow[]): Test4Result & { re
       });
     }
 
+    const finalDecision = history.length > 0 ? history[history.length - 1].adaptiveDecision : null;
+
     return {
       history,
+      finalDecision,
       totalPredictions,
       totalHits,
       totalMisses,
@@ -384,8 +406,9 @@ export function useAdaptiveLearning(inputs: Test4InputRow[]): Test4Result & { re
   }, []);
 
   // Default empty result
-  const empty: Test4Result & { resetLearning: () => void } = {
+  const empty: AdaptiveResult = {
     history: [],
+    finalDecision: null,
     totalPredictions: 0,
     totalHits: 0,
     totalMisses: 0,

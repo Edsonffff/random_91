@@ -1,18 +1,18 @@
 /**
- * AdaptiveLearningPanel — Test 4 UI (v3: 7-signal model)
+ * AdaptiveLearningPanel — Main Decision Engine (7-signal weighted ensemble)
  *
  * Inputs:  Tests 1, 2, 3, 5, 6, 7, 8
- * Learner: Test 4 (weighted ensemble, online weight update)
+ * Learner: Adaptive Learning Multi-Signal Decision Engine
  */
 
 import React, { useState, useMemo } from 'react';
-import { CheckCircle2, XCircle, Brain, RotateCcw, TrendingUp } from 'lucide-react';
-import type { Test4Result, Test4HistoryRow } from '../../hooks/useAdaptiveLearning';
+import { CheckCircle2, XCircle, Brain, RotateCcw, TrendingUp, ShieldCheck } from 'lucide-react';
+import type { AdaptiveResult, AdaptiveHistoryRow } from '../../hooks/useAdaptiveLearning';
 import { SIGNAL_LABELS } from '../../hooks/useAdaptiveLearning';
 import { CollapsibleCard } from '../common/CollapsibleCard';
 
 interface Props {
-  data: Test4Result & { resetLearning: () => void };
+  data: AdaptiveResult;
 }
 
 // ─── Accent colours per signal index [T1,T2,T3,T5,T6,T7,T8] ─────────────────
@@ -22,7 +22,7 @@ const SIGNAL_COLORS = [
   '#35B978', // T3 green
   '#A78BFA', // T5 violet
   '#F59E0B', // T6 orange
-  '#34D399', // T7 teal
+  '#34D399', // T7 teal (WingoAI)
   '#F472B6', // T8 pink
 ];
 
@@ -33,7 +33,9 @@ function WeightBar({ label, value, color, isDominant }: { label: string; value: 
   return (
     <div className="space-y-1">
       <div className="flex items-center justify-between text-xs font-mono">
-        <span className={isDominant ? 'text-[#F5F5F5] font-bold' : 'text-[#8D9B95]'}>{label}</span>
+        <span className={isDominant ? 'text-[#F5F5F5] font-bold flex items-center gap-1' : 'text-[#8D9B95]'}>
+          {label} {isDominant && <span className="text-[9px] px-1 py-0.2 bg-[#E7B93F]/20 text-[#E7B93F] rounded">LEADER</span>}
+        </span>
         <span className="font-bold" style={{ color }}>{pct.toFixed(1)}%</span>
       </div>
       <div className="h-2 rounded-full bg-[#020806] border border-[#1E3A2B]/60 overflow-hidden">
@@ -72,9 +74,9 @@ function RollingRow({ label, hits, total }: { label: string; hits: number; total
 }
 
 function SigCell({ pred }: { pred: 'Big' | 'Small' | null }) {
-  if (!pred) return <td className="py-1.5 px-2 text-[#8D9B95] text-center">—</td>;
+  if (!pred) return <td className="py-1.5 px-2 text-[#8D9B95] text-center font-mono">—</td>;
   return (
-    <td className={`py-1.5 px-2 font-medium text-center ${pred === 'Big' ? 'text-[#E7B93F]' : 'text-[#60A5FA]'}`}>
+    <td className={`py-1.5 px-2 font-mono font-bold text-center ${pred === 'Big' ? 'text-[#E7B93F]' : 'text-[#60A5FA]'}`}>
       {pred === 'Big' ? 'B' : 'S'}
     </td>
   );
@@ -105,37 +107,134 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data }) => {
     resetLearning,
   } = data;
 
-  const lastRow: Test4HistoryRow | null = history.length > 0 ? history[history.length - 1] : null;
+  const lastRow: AdaptiveHistoryRow | null = history.length > 0 ? history[history.length - 1] : null;
   const historyDesc = useMemo(() => [...history].reverse(), [history]);
 
-  const handleReset = () => { resetLearning(); setConfirmReset(false); };
+  const handleReset = () => { resetLearning(false); setConfirmReset(false); };
 
   const diff = accuracyPct - 50;
   const diffStr = diff >= 0 ? `+${diff.toFixed(1)}pp` : `${diff.toFixed(1)}pp`;
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-5">
 
-      {/* ── Header bar ─────────────────────────────────────────────────── */}
-      <div className="flex flex-wrap items-center justify-between gap-4 p-4 rounded-xl bg-[#06130F] border border-[#1E3A2B]">
-        <div>
-          <span className="font-mono font-bold text-xs text-[#F5F5F5]">
-            7-Signal Adaptive Ensemble: Σ wₙ·Tₙ  (n ∈ 1,2,3,5,6,7,8)
-          </span>
-          <p className="text-[11px] text-[#8D9B95] mt-0.5">
-            Learns which of the 7 signals has been most reliable. Weights update after every round. Evaluated out-of-sample — no future data used.
-          </p>
-        </div>
-        <div className="flex items-center gap-4 text-xs font-mono">
-          <div>
-            <span className="text-[#8D9B95] block text-[10px]">BIG/SMALL HIT RATE:</span>
-            <span className={`text-base font-bold ${accuracyPct >= 50 ? 'text-[#35B978]' : 'text-[#F04444]'}`}>
-              {accuracyPct}% ({totalHits} / {totalPredictions})
-            </span>
+      {/* ── Prominent Decision Hero Box ──────────────────────────────────── */}
+      <div className="p-5 sm:p-6 rounded-2xl bg-gradient-to-br from-[#0B2117] via-[#06140F] to-[#020806] border-2 border-[#35B978]/40 shadow-2xl relative overflow-hidden">
+        {/* Glow accent */}
+        <div className="absolute top-0 right-0 w-96 h-96 bg-[#35B978]/10 rounded-full blur-3xl pointer-events-none" />
+
+        <div className="relative z-10 space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#1E3A2B]/60 pb-3">
+            <div className="flex items-center gap-2.5">
+              <span className="px-2.5 py-1 rounded-md text-[10px] font-mono font-extrabold uppercase tracking-wider bg-[#35B978]/20 text-[#35B978] border border-[#35B978]/50 flex items-center gap-1.5">
+                <ShieldCheck className="w-3.5 h-3.5" /> MAIN DECISION SYSTEM
+              </span>
+              <span className="text-xs text-[#8D9B95] font-mono">
+                Real-Time Weighted Multi-Signal Ensemble
+              </span>
+            </div>
+            <div className="flex items-center gap-2 text-xs font-mono">
+              <span className="text-[10px] text-[#8D9B95] uppercase">7 Signals Active:</span>
+              <span className="text-[#F5F5F5] font-bold">T1, T2, T3, T5, T6, T7 (WingoAI), T8</span>
+            </div>
           </div>
-          <div>
-            <span className="text-[#8D9B95] block text-[10px]">RANDOM BASELINE:</span>
-            <span className="text-base font-bold text-[#8D9B95]">50.0%</span>
+
+          {/* Central Decision Display */}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-center">
+            {/* Left: Huge Final Decision */}
+            <div className="p-4 rounded-xl bg-[#020806]/80 border border-[#1E3A2B] text-center space-y-1">
+              <span className="text-[11px] font-mono font-bold text-[#8D9B95] tracking-widest uppercase block">
+                FINAL DECISION
+              </span>
+              {lastRow ? (
+                <div className="py-2">
+                  <span className={`text-4xl sm:text-5xl font-black font-mono tracking-tight drop-shadow-md ${
+                    lastRow.adaptiveDecision === 'Big' ? 'text-[#E7B93F]' : 'text-[#60A5FA]'
+                  }`}>
+                    {lastRow.adaptiveDecision.toUpperCase()}
+                  </span>
+                  <span className="text-xs font-mono text-[#8D9B95] block mt-1">
+                    Period {lastRow.period.slice(-7)} · Decision before result
+                  </span>
+                </div>
+              ) : (
+                <div className="py-4 text-[#8D9B95] font-mono text-sm">
+                  Awaiting First Evaluated Round
+                </div>
+              )}
+
+              {lastRow && (
+                <div className="pt-1">
+                  {lastRow.isHit ? (
+                    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#35B978]/20 text-[#35B978] border border-[#35B978]/40 font-mono text-xs font-bold">
+                      <CheckCircle2 className="w-3.5 h-3.5" /> OUTCOME: HIT
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#F04444]/20 text-[#F04444] border border-[#F04444]/40 font-mono text-xs font-bold">
+                      <XCircle className="w-3.5 h-3.5" /> OUTCOME: MISS
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Middle: Confidence & Weighted Distribution */}
+            <div className="p-4 rounded-xl bg-[#020806]/80 border border-[#1E3A2B] space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-mono font-bold text-[#8D9B95] uppercase tracking-wider">
+                  Weighted Vote Distribution
+                </span>
+                <span className="text-[10px] font-mono text-[#35B978]">
+                  {lastRow ? `${lastRow.signalsAvailable} of 7 signals voting` : '7 signals configured'}
+                </span>
+              </div>
+
+              {lastRow ? (
+                <div className="space-y-2 font-mono">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-bold text-[#E7B93F]">BIG: {lastRow.probBig.toFixed(1)}%</span>
+                    <span className="font-bold text-[#60A5FA]">SMALL: {lastRow.probSmall.toFixed(1)}%</span>
+                  </div>
+                  <div className="h-3 rounded-full bg-[#071A14] border border-[#1E3A2B] overflow-hidden flex">
+                    <div className="h-full bg-[#E7B93F] transition-all duration-500" style={{ width: `${lastRow.probBig}%` }} />
+                    <div className="h-full bg-[#60A5FA] transition-all duration-500" style={{ width: `${lastRow.probSmall}%` }} />
+                  </div>
+                  <div className="flex justify-between text-[10px] text-[#8D9B95] pt-0.5">
+                    <span>Weights normalized to 100%</span>
+                    <span>Decision boundary: 50.0%</span>
+                  </div>
+                </div>
+              ) : (
+                <div className="py-6 text-center text-[#8D9B95] font-mono text-xs">
+                  Awaiting active round inputs
+                </div>
+              )}
+            </div>
+
+            {/* Right: Key Decision Engine Performance */}
+            <div className="p-4 rounded-xl bg-[#020806]/80 border border-[#1E3A2B] grid grid-cols-2 gap-2 text-center font-mono">
+              <div className="p-2 rounded-lg bg-[#071A14] border border-[#1E3A2B]/50 col-span-2">
+                <span className="text-[10px] text-[#8D9B95] block uppercase font-bold">Overall Accuracy</span>
+                <span className={`text-xl font-extrabold ${accuracyPct >= 50 ? 'text-[#35B978]' : 'text-[#F04444]'}`}>
+                  {accuracyPct}%
+                </span>
+                <span className="text-[10px] text-[#8D9B95] block mt-0.5 font-sans">
+                  {totalHits} hits / {totalPredictions} predictions ({diffStr})
+                </span>
+              </div>
+              <div className="p-2 rounded-lg bg-[#071A14] border border-[#1E3A2B]/50">
+                <span className="text-[10px] text-[#8D9B95] block uppercase">Cur Streak</span>
+                <span className={`text-sm font-bold ${currentHitStreak > 0 ? 'text-[#35B978]' : currentMissStreak > 0 ? 'text-[#F04444]' : 'text-[#8D9B95]'}`}>
+                  {currentHitStreak > 0 ? `${currentHitStreak} HIT` : currentMissStreak > 0 ? `${currentMissStreak} MISS` : '—'}
+                </span>
+              </div>
+              <div className="p-2 rounded-lg bg-[#071A14] border border-[#1E3A2B]/50">
+                <span className="text-[10px] text-[#8D9B95] block uppercase">Lng Miss</span>
+                <span className="text-sm font-bold text-[#F04444]">
+                  {longestMissStreak}
+                </span>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -276,7 +375,7 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data }) => {
             </span>
             <div className="grid grid-cols-3 gap-2 text-center text-xs font-mono">
               <div className="p-2 rounded bg-[#020806] border border-[#1E3A2B]/60">
-                <span className="text-[10px] text-[#8D9B95] block">Adaptive T4</span>
+                <span className="text-[10px] text-[#8D9B95] block">Adaptive Engine</span>
                 <span className={`text-base font-bold ${accuracyPct >= 50 ? 'text-[#35B978]' : 'text-[#F04444]'}`}>
                   {accuracyPct}.0%
                 </span>
@@ -301,26 +400,26 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data }) => {
 
       {/* ── Rolling Performance ─────────────────────────────────────────── */}
       <CollapsibleCard
-        id="test4_rolling_perf"
+        id="adaptive_rolling_perf"
         variant="subcard"
         title={<span className="font-mono text-xs font-bold text-[#F5F5F5]">Recent Performance (Rolling Windows)</span>}
-        subtitle="Hit rate over the most recent N predictions"
+        subtitle="Hit rate over the most recent N decisions"
       >
         <div className="space-y-0.5">
-          <RollingRow label="Last 20 predictions"  hits={last20.hits}  total={last20.total} />
-          <RollingRow label="Last 50 predictions"  hits={last50.hits}  total={last50.total} />
-          <RollingRow label="Last 100 predictions" hits={last100.hits} total={last100.total} />
-          <RollingRow label="Last 250 predictions" hits={last250.hits} total={last250.total} />
-          <RollingRow label="All predictions"      hits={totalHits}    total={totalPredictions} />
+          <RollingRow label="Last 20 decisions"  hits={last20.hits}  total={last20.total} />
+          <RollingRow label="Last 50 decisions"  hits={last50.hits}  total={last50.total} />
+          <RollingRow label="Last 100 decisions" hits={last100.hits} total={last100.total} />
+          <RollingRow label="Last 250 decisions" hits={last250.hits} total={last250.total} />
+          <RollingRow label="All decisions"      hits={totalHits}    total={totalPredictions} />
         </div>
       </CollapsibleCard>
 
       {/* ── Learning History Table ──────────────────────────────────────── */}
       <CollapsibleCard
-        id="test4_history_table"
+        id="adaptive_history_table"
         variant="subcard"
-        title={<span className="font-mono text-xs font-bold text-[#F5F5F5]">Learning History Table</span>}
-        subtitle={`${totalPredictions} evaluated rounds — Test 4 prediction generated BEFORE actual was known`}
+        title={<span className="font-mono text-xs font-bold text-[#F5F5F5]">Adaptive Decision History Table</span>}
+        subtitle={`${totalPredictions} evaluated rounds — final decision generated BEFORE actual was known`}
       >
         <div className="overflow-x-auto rounded-lg border border-[#1E3A2B]/60">
           <table className="w-full text-left text-xs font-mono">
@@ -334,9 +433,9 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data }) => {
                 <th className="py-2.5 px-2 text-center">T6</th>
                 <th className="py-2.5 px-2 text-center">T7</th>
                 <th className="py-2.5 px-2 text-center">T8</th>
-                <th className="py-2.5 px-2 text-center text-[#C94DDA]">T4</th>
+                <th className="py-2.5 px-3 text-center text-[#35B978] font-bold">DECISION</th>
                 <th className="py-2.5 px-2 text-center">Actual</th>
-                <th className="py-2.5 px-3 text-right">Result</th>
+                <th className="py-2.5 px-3 text-right">Outcome</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[#1E3A2B]/40">
@@ -350,8 +449,8 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data }) => {
                   <SigCell pred={row.t6pred} />
                   <SigCell pred={row.t7pred} />
                   <SigCell pred={row.t8pred} />
-                  <td className={`py-1.5 px-2 font-bold text-center ${row.t4pred === 'Big' ? 'text-[#C94DDA]' : 'text-[#A855F7]'}`}>
-                    {row.t4pred === 'Big' ? 'B' : 'S'}
+                  <td className={`py-1.5 px-3 font-bold text-center ${row.adaptiveDecision === 'Big' ? 'text-[#E7B93F]' : 'text-[#60A5FA]'}`}>
+                    {row.adaptiveDecision.toUpperCase()}
                   </td>
                   <td className={`py-1.5 px-2 font-bold text-center ${row.actual === 'Big' ? 'text-[#E7B93F]' : 'text-[#60A5FA]'}`}>
                     {row.actual === 'Big' ? 'B' : 'S'}
@@ -380,29 +479,29 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data }) => {
           </table>
         </div>
         <p className="text-[10px] text-[#8D9B95] font-sans mt-2">
-          B = BIG · S = SMALL · — = signal not available for this round · T4 column is the weighted prediction made BEFORE the actual result was known.
+          B = BIG · S = SMALL · — = signal not available for this round · DECISION column is the weighted multi-signal decision generated BEFORE the actual result was known.
         </p>
       </CollapsibleCard>
 
-      {/* ── Reset control ───────────────────────────────────────────────── */}
-      <div className="flex items-center justify-between p-3 rounded-xl bg-[#06130F] border border-[#1E3A2B]">
+      {/* ── Reset Model State ────────────────────────────────────────────── */}
+      <div className="flex items-center justify-between p-3.5 rounded-xl bg-[#06130F] border border-[#1E3A2B]">
         <div>
-          <span className="text-xs font-mono font-bold text-[#F5F5F5]">Reset Learning</span>
+          <span className="text-xs font-mono font-bold text-[#F5F5F5]">Reset Learned Weights</span>
           <p className="text-[11px] text-[#8D9B95] mt-0.5">
-            Restores equal weights (1/7 each) and clears model memory. WinGo result history is preserved.
+            Restores equal initial weights (1/7 each) and clears online weight adaptation.
           </p>
         </div>
         {!confirmReset ? (
           <button
             onClick={() => setConfirmReset(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#F04444]/10 hover:bg-[#F04444]/20 text-[#F04444] border border-[#F04444]/30 font-mono text-xs font-bold transition-all cursor-pointer"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#E7B93F]/10 hover:bg-[#E7B93F]/20 text-[#E7B93F] border border-[#E7B93F]/30 font-mono text-xs font-bold transition-all cursor-pointer"
           >
-            <RotateCcw className="w-3.5 h-3.5" /> Reset
+            <RotateCcw className="w-3.5 h-3.5" /> Reset Weights
           </button>
         ) : (
           <div className="flex items-center gap-2">
-            <span className="text-[11px] text-[#F04444] font-mono">Confirm reset?</span>
-            <button onClick={handleReset} className="px-3 py-1.5 rounded-lg bg-[#F04444] text-white font-mono text-xs font-bold cursor-pointer hover:bg-[#d63030] transition-colors">
+            <span className="text-[11px] text-[#E7B93F] font-mono">Reset weights to equal?</span>
+            <button onClick={handleReset} className="px-3 py-1.5 rounded-lg bg-[#E7B93F] text-[#020806] font-mono text-xs font-bold cursor-pointer hover:bg-[#c99f30] transition-colors">
               Yes, Reset
             </button>
             <button onClick={() => setConfirmReset(false)} className="px-3 py-1.5 rounded-lg bg-[#1E3A2B] text-[#8D9B95] font-mono text-xs cursor-pointer hover:text-[#F5F5F5] transition-colors">
@@ -415,8 +514,8 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data }) => {
       {/* Disclaimer */}
       <div className="p-3 rounded-xl bg-[#071A14] border border-[#E7B93F]/20 text-[11px] text-[#8D9B95] font-sans">
         <span className="text-[#E7B93F] font-bold">ℹ Statistical Disclaimer: </span>
-        Test 4 is an empirical backtesting engine. It does{' '}
-        <strong>not</strong> predict future WinGo results. The random coin-flip baseline is 50.0%. Any
+        Adaptive Learning is an empirical multi-signal decision engine. It does{' '}
+        <strong>not</strong> guarantee future WinGo results. The random coin-flip baseline is 50.0%. Any
         observed accuracy above or below 50% is consistent with expected statistical variance.
       </div>
 

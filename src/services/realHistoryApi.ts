@@ -415,4 +415,21 @@ export const realHistoryApiService = {
       return await fetchRealScheduleFallback();
     }
   },
+
+  /**
+   * Protected server-side reset of application data in Supabase & memory.
+   */
+  async resetAllApplicationData(): Promise<{ success: boolean; message?: string; error?: string; deletedTables?: string[] }> {
+    try {
+      const response = await fetch(`${BASE_URL}/reset`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const data = await response.json();
+      return data;
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      return { success: false, error: errMsg };
+    }
+  },
 };

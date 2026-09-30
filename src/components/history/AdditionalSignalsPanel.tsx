@@ -284,7 +284,7 @@ export function computeTest6(
 //  · Only periods where a stored signal exists are evaluated.
 //  · signal 'BIG'   → predictedSize = 'Big'
 //  · signal 'SMALL' → predictedSize = 'Small'
-//  · Periods with no stored signal → noSignal = true (excluded from accuracy & Test 4)
+//  · Periods with no stored signal → noSignal = true (excluded from accuracy & Adaptive Learning)
 //
 // Authentication: The Bearer token is STORED ONLY IN THE BACKEND COLLECTOR ENV.
 // It is NEVER sent to the frontend, logged, or stored in Supabase.
@@ -674,7 +674,7 @@ export const AdditionalSignalsPanel: React.FC<AdditionalSignalsPanelProps> = ({
                     );
                   })}
                 </div>
-                <p className="text-[10px] text-[#8D9B95] font-sans">Official signal: SMA-10. When SMA-10 = 50% the round is marked NO SIGNAL and excluded from accuracy and Test 4.</p>
+                <p className="text-[10px] text-[#8D9B95] font-sans">Official signal: SMA-10. When SMA-10 = 50% the round is marked NO SIGNAL and excluded from accuracy and Adaptive Learning.</p>
               </div>
               <StreakMini result={test6} />
               <DetailTable result={test6}
@@ -702,7 +702,7 @@ export const AdditionalSignalsPanel: React.FC<AdditionalSignalsPanelProps> = ({
                 <span className="block">signal = BIG → prediction = Big · signal = SMALL → prediction = Small</span>
                 <span className="block text-[#8D9B95]">
                   Signals are fetched every ~30s by the backend collector and stored in Supabase.
-                  Rounds without a stored signal are marked NO SIGNAL and excluded from accuracy and Test 4.
+                  Rounds without a stored signal are marked NO SIGNAL and excluded from accuracy and Adaptive Learning.
                   Confidence is the provider's reported value — independently verified by actual HIT/MISS performance.
                 </span>
               </div>
