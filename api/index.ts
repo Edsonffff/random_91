@@ -955,22 +955,31 @@ app.post('/api/real/reset', async (_req, res) => {
       }
       deletedTables.push('public.real_wingo_30s_history');
 
-      // 2. Delete all records from public.wingo_t7_signals (if table exists)
-      const { error: t7DelErr } = await client
-        .from('wingo_t7_signals')
-        .delete()
-        .neq('period_id', '');
+      // 2. Safely attempt to clear public.wingo_t7_signals (optional table)
+      try {
+        const { error: t7DelErr } = await client
+          .from('wingo_t7_signals')
+          .delete()
+          .neq('period_id', '');
 
-      if (t7DelErr && t7DelErr.code !== '42P01') {
-        // 42P01 = table does not exist in Supabase (non-fatal if migration was not run yet)
-        console.error('Failed to clear wingo_t7_signals in Supabase:', t7DelErr);
-        return res.status(500).json({
-          success: false,
-          error: `Failed to clear wingo_t7_signals: ${t7DelErr.message}`,
-        });
-      }
-      if (!t7DelErr) {
-        deletedTables.push('public.wingo_t7_signals');
+        if (!t7DelErr) {
+          deletedTables.push('public.wingo_t7_signals');
+        } else {
+          // If table does not exist in schema cache or database, safely ignore
+          const isTableMissing =
+            t7DelErr.code === '42P01' ||
+            t7DelErr.code === 'PGRST205' ||
+            t7DelErr.code === 'PGRST204' ||
+            (t7DelErr.message && /schema cache|does not exist|not found/i.test(t7DelErr.message));
+
+          if (isTableMissing) {
+            console.log('wingo_t7_signals table does not exist in Supabase — skipping deletion.');
+          } else {
+            console.warn('Optional table wingo_t7_signals deletion warning:', t7DelErr.message);
+          }
+        }
+      } catch (t7CatchErr) {
+        console.log('wingo_t7_signals delete skipped:', t7CatchErr);
       }
 
       // 3. Verify deletion in Supabase

@@ -569,14 +569,11 @@ export const AlgorithmAnalyzer: React.FC = () => {
   // Active dataset being analyzed (Backtesting strictly on completed results)
   const activeDataset: RoundEntry[] = useMemo(() => {
     if (dataSource === 'realLive') {
-      if (realHistory.length > 0) {
-        return realHistory.map((r) => ({
-          period: r.periodNumber,
-          number: r.winningNumber,
-          completedAt: r.completedAt, // carry actual draw timestamp for Test 5
-        }));
-      }
-      return SAMPLE_3_SCREEN; // Fallback to sample 3 if network pending
+      return realHistory.map((r) => ({
+        period: r.periodNumber,
+        number: r.winningNumber,
+        completedAt: r.completedAt, // carry actual draw timestamp for Test 5
+      }));
     }
     if (dataSource === 'sample3') {
       return SAMPLE_3_SCREEN;
@@ -947,11 +944,20 @@ export const AlgorithmAnalyzer: React.FC = () => {
       // 2. Clear WingoAI signals map
       setT7SignalsMap(new Map());
 
-      // 3. Clear local storage caches
+      // 3. Clear all related local/session storage caches
       try {
         localStorage.removeItem('wingo_adaptive_model_v5');
         localStorage.removeItem('wingo_test4_model_v4');
         localStorage.removeItem('wingo_real_history_cache_v1');
+        sessionStorage.removeItem('wingo_real_history_cache_v1');
+        const keysToRemove: string[] = [];
+        for (let i = 0; i < localStorage.length; i++) {
+          const key = localStorage.key(i);
+          if (key && (key.startsWith('wingo_') || key.startsWith('adaptive_'))) {
+            keysToRemove.push(key);
+          }
+        }
+        keysToRemove.forEach((k) => localStorage.removeItem(k));
       } catch {}
 
       // 4. Close modal

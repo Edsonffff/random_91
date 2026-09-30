@@ -122,16 +122,24 @@ async function fetchWingoAISignal() {
   }
 }
 
+let wingoSignalsTableMissing = false;
+
 /**
- * Upsert a WingoAI signal row into public.wingo_t7_signals.
+ * Upsert a WingoAI signal row into public.wingo_t7_signals (if table exists).
  * Conflict target is period_id — so the same period will update (never duplicate).
  */
 async function storeWingoAISignal(supabaseClient, signalRow) {
+  if (wingoSignalsTableMissing) return;
   const { error } = await supabaseClient
     .from('wingo_t7_signals')
     .upsert([signalRow], { onConflict: 'period_id' });
 
   if (error) {
+    if (error.code === 'PGRST205' || error.code === '42P01' || /schema cache|does not exist/i.test(error.message)) {
+      wingoSignalsTableMissing = true;
+      log('Optional table wingo_t7_signals does not exist in Supabase — skipping storing signals in database.');
+      return;
+    }
     logError(`Failed to store WingoAI signal for period ${signalRow.period_id}: ${error.message}`);
   } else {
     log(`WingoAI signal stored (period: ${signalRow.period_id}, signal: ${signalRow.signal}, confidence: ${signalRow.confidence ?? 'N/A'}%)`);
@@ -142,11 +150,16 @@ async function storeWingoAISignal(supabaseClient, signalRow) {
  * Batch-upsert multiple WingoAI signal rows (more efficient than one-by-one).
  */
 async function storeWingoAISignalBatch(supabaseClient, rows) {
-  if (rows.length === 0) return { stored: 0, errors: 0 };
+  if (wingoSignalsTableMissing || rows.length === 0) return { stored: 0, errors: 0 };
   const { error } = await supabaseClient
     .from('wingo_t7_signals')
     .upsert(rows, { onConflict: 'period_id' });
   if (error) {
+    if (error.code === 'PGRST205' || error.code === '42P01' || /schema cache|does not exist/i.test(error.message)) {
+      wingoSignalsTableMissing = true;
+      log('Optional table wingo_t7_signals does not exist in Supabase — skipping batch storing signals in database.');
+      return { stored: 0, errors: 0 };
+    }
     logError(`Batch upsert of ${rows.length} WingoAI signals failed: ${error.message}`);
     return { stored: 0, errors: rows.length };
   }

@@ -25,7 +25,8 @@ const LEARNING_RATE = 0.05;
 const N_SIGNALS = 7;
 const INITIAL_WEIGHT = 1 / N_SIGNALS;
 const MIN_WEIGHT = 0.01;
-const STORAGE_KEY = 'wingo_test4_model_v4'; // v4 = 7-signal model with Markov & SMA
+const STORAGE_KEY = 'wingo_adaptive_model_v5';
+const LEGACY_STORAGE_KEY = 'wingo_test4_model_v4';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -136,7 +137,7 @@ function freshWeights(): number[] {
 
 function loadModel(): ModelState {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(STORAGE_KEY) || localStorage.getItem(LEGACY_STORAGE_KEY);
     if (!raw) throw new Error('no data');
     const parsed = JSON.parse(raw) as Partial<ModelState>;
     const rawWeights = Array.isArray(parsed.weights) ? parsed.weights : freshWeights();
@@ -160,6 +161,8 @@ function loadModel(): ModelState {
 function saveModel(state: ModelState): void {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    // Clean up legacy key
+    localStorage.removeItem(LEGACY_STORAGE_KEY);
   } catch {
     // ignore quota errors
   }
@@ -217,16 +220,16 @@ export function useAdaptiveLearning(inputs: Test4InputRow[]): AdaptiveResult {
   const [modelState, setModelState] = useState<ModelState>(() => loadModel());
 
   const resetLearning = useCallback((fullCleanSlate = false) => {
-    const current = loadModel();
     const fresh: ModelState = {
       weights: freshWeights(),
       processedPeriods: [],
-      allTimeLongestHitStreak: fullCleanSlate ? 0 : (current.allTimeLongestHitStreak ?? 0),
-      allTimeLongestMissStreak: fullCleanSlate ? 0 : (current.allTimeLongestMissStreak ?? 0),
+      allTimeLongestHitStreak: 0,
+      allTimeLongestMissStreak: 0,
     };
     if (fullCleanSlate) {
       try {
         localStorage.removeItem(STORAGE_KEY);
+        localStorage.removeItem(LEGACY_STORAGE_KEY);
       } catch {}
     } else {
       saveModel(fresh);
@@ -399,7 +402,7 @@ export function useAdaptiveLearning(inputs: Test4InputRow[]): AdaptiveResult {
   // Sync persisted weights back into state when localStorage changes externally
   useEffect(() => {
     const handleStorageChange = (e: StorageEvent) => {
-      if (e.key === STORAGE_KEY) setModelState(loadModel());
+      if (e.key === STORAGE_KEY || e.key === LEGACY_STORAGE_KEY) setModelState(loadModel());
     };
     window.addEventListener('storage', handleStorageChange);
     return () => window.removeEventListener('storage', handleStorageChange);
@@ -415,9 +418,9 @@ export function useAdaptiveLearning(inputs: Test4InputRow[]): AdaptiveResult {
     accuracyPct: 0,
     currentHitStreak: 0,
     currentMissStreak: 0,
-    longestHitStreak: modelState.allTimeLongestHitStreak ?? 0,
-    longestMissStreak: modelState.allTimeLongestMissStreak ?? 0,
-    weights: modelState.weights,
+    longestHitStreak: 0,
+    longestMissStreak: 0,
+    weights: modelState.weights && modelState.weights.length === N_SIGNALS ? modelState.weights : freshWeights(),
     dominantSignalIndex: 0,
     last20: { hits: 0, total: 0 },
     last50: { hits: 0, total: 0 },
