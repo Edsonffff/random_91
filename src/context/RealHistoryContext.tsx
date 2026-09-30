@@ -385,7 +385,7 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
         // Attempt fallback to server /api/real/history
         let fallbackSucceeded = false;
         try {
-          const fallbackData = await realHistoryApiService.fetchRealHistoryFromSupabase(50);
+          const fallbackData = await realHistoryApiService.fetchRealHistoryFromSupabase('all');
           if (fallbackData.results && fallbackData.results.length > 0) {
             const merged = mergeAndDeduplicate(realHistoryRef.current, fallbackData.results);
             setRealHistory(merged);
@@ -571,7 +571,7 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
     const initializeData = async () => {
       try {
-        const supabaseData = await realHistoryApiService.fetchRealHistoryFromSupabase(500);
+        const supabaseData = await realHistoryApiService.fetchRealHistoryFromSupabase('all');
         if (isMounted && supabaseData.results && supabaseData.results.length > 0) {
           const sorted = sortRealHistoryDescending(supabaseData.results);
           // Initialize synced issue numbers tracking with all records currently in Supabase

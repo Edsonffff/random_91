@@ -1,6 +1,6 @@
 import type { RealGameRecord, RealGameSchedule, ResultColor, ResultSize } from '../types/result';
 
-const API_BASE = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '').replace(/\/api$/, '');
+const API_BASE = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL ? import.meta.env.VITE_API_BASE_URL : '').replace(/\/$/, '').replace(/\/api$/, '');
 const BASE_URL = `${API_BASE}/api/real`;
 
 export const OFFICIAL_WINGO_HISTORY_URL = 'https://draw.ar-lottery01.com/WinGo/WinGo_30S/GetHistoryIssuePage.json';
@@ -235,7 +235,7 @@ export async function fetchOfficialScheduleFromBrowser(
  * Fallback / status call to existing /api/real/history endpoint.
  */
 export async function fetchRealHistoryFallback(
-  limit: number | 'all' = 10,
+  limit: number | 'all' = 'all',
   forceRefresh: boolean = false
 ): Promise<RealHistoryApiResponse> {
   const params = new URLSearchParams();
@@ -339,7 +339,7 @@ export async function debugSupabaseBackend(): Promise<Record<string, unknown>> {
  * Read persistent real history records from Supabase via server /api/real/history.
  */
 export async function fetchRealHistoryFromSupabase(
-  limit: number | 'all' = 50
+  limit: number | 'all' = 'all'
 ): Promise<RealHistoryApiResponse> {
   const params = new URLSearchParams();
   if (limit !== undefined) {
@@ -366,7 +366,7 @@ export const realHistoryApiService = {
    * Primary fetcher for real history: direct browser fetch with server fallback.
    */
   async fetchRealHistory(
-    limit: number | 'all' = 10,
+    limit: number | 'all' = 'all',
     forceRefresh: boolean = false,
     signal?: AbortSignal
   ): Promise<RealHistoryApiResponse> {

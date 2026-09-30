@@ -595,52 +595,91 @@ function sortRealRecordsDescending(records: RealCompletedRecord[]): RealComplete
 
 /**
  * Read history from public.real_wingo_30s_history strictly ordered by issue_number numerically descending.
+ * Uses pagination with batching (.range(from, to)) to retrieve 1,000+ records beyond PostgREST single-query limits.
  */
 async function readFromSupabase(
-  limit: number | 'all' = 50
+  limit: number | 'all' = 'all'
 ): Promise<{ records: RealCompletedRecord[]; totalCount: number; error: string | null }> {
   const client = getSupabaseClient();
   if (!client) {
     return { records: [], totalCount: 0, error: 'SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not configured' };
   }
 
-  const limitCount =
-    limit === 'all' ? 1000 : Math.min(1000, Math.max(1, typeof limit === 'number' ? limit : 50));
+  const BATCH_SIZE = 1000;
+  let from = 0;
+  const allRows: any[] = [];
+  let totalCount = 0;
 
-  const { data, count, error } = await client
-    .from('real_wingo_30s_history')
-    .select('*', { count: 'exact' })
-    .eq('game_code', 'WinGo_30S')
-    .order('issue_number', { ascending: false })
-    .limit(limitCount);
+  while (true) {
+    const to =
+      limit === 'all'
+        ? from + BATCH_SIZE - 1
+        : Math.min(from + BATCH_SIZE - 1, limit - 1);
 
-  if (error) {
-    console.error('[Supabase Read Error]:', error);
-    return { records: [], totalCount: 0, error: error.message };
+    const { data, count, error } = await client
+      .from('real_wingo_30s_history')
+      .select('*', { count: from === 0 ? 'exact' : undefined })
+      .eq('game_code', 'WinGo_30S')
+      .order('issue_number', { ascending: false })
+      .range(from, to);
+
+    if (error) {
+      console.error('[Supabase Read Error]:', error);
+      if (allRows.length > 0) {
+        break;
+      }
+      return { records: [], totalCount: 0, error: error.message };
+    }
+
+    if (from === 0 && typeof count === 'number') {
+      totalCount = count;
+    }
+
+    if (!data || data.length === 0) {
+      break;
+    }
+
+    allRows.push(...data);
+
+    // If fewer rows returned than the requested range batch, we have reached the end of the table
+    const requestedBatchCount = to - from + 1;
+    if (data.length < requestedBatchCount) {
+      break;
+    }
+
+    if (typeof limit === 'number' && allRows.length >= limit) {
+      break;
+    }
+
+    from += data.length;
   }
 
-  const records: RealCompletedRecord[] = (data || []).map((row: any) => {
+  const dedupeMap = new Map<string, RealCompletedRecord>();
+  for (const row of allRows) {
     const rawNum = row.winning_number !== undefined ? row.winning_number : row.number;
     const num = typeof rawNum === 'number' ? rawNum : parseInt(String(rawNum ?? 0), 10);
     const colorStr = String(row.color || (Array.isArray(row.colors) ? row.colors.join(',') : '') || '');
+    const issue = String(row.issue_number).trim();
 
-    return {
-      issueNumber: String(row.issue_number).trim(),
-      periodNumber: String(row.issue_number).trim(),
-      winningNumber: isNaN(num) ? 0 : num,
-      size: (row.size as 'Big' | 'Small') || (num >= 5 ? 'Big' : 'Small'),
-      colors: parseRealColors(colorStr, num),
-      premium: String(row.premium ?? num),
-      sum: typeof row.sum === 'number' ? row.sum : 0,
-      completedAt: row.completed_at || row.created_at || new Date().toISOString(),
-      source: 'COMPLETED REAL HISTORY',
-    };
-  });
+    if (issue && !dedupeMap.has(issue)) {
+      dedupeMap.set(issue, {
+        issueNumber: issue,
+        periodNumber: issue,
+        winningNumber: isNaN(num) ? 0 : num,
+        size: (row.size as 'Big' | 'Small') || (num >= 5 ? 'Big' : 'Small'),
+        colors: parseRealColors(colorStr, num),
+        premium: String(row.premium ?? num),
+        sum: typeof row.sum === 'number' ? row.sum : 0,
+        completedAt: row.completed_at || row.created_at || new Date().toISOString(),
+        source: 'COMPLETED REAL HISTORY',
+      });
+    }
+  }
 
   // Explicitly ensure numeric descending sort (Requirement 3, 4, 5, 6)
-  sortRealRecordsDescending(records);
+  const records = sortRealRecordsDescending(Array.from(dedupeMap.values()));
 
-  return { records, totalCount: count ?? records.length, error: null };
+  return { records, totalCount: totalCount || records.length, error: null };
 }
 
 // GET /api/real/current (Fallback status / schedule)
@@ -741,7 +780,7 @@ app.get('/api/real/status', (req, res) => {
 app.get('/api/real/history', async (req, res) => {
   const limitParam = req.query.limit as string;
 
-  let limit: number | 'all' = 50;
+  let limit: number | 'all' = 'all';
   if (limitParam === 'all') {
     limit = 'all';
   } else if (limitParam) {
@@ -758,7 +797,6 @@ app.get('/api/real/history', async (req, res) => {
       for (const r of accumulatedRealHistory) map.set(r.issueNumber, r);
       for (const r of records) map.set(r.issueNumber, r);
       accumulatedRealHistory = sortRealRecordsDescending(Array.from(map.values()));
-      if (accumulatedRealHistory.length > 1000) accumulatedRealHistory = accumulatedRealHistory.slice(0, 1000);
 
       return res.json({
         success: true,
@@ -845,7 +883,6 @@ const handleSyncHistory = async (req: express.Request, res: express.Response) =>
   for (const r of accumulatedRealHistory) memoryMap.set(r.issueNumber, r);
   for (const r of cleanRecords) memoryMap.set(r.issueNumber, r);
   accumulatedRealHistory = sortRealRecordsDescending(Array.from(memoryMap.values()));
-  if (accumulatedRealHistory.length > 1000) accumulatedRealHistory = accumulatedRealHistory.slice(0, 1000);
   lastRealFetchTime = Date.now();
 
   if (!syncResult.success) {
