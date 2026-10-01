@@ -81,19 +81,15 @@ let latestWingoAITiming = null;
 let wingoSignalsTableMissing = false;
 
 async function storeWingoAISignal(supabaseClient, signalRow) {
-  if (wingoSignalsTableMissing) return;
   const { error } = await supabaseClient
     .from('wingo_t7_signals')
     .upsert([signalRow], { onConflict: 'period_id' });
 
   if (error) {
-    if (error.code === 'PGRST205' || error.code === '42P01' || /schema cache|does not exist/i.test(error.message)) {
-      wingoSignalsTableMissing = true;
-      log('Optional table wingo_t7_signals does not exist in Supabase — skipping storing signals in database.');
-      return;
-    }
     logError(`Failed to store WingoAI signal for period ${signalRow.period_id}: ${error.message}`);
+    return false;
   }
+  return true;
 }
 
 /**
@@ -142,67 +138,78 @@ async function fetchAndProcessWingoAISignal(supabaseClient) {
     }
 
     const periodId = String(data.periodId).trim();
-    const signal = data.signal;
+    const signal = String(data.signal).toUpperCase();
     const confidence = typeof data.confidence === 'number' ? data.confidence : null;
-    const luckyNumber = typeof data.luckyNumber === 'number' ? data.luckyNumber : null;
     const fetchedAt = new Date().toISOString();
 
-    log(`[WINGOAI] periodId: ${periodId}`);
-    log(`[WINGOAI] signal: ${signal}`);
-    log(`[T7] signal received at: ${fetchedAt} (period: ${periodId}, signal: ${signal})`);
-
-    const signalRecord = {
-      period_id: periodId,
-      signal,
-      confidence,
-      lucky_number: luckyNumber,
-      fetched_at: fetchedAt,
-      stored_at: fetchedAt,
-      api_response_ms: responseTime,
-    };
-
-    // Store in in-memory cache
-    inMemoryT7Signals.set(periodId, signalRecord);
-    log(`[T7] inMemoryT7Signals updated at: ${new Date().toISOString()}`);
-
-    if (inMemoryT7Signals.size > 500) {
-      const keys = Array.from(inMemoryT7Signals.keys());
-      for (let i = 0; i < keys.length - 500; i++) {
-        inMemoryT7Signals.delete(keys[i]);
-      }
-    }
-
-    latestWingoAITiming = {
-      fetched_at: fetchedAt,
-      period_id: periodId,
-      api_response_ms: responseTime,
-      signal,
-      stored_at: fetchedAt,
-    };
+    // Diagnostic logging matching requirement 15
+    log(`[T7 COLLECTOR]\nperiod=${periodId}\nsignal=${signal}\nfetched_at=${fetchedAt}`);
 
     // Deduplicate Supabase writes: Only insert if not already written
     if (!knownWingoAIPeriods.has(periodId)) {
-      const storeStart = Date.now();
-      await storeWingoAISignal(supabaseClient, {
+      const storedAt = new Date().toISOString();
+      const signalRecord = {
         period_id: periodId,
         signal,
         confidence,
         fetched_at: fetchedAt,
-      });
-      knownWingoAIPeriods.add(periodId);
-      const storeElapsed = Date.now() - storeStart;
-      const storedAt = new Date().toISOString();
-      if (latestWingoAITiming) {
-        latestWingoAITiming.stored_at = storedAt;
+        stored_at: storedAt,
+      };
+
+      const storedOk = await storeWingoAISignal(supabaseClient, signalRecord);
+      if (storedOk) {
+        knownWingoAIPeriods.add(periodId);
+        inMemoryT7Signals.set(periodId, signalRecord);
+        latestWingoAITiming = {
+          fetched_at: fetchedAt,
+          period_id: periodId,
+          api_response_ms: responseTime,
+          signal,
+          stored_at: storedAt,
+        };
+        // Diagnostic logging matching requirement 15
+        log(`[T7 SUPABASE]\nperiod=${periodId}\nstored_at=${storedAt}`);
       }
-      log(`[WINGOAI] Supabase storage completed (took ${storeElapsed} ms)`);
-      log(`[T7] signal stored at: ${storedAt}`);
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logError(`[WINGOAI] Cycle error: ${msg}`);
   } finally {
     isWingoAIPolling = false;
+  }
+}
+
+async function loadExistingT7Signals(supabaseClient) {
+  try {
+    const { data, error } = await supabaseClient
+      .from('wingo_t7_signals')
+      .select('period_id, signal, confidence, fetched_at, stored_at')
+      .order('period_id', { ascending: false })
+      .limit(500);
+
+    if (error) {
+      logError(`Failed to preload existing T7 signals: ${error.message}`);
+      return;
+    }
+
+    if (Array.isArray(data)) {
+      for (const row of data) {
+        if (row.period_id) {
+          const pid = String(row.period_id).trim();
+          knownWingoAIPeriods.add(pid);
+          inMemoryT7Signals.set(pid, {
+            period_id: pid,
+            signal: row.signal,
+            confidence: row.confidence !== null ? Number(row.confidence) : null,
+            fetched_at: row.fetched_at,
+            stored_at: row.stored_at,
+          });
+        }
+      }
+      log(`Preloaded ${data.length} existing Test 7 signals from public.wingo_t7_signals into collector memory.`);
+    }
+  } catch (err) {
+    logError(`Error preloading T7 signals: ${err.message}`);
   }
 }
 
@@ -219,113 +226,6 @@ async function startWingoAIPolling(supabaseClient) {
     }
   }
   log('[WINGOAI] Polling worker stopped.');
-}
-
-async function storeWingoAISignalBatch(supabaseClient, rows) {
-  if (wingoSignalsTableMissing || rows.length === 0) return { stored: 0, errors: 0 };
-  const { error } = await supabaseClient
-    .from('wingo_t7_signals')
-    .upsert(rows, { onConflict: 'period_id' });
-  if (error) {
-    if (error.code === 'PGRST205' || error.code === '42P01' || /schema cache|does not exist/i.test(error.message)) {
-      wingoSignalsTableMissing = true;
-      log('Optional table wingo_t7_signals does not exist in Supabase — skipping batch storing signals in database.');
-      return { stored: 0, errors: 0 };
-    }
-    logError(`Batch upsert of ${rows.length} WingoAI signals failed: ${error.message}`);
-    return { stored: 0, errors: rows.length };
-  }
-  return { stored: rows.length, errors: 0 };
-}
-
-/**
- * Backfill historical WingoAI signals from /history/30sec in background.
- * Runs non-blocking; never delays port binding or health checks.
- */
-async function backfillWingoAIHistory(supabaseClient) {
-  if (wingoSignalsTableMissing) return;
-  log('Starting WingoAI historical backfill from /history/30sec...');
-
-  const HISTORY_URL = 'https://server.wingoaibot.com/history/30sec';
-  const PAGE_SIZE = 100;
-  let page = 1;
-  let totalFetched = 0;
-  let totalStored = 0;
-  let totalSkipped = 0;
-
-  const headers = { 'Accept': 'application/json' };
-  if (WINGOAI_API_TOKEN) {
-    headers['Authorization'] = `Bearer ${WINGOAI_API_TOKEN}`;
-  }
-
-  while (true) {
-    const url = `${HISTORY_URL}?page=${page}&limit=${PAGE_SIZE}`;
-    let data;
-
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 10000);
-      const resp = await fetch(url, {
-        method: 'GET',
-        headers,
-        signal: controller.signal,
-      });
-      clearTimeout(timeoutId);
-
-      if (!resp.ok) {
-        logError(`WingoAI history page ${page} returned HTTP ${resp.status} — stopping backfill`);
-        break;
-      }
-      data = await resp.json();
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      logError(`WingoAI history page ${page} fetch failed: ${msg} — stopping backfill`);
-      break;
-    }
-
-    const rows = Array.isArray(data?.rows) ? data.rows : [];
-    if (rows.length === 0) break;
-
-    totalFetched += rows.length;
-
-    const batch = [];
-    for (const row of rows) {
-      if (!row.period || !row.prediction) {
-        totalSkipped++;
-        continue;
-      }
-      const signal = String(row.prediction).toUpperCase();
-      if (signal !== 'BIG' && signal !== 'SMALL') {
-        totalSkipped++;
-        continue;
-      }
-      batch.push({
-        period_id: String(row.period).trim(),
-        signal,
-        confidence: null,
-        fetched_at: new Date().toISOString(),
-      });
-    }
-
-    if (batch.length > 0) {
-      const { stored, errors } = await storeWingoAISignalBatch(supabaseClient, batch);
-      totalStored += stored;
-      if (errors > 0 && wingoSignalsTableMissing) {
-        break;
-      }
-    }
-
-    log(`WingoAI backfill page ${page}: fetched=${rows.length}, stored=${batch.length}, skipped=${rows.length - batch.length}`);
-
-    const totalRecords = typeof data?.totalRecords === 'number' ? data.totalRecords : 0;
-    const totalPages = Math.ceil(totalRecords / PAGE_SIZE);
-    if (page >= totalPages || rows.length < PAGE_SIZE) break;
-    page++;
-
-    await sleep(300);
-  }
-
-  log(`WingoAI historical backfill complete: fetched=${totalFetched}, stored=${totalStored}, skipped=${totalSkipped}`);
 }
 
 // ─── COLLECTOR & HEALTH SERVER STATE ──────────────────────────────────────────
@@ -364,18 +264,17 @@ const healthServer = http.createServer((req, res) => {
     return res.end();
   }
 
-  // POST /reset or /api/reset — resets in-memory knownPeriods tracker immediately
+  // POST /reset or /api/reset — resets in-memory knownPeriods tracker for WinGo results
+  // Note: Test 7 WingoAI data is preserved (Requirement 18: Do not delete existing Test 7 data)
   if (req.method === 'POST' && (urlPath === '/reset' || urlPath === '/api/reset')) {
     const previousCount = knownPeriods.size;
     knownPeriods.clear();
-    knownWingoAIPeriods.clear();
-    inMemoryT7Signals.clear();
     log(`[Collector Reset] In-memory known periods cleared (${previousCount} -> 0). Collector continuing 24/7 polling.`);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(
       JSON.stringify({
         success: true,
-        message: 'Collector in-memory known periods and WingoAI signals cleared successfully',
+        message: 'Collector in-memory known periods cleared successfully (Test 7 data preserved)',
         previousCount,
         currentCount: 0,
         active: isPollingActive,
@@ -387,7 +286,6 @@ const healthServer = http.createServer((req, res) => {
   // GET /api/real/t7-signals or /t7-signals — fast in-memory served with latency telemetry
   if (urlPath === '/api/real/t7-signals' || urlPath === '/t7-signals') {
     const reqReceivedAt = new Date().toISOString();
-    log(`[T7] /api/real/t7-signals request received at: ${reqReceivedAt}`);
 
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     res.setHeader('Pragma', 'no-cache');
@@ -395,8 +293,11 @@ const healthServer = http.createServer((req, res) => {
     res.setHeader('Surrogate-Control', 'no-store');
 
     const list = Array.from(inMemoryT7Signals.values()).sort((a, b) => b.period_id.localeCompare(a.period_id));
+    const latest = list[0] || null;
+
+    log(`[T7 API]\nrequest_time=${reqReceivedAt}\nlatest_period=${latest?.period_id || 'none'}\nlatest_fetched_at=${latest?.fetched_at || 'none'}\nlatest_stored_at=${latest?.stored_at || 'none'}`);
+
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    log(`[T7] /api/real/t7-signals response sent at: ${new Date().toISOString()}`);
     return res.end(
       JSON.stringify({
         success: true,
@@ -531,11 +432,8 @@ async function startCollector() {
   const { totalRows, newestPeriod } = await loadExistingPeriods(supabaseClient);
   log(`Initialized. Preserved ${totalRows} existing records in Supabase. Newest period: ${newestPeriod || 'None'}`);
 
-  // Background non-blocking historical WingoAI backfill (does not delay polling loop)
-  backfillWingoAIHistory(supabaseClient).catch((backfillErr) => {
-    const backfillMsg = backfillErr instanceof Error ? backfillErr.message : String(backfillErr);
-    log(`Historical WingoAI backfill notice: ${backfillMsg}`);
-  });
+  // Preload existing Test 7 signals from public.wingo_t7_signals into collector memory
+  await loadExistingT7Signals(supabaseClient);
 
   // Dedicated background fast 5-second WingoAI polling worker
   startWingoAIPolling(supabaseClient).catch((wErr) => {

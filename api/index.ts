@@ -955,32 +955,7 @@ app.post('/api/real/reset', async (_req, res) => {
       }
       deletedTables.push('public.real_wingo_30s_history');
 
-      // 2. Safely attempt to clear public.wingo_t7_signals (optional table)
-      try {
-        const { error: t7DelErr } = await client
-          .from('wingo_t7_signals')
-          .delete()
-          .neq('period_id', '');
-
-        if (!t7DelErr) {
-          deletedTables.push('public.wingo_t7_signals');
-        } else {
-          // If table does not exist in schema cache or database, safely ignore
-          const isTableMissing =
-            t7DelErr.code === '42P01' ||
-            t7DelErr.code === 'PGRST205' ||
-            t7DelErr.code === 'PGRST204' ||
-            (t7DelErr.message && /schema cache|does not exist|not found/i.test(t7DelErr.message));
-
-          if (isTableMissing) {
-            console.log('wingo_t7_signals table does not exist in Supabase — skipping deletion.');
-          } else {
-            console.warn('Optional table wingo_t7_signals deletion warning:', t7DelErr.message);
-          }
-        }
-      } catch (t7CatchErr) {
-        console.log('wingo_t7_signals delete skipped:', t7CatchErr);
-      }
+      // 2. Note: Test 7 WingoAI data is preserved (Requirement 18: Do not delete existing Test 7 data)
 
       // 3. Verify deletion in Supabase
       const { count: histCount, error: countErr } = await client
@@ -1136,72 +1111,21 @@ export interface StoredT7Signal {
   api_response_ms?: number;
 }
 
-let cachedT7Signals = new Map<string, StoredT7Signal>();
-let lastT7HistoryFetchTime = 0;
-
-/**
- * Fetch up to 500 historical WingoAI prediction records from /history/30sec.
- * The endpoint is confirmed to provide genuine pre-settlement predictions.
- * Cached in memory on the server for 60 seconds.
- * Auth token is used if set in environment, but endpoint also works without it.
- * Token is NEVER exposed to the frontend or clients.
- */
-async function fetchHistoricalWingoAISignals(): Promise<StoredT7Signal[]> {
-  const now = Date.now();
-  if (cachedT7Signals.size > 0 && now - lastT7HistoryFetchTime < 60000) {
-    return Array.from(cachedT7Signals.values());
-  }
-
-  const token = process.env.WINGOAI_API_TOKEN;
-  const headers: Record<string, string> = { 'Accept': 'application/json' };
-  if (token) headers['Authorization'] = `Bearer ${token}`;
-
-  try {
-    const PAGE_SIZE = 100;
-    for (let page = 1; page <= 5; page++) {
-      const url = `https://server.wingoaibot.com/history/30sec?page=${page}&limit=${PAGE_SIZE}`;
-      const res = await fetch(url, { headers });
-      if (!res.ok) break;
-      const data = await res.json();
-      const rows = Array.isArray(data?.rows) ? data.rows : [];
-      if (rows.length === 0) break;
-      for (const r of rows) {
-        if (!r.period || !r.prediction) continue;
-        const sig = String(r.prediction).toUpperCase();
-        if (sig === 'BIG' || sig === 'SMALL') {
-          const pid = String(r.period).trim();
-          if (!cachedT7Signals.has(pid)) {
-            cachedT7Signals.set(pid, {
-              period_id: pid,
-              signal: sig as 'BIG' | 'SMALL',
-              confidence: null,
-              fetched_at: new Date().toISOString(),
-              stored_at: new Date().toISOString(),
-            });
-          }
-        }
-      }
-      if (rows.length < PAGE_SIZE) break;
-    }
-    lastT7HistoryFetchTime = now;
-  } catch (err) {
-    console.error('Failed to fetch historical WingoAI signals:', err);
-  }
-
-  return Array.from(cachedT7Signals.values());
+// ─── WingoAI T7 Signals (Historical & Live) ──────────────────────────────────
+export interface StoredT7Signal {
+  period_id: string;
+  signal: 'BIG' | 'SMALL';
+  confidence: number | null;
+  fetched_at: string;
+  stored_at: string;
+  api_response_ms?: number;
 }
 
-// ─── Fast In-Memory Cache on API Server ──────────────────────────────────────
-let globalApiT7Cache = new Map<string, StoredT7Signal>();
-let lastSupabaseT7SyncTime = 0;
-let isSupabaseT7Syncing = false;
-
 // GET /api/real/t7-signals
-// Returns WingoAI signals (live from collector memory first, then Supabase, then history).
-// Auth token is NEVER returned or exposed — only period_id, signal, confidence, fetched_at.
+// Returns WingoAI signals directly from public.wingo_t7_signals (and live collector memory).
+// Auth token is NEVER returned or exposed — only period_id, signal, confidence, fetched_at, stored_at.
 app.get('/api/real/t7-signals', async (_req, res) => {
   const reqTime = new Date().toISOString();
-  console.log(`[T7] /api/real/t7-signals request received at: ${reqTime}`);
 
   // Set strict no-cache headers to guarantee fresh data delivery
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
@@ -1209,9 +1133,41 @@ app.get('/api/real/t7-signals', async (_req, res) => {
   res.setHeader('Expires', '0');
   res.setHeader('Surrogate-Control', 'no-store');
 
-  let collectorTiming: any = null;
+  const signalMap = new Map<string, StoredT7Signal>();
 
-  // 1. FAST PATH: Probe collector in-memory signals first (sub-millisecond live state)
+  // 1. Read directly from public.wingo_t7_signals in Supabase
+  const supabaseClient = getSupabaseClient();
+  if (supabaseClient) {
+    try {
+      const { data, error } = await supabaseClient
+        .from('wingo_t7_signals')
+        .select('period_id, signal, confidence, fetched_at, stored_at')
+        .order('period_id', { ascending: false })
+        .limit(500);
+
+      if (!error && Array.isArray(data)) {
+        for (const row of data) {
+          if (row.period_id && (row.signal === 'BIG' || row.signal === 'SMALL')) {
+            const pid = String(row.period_id).trim();
+            signalMap.set(pid, {
+              period_id: pid,
+              signal: row.signal as 'BIG' | 'SMALL',
+              confidence: row.confidence !== null ? Number(row.confidence) : null,
+              fetched_at: row.fetched_at,
+              stored_at: row.stored_at,
+            });
+          }
+        }
+      } else if (error) {
+        console.error('[T7 API] Supabase query error:', error.message);
+      }
+    } catch (err) {
+      console.error('[T7 API] Supabase query exception:', err);
+    }
+  }
+
+  // 2. Merge live collector in-memory signals if collector is reachable
+  let collectorTiming: any = null;
   const collectorPort = process.env.COLLECTOR_PORT || process.env.PORT || '10000';
   const collectorSignalsUrl = process.env.COLLECTOR_URL
     ? process.env.COLLECTOR_URL.replace(/\/reset$/, '/api/real/t7-signals')
@@ -1229,98 +1185,42 @@ app.get('/api/real/t7-signals', async (_req, res) => {
     if (cResp.ok) {
       const cJson = await cResp.json();
       if (cJson?.timing) collectorTiming = cJson.timing;
-      if (Array.isArray(cJson?.signals) && cJson.signals.length > 0) {
+      if (Array.isArray(cJson?.signals)) {
         for (const s of cJson.signals) {
-          if (s.period_id) globalApiT7Cache.set(s.period_id, s);
+          if (s.period_id && (s.signal === 'BIG' || s.signal === 'SMALL')) {
+            const pid = String(s.period_id).trim();
+            signalMap.set(pid, {
+              period_id: pid,
+              signal: s.signal,
+              confidence: typeof s.confidence === 'number' ? s.confidence : null,
+              fetched_at: s.fetched_at,
+              stored_at: s.stored_at,
+              api_response_ms: s.api_response_ms,
+            });
+          }
         }
       }
     }
   } catch {
-    // Non-fatal: collector might be external or running separately
+    // Non-fatal: collector runs as standalone service
   }
 
-  // 2. If memory cache has signals, return immediately without waiting for DB
-  if (globalApiT7Cache.size > 0 && Date.now() - lastSupabaseT7SyncTime < 30000) {
-    const list = Array.from(globalApiT7Cache.values()).sort((a, b) => b.period_id.localeCompare(a.period_id));
-    console.log(`[T7] /api/real/t7-signals response sent at: ${new Date().toISOString()} (count: ${list.length}, source: memory)`);
-    return res.json({
-      success: true,
-      count: list.length,
-      signals: list,
-      timing: collectorTiming || (list.length > 0 ? {
-        period_id: list[0].period_id,
-        fetched_at: list[0].fetched_at,
-        stored_at: list[0].stored_at || list[0].fetched_at,
-        api_response_ms: list[0].api_response_ms ?? null,
-      } : null),
-    });
-  }
+  // 3. Sort descending so the newest signal is first
+  const allSignals = Array.from(signalMap.values()).sort((a, b) => b.period_id.localeCompare(a.period_id));
+  const latest = allSignals[0] || null;
 
-  // 3. Background / initial populate from Supabase & historical records
-  const now = Date.now();
-  if (!isSupabaseT7Syncing && (globalApiT7Cache.size === 0 || now - lastSupabaseT7SyncTime >= 30000)) {
-    isSupabaseT7Syncing = true;
-    lastSupabaseT7SyncTime = now;
+  // Diagnostic logging matching requirement 15
+  console.log(`[T7 API]\nrequest_time=${reqTime}\nlatest_period=${latest?.period_id || 'none'}\nlatest_fetched_at=${latest?.fetched_at || 'none'}\nlatest_stored_at=${latest?.stored_at || 'none'}`);
 
-    // Fetch historical and Supabase in background or fast-wait
-    const syncPromise = (async () => {
-      try {
-        const historical = await fetchHistoricalWingoAISignals();
-        for (const s of historical) {
-          if (!globalApiT7Cache.has(s.period_id)) {
-            globalApiT7Cache.set(s.period_id, s);
-          }
-        }
-
-        const supabaseClient = getSupabaseClient();
-        if (supabaseClient) {
-          const { data, error } = await supabaseClient
-            .from('wingo_t7_signals')
-            .select('period_id, signal, confidence, fetched_at')
-            .order('period_id', { ascending: false })
-            .limit(500);
-
-          if (!error && Array.isArray(data)) {
-            for (const row of data) {
-              if (row.period_id && (row.signal === 'BIG' || row.signal === 'SMALL')) {
-                const pid = String(row.period_id).trim();
-                globalApiT7Cache.set(pid, {
-                  period_id: pid,
-                  signal: row.signal as 'BIG' | 'SMALL',
-                  confidence: row.confidence ?? null,
-                  lucky_number: typeof (row as any).lucky_number === 'number' ? (row as any).lucky_number : null,
-                  fetched_at: row.fetched_at,
-                  stored_at: row.fetched_at,
-                });
-              }
-            }
-          }
-        }
-      } catch (syncErr) {
-        console.warn('[T7] Background sync error:', syncErr);
-      } finally {
-        isSupabaseT7Syncing = false;
-      }
-    })();
-
-    // On cold start (cache empty), wait briefly (up to 800ms) for initial data
-    if (globalApiT7Cache.size === 0) {
-      await Promise.race([syncPromise, new Promise((resolve) => setTimeout(resolve, 800))]);
-    }
-  }
-
-  const allSignals = Array.from(globalApiT7Cache.values()).sort((a, b) => b.period_id.localeCompare(a.period_id));
-
-  console.log(`[T7] /api/real/t7-signals response sent at: ${new Date().toISOString()} (count: ${allSignals.length})`);
   return res.json({
     success: true,
     count: allSignals.length,
     signals: allSignals,
-    timing: collectorTiming || (allSignals.length > 0 ? {
-      period_id: allSignals[0].period_id,
-      fetched_at: allSignals[0].fetched_at,
-      stored_at: allSignals[0].stored_at || allSignals[0].fetched_at,
-      api_response_ms: allSignals[0].api_response_ms ?? null,
+    timing: collectorTiming || (latest ? {
+      period_id: latest.period_id,
+      fetched_at: latest.fetched_at,
+      stored_at: latest.stored_at,
+      api_response_ms: latest.api_response_ms ?? null,
     } : null),
   });
 });
