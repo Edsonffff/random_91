@@ -594,20 +594,60 @@ export const AlgorithmAnalyzer: React.FC = () => {
   const [t7SignalsMap, setT7SignalsMap] = useState<Map<string, WingoAIT7Signal>>(new Map());
   const [t7DebugInfo, setT7DebugInfo] = useState<T7DebugInfo | null>(null);
 
+  // Log whenever React commits signal rendering to screen
+  useEffect(() => {
+    if (t7DebugInfo?.lastSignalPeriod) {
+      console.log(`[T7 UI] signal rendered/displayed at: ${new Date().toISOString()} (period: ${t7DebugInfo.lastSignalPeriod})`);
+    }
+  }, [t7DebugInfo?.lastSignalPeriod, t7DebugInfo?.dashboardReceivedAt]);
+
   useEffect(() => {
     const apiBase = (import.meta.env.VITE_API_BASE_URL as string | undefined) || '';
     let cancelled = false;
     let isFetching = false;
+    let lastFetchStart = 0;
 
     async function loadT7Signals() {
-      if (isFetching) return;
+      const now = Date.now();
+      // Failsafe lock: if previous fetch hung for >4s, forcefully release so interval never blocks
+      if (isFetching && now - lastFetchStart < 4000) {
+        return;
+      }
       isFetching = true;
+      lastFetchStart = now;
+
+      const fetchStartIso = new Date(now).toISOString();
+      console.log(`[T7 UI] fetch started at: ${fetchStartIso}`);
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3500);
+
       try {
-        const resp = await fetch(`${apiBase}/api/real/t7-signals`);
+        const fetchUrl = `${apiBase}/api/real/t7-signals?t=${now}`;
+        const resp = await fetch(fetchUrl, {
+          method: 'GET',
+          cache: 'no-store',
+          headers: {
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Pragma': 'no-cache',
+            'Expires': '0',
+          },
+          signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+
+        const httpReceivedIso = new Date().toISOString();
+        console.log(`[T7 UI] HTTP response received at: ${httpReceivedIso} (status: ${resp.status})`);
+
         if (!resp.ok) return;
         const json = await resp.json();
+
+        const jsonParsedIso = new Date().toISOString();
+        console.log(`[T7 UI] JSON parsed at: ${jsonParsedIso} (count: ${json?.count ?? 0})`);
+
         if (!json.success || !Array.isArray(json.signals)) return;
         if (cancelled) return;
+
         const newMap = new Map<string, WingoAIT7Signal>();
         for (const s of json.signals) {
           if (s.period_id && (s.signal === 'BIG' || s.signal === 'SMALL')) {
@@ -624,8 +664,8 @@ export const AlgorithmAnalyzer: React.FC = () => {
         setT7SignalsMap(newMap);
 
         // Capture latency telemetry
-        const now = Date.now();
-        const receivedAtIso = new Date(now).toISOString();
+        const updateNow = Date.now();
+        const receivedAtIso = new Date(updateNow).toISOString();
         const newestSignal = json.signals[0];
         const timing = json.timing || {};
 
@@ -633,7 +673,7 @@ export const AlgorithmAnalyzer: React.FC = () => {
         const storedTime = timing.stored_at || newestSignal?.stored_at || fetchedTime;
         const period = timing.period_id || newestSignal?.period_id;
         const apiMs = timing.api_response_ms ?? newestSignal?.api_response_ms ?? null;
-        const endToEnd = fetchedTime ? Math.max(0, now - new Date(fetchedTime).getTime()) : null;
+        const endToEnd = fetchedTime ? Math.max(0, updateNow - new Date(fetchedTime).getTime()) : null;
 
         setT7DebugInfo({
           lastFetchedAt: fetchedTime || null,
@@ -643,15 +683,20 @@ export const AlgorithmAnalyzer: React.FC = () => {
           apiResponseMs: apiMs,
           endToEndDelayMs: endToEnd,
         });
-      } catch {
-        // Non-fatal — T7 will show as unavailable until signals arrive
+
+        console.log(`[T7 UI] state updated at: ${receivedAtIso} (end-to-end latency: ${endToEnd !== null ? (endToEnd / 1000).toFixed(2) + 's' : 'N/A'})`);
+      } catch (err: any) {
+        clearTimeout(timeoutId);
+        if (err?.name !== 'AbortError') {
+          console.warn('[T7 UI] Fetch error:', err?.message || err);
+        }
       } finally {
         isFetching = false;
       }
     }
 
     loadT7Signals();
-    // Re-fetch every 5s for rapid upcoming period synchronization without lag
+    // Fast reliable 5s polling cycle
     const interval = setInterval(loadT7Signals, 5_000);
     return () => {
       cancelled = true;

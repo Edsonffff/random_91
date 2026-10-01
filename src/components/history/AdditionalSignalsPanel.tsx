@@ -378,14 +378,18 @@ export function computeTest7(
   const accuracy = total > 0 ? Math.round((hits / total) * 100) : 0;
   const validDetails = details.filter((d) => !d.noSignal && d.predictedSize !== null);
 
-  // Strictly find the signal for the upcoming round (newer than all sorted items).
+  // Strictly find the signal for the immediate upcoming round (the next round after newestPeriod).
   // NEVER fall back to previous settled rounds or stale signals!
   let upcomingPrediction: BigSmall | null = null;
+  let lowestUpcomingPeriod: string | null = null;
   if (sorted.length > 0) {
     const newestPeriod = sorted[sorted.length - 1].period;
     for (const [period, sig] of t7Signals.entries()) {
       if (compareIssuesAsc(period, newestPeriod) > 0) {
-        upcomingPrediction = sig.signal === 'BIG' ? 'Big' : 'Small';
+        if (!lowestUpcomingPeriod || compareIssuesAsc(period, lowestUpcomingPeriod) < 0) {
+          lowestUpcomingPeriod = period;
+          upcomingPrediction = sig.signal === 'BIG' ? 'Big' : 'Small';
+        }
       }
     }
   }

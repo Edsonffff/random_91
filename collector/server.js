@@ -149,6 +149,7 @@ async function fetchAndProcessWingoAISignal(supabaseClient) {
 
     log(`[WINGOAI] periodId: ${periodId}`);
     log(`[WINGOAI] signal: ${signal}`);
+    log(`[T7] signal received at: ${fetchedAt} (period: ${periodId}, signal: ${signal})`);
 
     const signalRecord = {
       period_id: periodId,
@@ -162,6 +163,8 @@ async function fetchAndProcessWingoAISignal(supabaseClient) {
 
     // Store in in-memory cache
     inMemoryT7Signals.set(periodId, signalRecord);
+    log(`[T7] inMemoryT7Signals updated at: ${new Date().toISOString()}`);
+
     if (inMemoryT7Signals.size > 500) {
       const keys = Array.from(inMemoryT7Signals.keys());
       for (let i = 0; i < keys.length - 500; i++) {
@@ -193,6 +196,7 @@ async function fetchAndProcessWingoAISignal(supabaseClient) {
         latestWingoAITiming.stored_at = storedAt;
       }
       log(`[WINGOAI] Supabase storage completed (took ${storeElapsed} ms)`);
+      log(`[T7] signal stored at: ${storedAt}`);
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -382,8 +386,17 @@ const healthServer = http.createServer((req, res) => {
 
   // GET /api/real/t7-signals or /t7-signals — fast in-memory served with latency telemetry
   if (urlPath === '/api/real/t7-signals' || urlPath === '/t7-signals') {
+    const reqReceivedAt = new Date().toISOString();
+    log(`[T7] /api/real/t7-signals request received at: ${reqReceivedAt}`);
+
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.setHeader('Surrogate-Control', 'no-store');
+
     const list = Array.from(inMemoryT7Signals.values()).sort((a, b) => b.period_id.localeCompare(a.period_id));
     res.writeHead(200, { 'Content-Type': 'application/json' });
+    log(`[T7] /api/real/t7-signals response sent at: ${new Date().toISOString()}`);
     return res.end(
       JSON.stringify({
         success: true,
