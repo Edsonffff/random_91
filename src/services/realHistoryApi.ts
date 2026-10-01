@@ -423,9 +423,26 @@ export const realHistoryApiService = {
     try {
       const response = await fetch(`${BASE_URL}/reset`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
       });
+
+      const contentType = response.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        const text = await response.text();
+        const snippet = text.slice(0, 80).replace(/\s+/g, ' ').trim();
+        return {
+          success: false,
+          error: `Server returned non-JSON response (HTTP ${response.status}): ${snippet || 'Expected JSON'}`,
+        };
+      }
+
       const data = await response.json();
+      if (!response.ok && !data.error) {
+        return { success: false, error: data.message || `Reset failed with HTTP ${response.status}` };
+      }
       return data;
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);

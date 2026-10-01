@@ -11,8 +11,8 @@ app.use(express.urlencoded({ extended: true }));
 // Path preservation middleware for serverless/reverse-proxy environments
 app.use((req, _res, next) => {
   const forwardedUrl = req.headers['x-forwarded-url'] as string | undefined;
-  const matchedPath = req.headers['x-matched-path'] as string | undefined;
-  const originalPath = forwardedUrl || matchedPath;
+  const matchedPath = (req.headers['x-vercel-matched-path'] || req.headers['x-matched-path']) as string | undefined;
+  const originalPath = forwardedUrl || matchedPath || (req.headers['x-original-url'] as string | undefined) || (req.headers['x-rewrite-url'] as string | undefined);
 
   if (originalPath && (req.url === '/api' || req.url === '/api/index' || req.url === '/api/')) {
     req.url = originalPath;
@@ -929,12 +929,12 @@ const handleSyncHistory = async (req: express.Request, res: express.Response) =>
 app.post('/api/real/history', handleSyncHistory);
 app.post('/api/real/sync', handleSyncHistory);
 
-// POST /api/real/reset
+// POST /api/real/reset (also aliased to /api/reset, /real/reset, /reset)
 // Server-side protected reset of application data in Supabase & memory.
 // Clears: public.real_wingo_30s_history and public.wingo_t7_signals.
 // Does NOT delete unrelated tables or user accounts.
 // Clears server in-memory caches and notifies the collector worker.
-app.post('/api/real/reset', async (_req, res) => {
+const handleResetEndpoint = async (_req: express.Request, res: express.Response) => {
   const client = getSupabaseClient();
   const deletedTables: string[] = [];
 
@@ -955,17 +955,41 @@ app.post('/api/real/reset', async (_req, res) => {
       }
       deletedTables.push('public.real_wingo_30s_history');
 
-      // 2. Note: Test 7 WingoAI data is preserved (Requirement 18: Do not delete existing Test 7 data)
+      // 2. Delete all records from public.wingo_t7_signals
+      const { error: t7DelErr } = await client
+        .from('wingo_t7_signals')
+        .delete()
+        .neq('period_id', '');
+
+      if (t7DelErr) {
+        console.error('Failed to clear wingo_t7_signals in Supabase:', t7DelErr);
+        return res.status(500).json({
+          success: false,
+          error: `Failed to clear wingo_t7_signals: ${t7DelErr.message}`,
+        });
+      }
+      deletedTables.push('public.wingo_t7_signals');
 
       // 3. Verify deletion in Supabase
       const { count: histCount, error: countErr } = await client
         .from('real_wingo_30s_history')
         .select('issue_number', { count: 'exact', head: true });
 
+      const { count: t7Count, error: t7CountErr } = await client
+        .from('wingo_t7_signals')
+        .select('period_id', { count: 'exact', head: true });
+
       if (!countErr && typeof histCount === 'number' && histCount > 0) {
         return res.status(500).json({
           success: false,
           error: `Verification failed: real_wingo_30s_history still contains ${histCount} records.`,
+        });
+      }
+
+      if (!t7CountErr && typeof t7Count === 'number' && t7Count > 0) {
+        return res.status(500).json({
+          success: false,
+          error: `Verification failed: wingo_t7_signals still contains ${t7Count} records.`,
         });
       }
     } catch (err) {
@@ -996,13 +1020,16 @@ app.post('/api/real/reset', async (_req, res) => {
     // Non-fatal — collector also actively detects empty Supabase table on next poll
   }
 
-  return res.json({
+  return res.status(200).json({
     success: true,
-    message: 'All application data, history records, and predictions have been successfully reset.',
+    message: 'All data reset successfully',
     deletedTables,
     timestamp: new Date().toISOString(),
   });
-});
+};
+
+app.post(['/api/real/reset', '/api/reset', '/real/reset', '/reset'], handleResetEndpoint);
+app.all('/api/real/reset', handleResetEndpoint);
 
 // GET /api/real/debug-supabase (Diagnostic endpoint for testing Supabase connectivity and schema)
 app.get('/api/real/debug-supabase', async (_req, res) => {
@@ -1269,6 +1296,14 @@ app.get('/api', (_req, res) => {
       '/merchant/api/get_merchant_custom_results.php',
       '/merchant/api/set_merchant_custom_result.php',
     ],
+  });
+});
+
+// Fallback 404 handler: ensure all unmatched API routes return JSON, never HTML
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    error: `Endpoint not found: ${req.method} ${req.originalUrl || req.url}`,
   });
 });
 

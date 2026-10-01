@@ -274,18 +274,22 @@ const healthServer = http.createServer((req, res) => {
     return res.end();
   }
 
-  // POST /reset or /api/reset — resets in-memory knownPeriods tracker for WinGo results
-  // Note: Test 7 WingoAI data is preserved (Requirement 18: Do not delete existing Test 7 data)
-  if (req.method === 'POST' && (urlPath === '/reset' || urlPath === '/api/reset')) {
+  // POST /reset or /api/reset or /api/real/reset or /real/reset — resets in-memory knownPeriods and T7 signals
+  if (req.method === 'POST' && (urlPath === '/reset' || urlPath === '/api/reset' || urlPath === '/api/real/reset' || urlPath === '/real/reset')) {
     const previousCount = knownPeriods.size;
+    const previousT7Count = knownWingoAIPeriods.size;
     knownPeriods.clear();
-    log(`[Collector Reset] In-memory known periods cleared (${previousCount} -> 0). Collector continuing 24/7 polling.`);
+    knownWingoAIPeriods.clear();
+    inMemoryT7Signals.clear();
+    latestWingoAITiming = null;
+    log(`[Collector Reset] In-memory known periods cleared (${previousCount} -> 0) and T7 signals cleared (${previousT7Count} -> 0). Collector continuing 24/7 polling.`);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(
       JSON.stringify({
         success: true,
-        message: 'Collector in-memory known periods cleared successfully (Test 7 data preserved)',
+        message: 'All data reset successfully',
         previousCount,
+        previousT7Count,
         currentCount: 0,
         active: isPollingActive,
         timestamp: getTimestamp(),
@@ -492,6 +496,23 @@ async function startCollector() {
           if (!checkErr && currentDbCount === 0) {
             log(`[Database Reset Detected] Supabase history table is empty. Cleared ${knownPeriods.size} cached periods from memory.`);
             knownPeriods.clear();
+          }
+        } catch {
+          // Non-fatal check
+        }
+      }
+
+      // If knownWingoAIPeriods has entries, verify Supabase wingo_t7_signals was not reset to 0
+      if (knownWingoAIPeriods.size > 0) {
+        try {
+          const { count: currentT7Count, error: t7CheckErr } = await supabaseClient
+            .from('wingo_t7_signals')
+            .select('period_id', { count: 'exact', head: true });
+          if (!t7CheckErr && currentT7Count === 0) {
+            log(`[Database Reset Detected] Supabase wingo_t7_signals table is empty. Cleared ${knownWingoAIPeriods.size} cached T7 periods.`);
+            knownWingoAIPeriods.clear();
+            inMemoryT7Signals.clear();
+            latestWingoAITiming = null;
           }
         } catch {
           // Non-fatal check
