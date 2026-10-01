@@ -1126,12 +1126,14 @@ app.get('/api/real/history/export', async (req, res) => {
 });
 
 // ─── WingoAI T7 Signals (Historical & Live) ──────────────────────────────────
-interface StoredT7Signal {
+export interface StoredT7Signal {
   period_id: string;
   signal: 'BIG' | 'SMALL';
   confidence: number | null;
   lucky_number?: number | null;
   fetched_at: string;
+  stored_at?: string;
+  api_response_ms?: number;
 }
 
 let cachedT7Signals = new Map<string, StoredT7Signal>();
@@ -1174,6 +1176,7 @@ async function fetchHistoricalWingoAISignals(): Promise<StoredT7Signal[]> {
               signal: sig as 'BIG' | 'SMALL',
               confidence: null,
               fetched_at: new Date().toISOString(),
+              stored_at: new Date().toISOString(),
             });
           }
         }
@@ -1193,6 +1196,7 @@ async function fetchHistoricalWingoAISignals(): Promise<StoredT7Signal[]> {
 // Auth token is NEVER returned or exposed — only period_id, signal, confidence, fetched_at.
 app.get('/api/real/t7-signals', async (_req, res) => {
   const signalMap = new Map<string, StoredT7Signal>();
+  let collectorTiming: any = null;
 
   // 1. Fetch & merge historical signals (from memory cache or /history/30sec)
   const historical = await fetchHistoricalWingoAISignals();
@@ -1226,6 +1230,7 @@ app.get('/api/real/t7-signals', async (_req, res) => {
               confidence: row.confidence ?? null,
               lucky_number: typeof (row as any).lucky_number === 'number' ? (row as any).lucky_number : null,
               fetched_at: row.fetched_at,
+              stored_at: row.fetched_at,
             });
           }
         }
@@ -1237,12 +1242,42 @@ app.get('/api/real/t7-signals', async (_req, res) => {
     }
   }
 
+  // 3. Merge live collector in-memory signals and timing if reachable
+  const collectorPort = process.env.COLLECTOR_PORT || process.env.PORT || '10000';
+  const collectorSignalsUrl = process.env.COLLECTOR_URL
+    ? process.env.COLLECTOR_URL.replace(/\/reset$/, '/api/real/t7-signals')
+    : `http://127.0.0.1:${collectorPort}/api/real/t7-signals`;
+
+  try {
+    const cCtrl = new AbortController();
+    const cTimeout = setTimeout(() => cCtrl.abort(), 1200);
+    const cResp = await fetch(collectorSignalsUrl, { signal: cCtrl.signal });
+    clearTimeout(cTimeout);
+    if (cResp.ok) {
+      const cJson = await cResp.json();
+      if (cJson?.timing) collectorTiming = cJson.timing;
+      if (Array.isArray(cJson?.signals)) {
+        for (const s of cJson.signals) {
+          if (s.period_id) signalMap.set(s.period_id, s);
+        }
+      }
+    }
+  } catch {
+    // Non-fatal: standalone collector will store into Supabase
+  }
+
   const allSignals = Array.from(signalMap.values()).sort((a, b) => b.period_id.localeCompare(a.period_id));
 
   return res.json({
     success: true,
     count: allSignals.length,
     signals: allSignals,
+    timing: collectorTiming || (allSignals.length > 0 ? {
+      period_id: allSignals[0].period_id,
+      fetched_at: allSignals[0].fetched_at,
+      stored_at: allSignals[0].stored_at || allSignals[0].fetched_at,
+      api_response_ms: allSignals[0].api_response_ms ?? null,
+    } : null),
   });
 });
 

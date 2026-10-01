@@ -27,7 +27,7 @@ import {
   computeTest7,
   computeTest8,
 } from './AdditionalSignalsPanel';
-import type { WingoAIT7Signal } from './AdditionalSignalsPanel';
+import type { WingoAIT7Signal, T7DebugInfo } from './AdditionalSignalsPanel';
 import { SignalSummaryPanel } from './SignalSummaryPanel';
 
 interface RoundEntry {
@@ -592,12 +592,16 @@ export const AlgorithmAnalyzer: React.FC = () => {
 
   // ── WingoAI T7 signals (fetched from backend, never contains auth token) ──
   const [t7SignalsMap, setT7SignalsMap] = useState<Map<string, WingoAIT7Signal>>(new Map());
+  const [t7DebugInfo, setT7DebugInfo] = useState<T7DebugInfo | null>(null);
 
   useEffect(() => {
     const apiBase = (import.meta.env.VITE_API_BASE_URL as string | undefined) || '';
     let cancelled = false;
+    let isFetching = false;
 
     async function loadT7Signals() {
+      if (isFetching) return;
+      isFetching = true;
       try {
         const resp = await fetch(`${apiBase}/api/real/t7-signals`);
         if (!resp.ok) return;
@@ -618,14 +622,37 @@ export const AlgorithmAnalyzer: React.FC = () => {
           }
         }
         setT7SignalsMap(newMap);
+
+        // Capture latency telemetry
+        const now = Date.now();
+        const receivedAtIso = new Date(now).toISOString();
+        const newestSignal = json.signals[0];
+        const timing = json.timing || {};
+
+        const fetchedTime = timing.fetched_at || newestSignal?.fetched_at;
+        const storedTime = timing.stored_at || newestSignal?.stored_at || fetchedTime;
+        const period = timing.period_id || newestSignal?.period_id;
+        const apiMs = timing.api_response_ms ?? newestSignal?.api_response_ms ?? null;
+        const endToEnd = fetchedTime ? Math.max(0, now - new Date(fetchedTime).getTime()) : null;
+
+        setT7DebugInfo({
+          lastFetchedAt: fetchedTime || null,
+          lastSignalPeriod: period || null,
+          lastSignalStoredAt: storedTime || null,
+          dashboardReceivedAt: receivedAtIso,
+          apiResponseMs: apiMs,
+          endToEndDelayMs: endToEnd,
+        });
       } catch {
         // Non-fatal — T7 will show as unavailable until signals arrive
+      } finally {
+        isFetching = false;
       }
     }
 
     loadT7Signals();
-    // Re-fetch every 60 s so new signals appear without a page refresh
-    const interval = setInterval(loadT7Signals, 60_000);
+    // Re-fetch every 5s for rapid upcoming period synchronization without lag
+    const interval = setInterval(loadT7Signals, 5_000);
     return () => {
       cancelled = true;
       clearInterval(interval);
@@ -1806,6 +1833,7 @@ export const AlgorithmAnalyzer: React.FC = () => {
               test6={test6}
               test7={test7}
               test8={test8}
+              t7DebugInfo={t7DebugInfo}
             />
           </CollapsibleCard>
         )}

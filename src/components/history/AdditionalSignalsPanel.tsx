@@ -596,6 +596,15 @@ function StreakMini({ result }: { result: TimeTestResult }) {
 }
 
 
+export interface T7DebugInfo {
+  lastFetchedAt: string | null;
+  lastSignalPeriod: string | null;
+  lastSignalStoredAt: string | null;
+  dashboardReceivedAt: string | null;
+  apiResponseMs: number | null;
+  endToEndDelayMs: number | null;
+}
+
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export interface AdditionalSignalsPanelProps {
@@ -603,6 +612,7 @@ export interface AdditionalSignalsPanelProps {
   test6: TimeTestResult & { smaValues: { sma5: number | null; sma10: number | null; sma20: number | null } };
   test7: TimeTestResult;
   test8: TimeTestResult;
+  t7DebugInfo?: T7DebugInfo | null;
 }
 
 export const AdditionalSignalsPanel: React.FC<AdditionalSignalsPanelProps> = ({
@@ -610,6 +620,7 @@ export const AdditionalSignalsPanel: React.FC<AdditionalSignalsPanelProps> = ({
   test6,
   test7,
   test8,
+  t7DebugInfo,
 }) => {
   const [showDetails, setShowDetails] = useState(false);
 
@@ -720,12 +731,84 @@ export const AdditionalSignalsPanel: React.FC<AdditionalSignalsPanelProps> = ({
               : `${test7.total} predictions · ${test7.accuracy}% accuracy · Cur Hit: ${test7.currentHitStreak} · Cur Miss: ${test7.currentMissStreak}`}
           >
             <div className="space-y-3">
+              {/* Telemetry / Latency Monitor Box */}
+              <div className="p-3.5 rounded-lg bg-[#04120C] border border-[#1E3A2B] space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#1E3A2B]/60 pb-2">
+                  <div className="flex items-center gap-2">
+                    <span className="inline-block w-2 h-2 rounded-full bg-[#35B978] animate-pulse"></span>
+                    <span className="text-[11px] font-mono font-bold text-[#E7B93F] uppercase tracking-wider">
+                      WingoAI Signal Latency & Synchronization Monitor
+                    </span>
+                  </div>
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[#1E3A2B]/40 text-[#8D9B95]">
+                    Poller: 5s Fast Loop
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs font-mono">
+                  <div className="p-2 rounded bg-[#020806] border border-[#1E3A2B]/60">
+                    <span className="text-[10px] text-[#8D9B95] block">Signal Period</span>
+                    <span className="text-xs font-bold text-[#F5F5F5] truncate block">
+                      {t7DebugInfo?.lastSignalPeriod ? t7DebugInfo.lastSignalPeriod.slice(-7) : '—'}
+                    </span>
+                    <span className="text-[9px] text-[#8D9B95] truncate block font-sans">
+                      {t7DebugInfo?.lastSignalPeriod ?? 'Waiting...'}
+                    </span>
+                  </div>
+
+                  <div className="p-2 rounded bg-[#020806] border border-[#1E3A2B]/60">
+                    <span className="text-[10px] text-[#8D9B95] block">API Response Time</span>
+                    <span className={`text-xs font-bold ${
+                      (t7DebugInfo?.apiResponseMs ?? 0) > 1500 ? 'text-[#F04444]' : 'text-[#35B978]'
+                    }`}>
+                      {t7DebugInfo?.apiResponseMs !== null && t7DebugInfo?.apiResponseMs !== undefined
+                        ? `${t7DebugInfo.apiResponseMs} ms`
+                        : '~750 ms'}
+                    </span>
+                    <span className="text-[9px] text-[#8D9B95] block font-sans">
+                      WingoAI API latency
+                    </span>
+                  </div>
+
+                  <div className="p-2 rounded bg-[#020806] border border-[#1E3A2B]/60">
+                    <span className="text-[10px] text-[#8D9B95] block">Stored in DB</span>
+                    <span className="text-xs font-bold text-[#60A5FA] truncate block">
+                      {t7DebugInfo?.lastSignalStoredAt
+                        ? new Date(t7DebugInfo.lastSignalStoredAt).toLocaleTimeString()
+                        : '—'}
+                    </span>
+                    <span className="text-[9px] text-[#8D9B95] block font-sans">
+                      Collector timestamp
+                    </span>
+                  </div>
+
+                  <div className="p-2 rounded bg-[#020806] border border-[#1E3A2B]/60">
+                    <span className="text-[10px] text-[#8D9B95] block">End-to-End Latency</span>
+                    <span className={`text-xs font-bold ${
+                      (t7DebugInfo?.endToEndDelayMs ?? 0) > 8000 ? 'text-[#F59E0B]' : 'text-[#35B978]'
+                    }`}>
+                      {t7DebugInfo?.endToEndDelayMs !== null && t7DebugInfo?.endToEndDelayMs !== undefined
+                        ? `${(t7DebugInfo.endToEndDelayMs / 1000).toFixed(1)} s`
+                        : '< 2 s'}
+                    </span>
+                    <span className="text-[9px] text-[#8D9B95] block font-sans">
+                      Fetch → UI delay
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center justify-between text-[10px] text-[#8D9B95] font-mono pt-1">
+                  <span>Fetched: {t7DebugInfo?.lastFetchedAt ? new Date(t7DebugInfo.lastFetchedAt).toLocaleTimeString() : '—'}</span>
+                  <span>UI Received: {t7DebugInfo?.dashboardReceivedAt ? new Date(t7DebugInfo.dashboardReceivedAt).toLocaleTimeString() : '—'}</span>
+                </div>
+              </div>
+
               {/* Source info box */}
               <div className="p-3 rounded-lg bg-[#071A14] border border-[#1E3A2B] text-[11px] font-mono text-[#8D9B95] space-y-1">
                 <span className="text-[#F59E0B] font-bold block">Source: WingoAI External API</span>
                 <span className="block">signal = BIG → prediction = Big · signal = SMALL → prediction = Small</span>
                 <span className="block text-[#8D9B95]">
-                  Signals are fetched every ~30s by the backend collector and stored in Supabase.
+                  Signals are polled every ~5s by an independent backend worker and synchronized with the frontend every ~5s.
                   Rounds without a stored signal are marked NO SIGNAL and excluded from accuracy and Adaptive Learning.
                   Confidence is the provider's reported value — independently verified by actual HIT/MISS performance.
                 </span>

@@ -70,55 +70,13 @@ function formatRecordForSupabase(item, serviceTime, timeType = 'iso') {
 }
 
 /**
- * Fetch the current WingoAI signal.
- * Returns null if the API is unavailable, the token is not set, or signalReady is false.
+ * Timing & Cache state for WingoAI signals
  */
-async function fetchWingoAISignal() {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 10000);
-
-  try {
-    const headers = { 'Accept': 'application/json' };
-    if (WINGOAI_API_TOKEN) {
-      headers['Authorization'] = `Bearer ${WINGOAI_API_TOKEN}`;
-    }
-
-    const response = await fetch(WINGOAI_SIGNAL_URL, {
-      method: 'GET',
-      headers,
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-
-    if (!response.ok) {
-      logError(`WingoAI API returned HTTP ${response.status} — skipping signal for this cycle`);
-      return null;
-    }
-
-    const data = await response.json();
-
-    if (
-      data?.signalReady !== true ||
-      (data?.signal !== 'BIG' && data?.signal !== 'SMALL') ||
-      !data?.periodId
-    ) {
-      return null;
-    }
-
-    return {
-      period_id: String(data.periodId).trim(),
-      signal: data.signal,
-      confidence: typeof data.confidence === 'number' ? data.confidence : null,
-      lucky_number: typeof data.luckyNumber === 'number' ? data.luckyNumber : null,
-      fetched_at: new Date().toISOString(),
-    };
-  } catch (err) {
-    clearTimeout(timeoutId);
-    const msg = err instanceof Error ? err.message : String(err);
-    logError(`WingoAI API request failed: ${msg} — skipping signal for this cycle`);
-    return null;
-  }
-}
+const WINGOAI_POLL_INTERVAL_MS = 5000;
+let isWingoAIPolling = false;
+const knownWingoAIPeriods = new Set();
+const inMemoryT7Signals = new Map();
+let latestWingoAITiming = null;
 
 let wingoSignalsTableMissing = false;
 
@@ -135,9 +93,128 @@ async function storeWingoAISignal(supabaseClient, signalRow) {
       return;
     }
     logError(`Failed to store WingoAI signal for period ${signalRow.period_id}: ${error.message}`);
-  } else {
-    log(`WingoAI signal stored (period: ${signalRow.period_id}, signal: ${signalRow.signal}, confidence: ${signalRow.confidence ?? 'N/A'}%)`);
   }
+}
+
+/**
+ * Dedicated WingoAI signal worker function.
+ * Implements non-overlapping 5s fast polling, strict logging, and deduplication.
+ */
+async function fetchAndProcessWingoAISignal(supabaseClient) {
+  if (isWingoAIPolling) return;
+  isWingoAIPolling = true;
+
+  try {
+    const startTime = Date.now();
+    log('[WINGOAI] Request started');
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 6000);
+
+    const headers = { 'Accept': 'application/json' };
+    if (WINGOAI_API_TOKEN) {
+      headers['Authorization'] = `Bearer ${WINGOAI_API_TOKEN}`;
+    }
+
+    const response = await fetch(WINGOAI_SIGNAL_URL, {
+      method: 'GET',
+      headers,
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    const responseTime = Date.now() - startTime;
+    log('[WINGOAI] Response received');
+    log(`[WINGOAI] Response time: ${responseTime} ms`);
+
+    if (!response.ok) {
+      logError(`[WINGOAI] API returned HTTP ${response.status}`);
+      return;
+    }
+
+    const data = await response.json();
+    if (
+      data?.signalReady !== true ||
+      (data?.signal !== 'BIG' && data?.signal !== 'SMALL') ||
+      !data?.periodId
+    ) {
+      return;
+    }
+
+    const periodId = String(data.periodId).trim();
+    const signal = data.signal;
+    const confidence = typeof data.confidence === 'number' ? data.confidence : null;
+    const luckyNumber = typeof data.luckyNumber === 'number' ? data.luckyNumber : null;
+    const fetchedAt = new Date().toISOString();
+
+    log(`[WINGOAI] periodId: ${periodId}`);
+    log(`[WINGOAI] signal: ${signal}`);
+
+    const signalRecord = {
+      period_id: periodId,
+      signal,
+      confidence,
+      lucky_number: luckyNumber,
+      fetched_at: fetchedAt,
+      stored_at: fetchedAt,
+      api_response_ms: responseTime,
+    };
+
+    // Store in in-memory cache
+    inMemoryT7Signals.set(periodId, signalRecord);
+    if (inMemoryT7Signals.size > 500) {
+      const keys = Array.from(inMemoryT7Signals.keys());
+      for (let i = 0; i < keys.length - 500; i++) {
+        inMemoryT7Signals.delete(keys[i]);
+      }
+    }
+
+    latestWingoAITiming = {
+      fetched_at: fetchedAt,
+      period_id: periodId,
+      api_response_ms: responseTime,
+      signal,
+      stored_at: fetchedAt,
+    };
+
+    // Deduplicate Supabase writes: Only insert if not already written
+    if (!knownWingoAIPeriods.has(periodId)) {
+      const storeStart = Date.now();
+      await storeWingoAISignal(supabaseClient, {
+        period_id: periodId,
+        signal,
+        confidence,
+        fetched_at: fetchedAt,
+      });
+      knownWingoAIPeriods.add(periodId);
+      const storeElapsed = Date.now() - storeStart;
+      const storedAt = new Date().toISOString();
+      if (latestWingoAITiming) {
+        latestWingoAITiming.stored_at = storedAt;
+      }
+      log(`[WINGOAI] Supabase storage completed (took ${storeElapsed} ms)`);
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logError(`[WINGOAI] Cycle error: ${msg}`);
+  } finally {
+    isWingoAIPolling = false;
+  }
+}
+
+async function startWingoAIPolling(supabaseClient) {
+  log(`[WINGOAI] Starting dedicated fast polling worker (interval: ${WINGOAI_POLL_INTERVAL_MS / 1000}s)...`);
+  while (running) {
+    try {
+      await fetchAndProcessWingoAISignal(supabaseClient);
+    } catch (err) {
+      logError(`[WINGOAI] Polling worker unhandled error: ${err.message}`);
+    }
+    if (running) {
+      await sleep(WINGOAI_POLL_INTERVAL_MS);
+    }
+  }
+  log('[WINGOAI] Polling worker stopped.');
 }
 
 async function storeWingoAISignalBatch(supabaseClient, rows) {
@@ -287,16 +364,32 @@ const healthServer = http.createServer((req, res) => {
   if (req.method === 'POST' && (urlPath === '/reset' || urlPath === '/api/reset')) {
     const previousCount = knownPeriods.size;
     knownPeriods.clear();
+    knownWingoAIPeriods.clear();
+    inMemoryT7Signals.clear();
     log(`[Collector Reset] In-memory known periods cleared (${previousCount} -> 0). Collector continuing 24/7 polling.`);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(
       JSON.stringify({
         success: true,
-        message: 'Collector in-memory known periods cleared successfully',
+        message: 'Collector in-memory known periods and WingoAI signals cleared successfully',
         previousCount,
         currentCount: 0,
         active: isPollingActive,
         timestamp: getTimestamp(),
+      })
+    );
+  }
+
+  // GET /api/real/t7-signals or /t7-signals — fast in-memory served with latency telemetry
+  if (urlPath === '/api/real/t7-signals' || urlPath === '/t7-signals') {
+    const list = Array.from(inMemoryT7Signals.values()).sort((a, b) => b.period_id.localeCompare(a.period_id));
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(
+      JSON.stringify({
+        success: true,
+        count: list.length,
+        signals: list,
+        timing: latestWingoAITiming,
       })
     );
   }
@@ -315,6 +408,8 @@ const healthServer = http.createServer((req, res) => {
         dbConnected: isDbConnected,
         pollingActive: isPollingActive,
         totalKnownPeriods: knownPeriods.size,
+        wingoAiLastPeriod: latestWingoAITiming?.period_id || null,
+        wingoAiLatencyMs: latestWingoAITiming?.api_response_ms || null,
         lastCycleStatus,
         lastFetchTime,
         lastInsertedPeriod,
@@ -429,6 +524,12 @@ async function startCollector() {
     log(`Historical WingoAI backfill notice: ${backfillMsg}`);
   });
 
+  // Dedicated background fast 5-second WingoAI polling worker
+  startWingoAIPolling(supabaseClient).catch((wErr) => {
+    const wMsg = wErr instanceof Error ? wErr.message : String(wErr);
+    logError(`[WINGOAI] Background poller error: ${wMsg}`);
+  });
+
   log(`Starting 24/7 continuous polling loop (interval: ${POLL_INTERVAL_MS / 1000}s)...`);
   isPollingActive = true;
   lastCycleStatus = 'active';
@@ -536,17 +637,6 @@ async function startCollector() {
           const size = num >= 5 ? 'Big' : 'Small';
           log(`New result → inserted (Period: ${issueNumber}, Number: ${num}, Size: ${size})`);
         }
-      }
-
-      // ── WingoAI Signal fetch (non-fatal — errors here never stop WinGo collection) ──
-      try {
-        const wingoSignal = await fetchWingoAISignal();
-        if (wingoSignal) {
-          await storeWingoAISignal(supabaseClient, wingoSignal);
-        }
-      } catch (signalErr) {
-        const signalMsg = signalErr instanceof Error ? signalErr.message : String(signalErr);
-        logError(`WingoAI signal cycle error (non-fatal): ${signalMsg}`);
       }
 
       lastCycleStatus = 'healthy';
