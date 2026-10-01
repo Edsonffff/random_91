@@ -607,6 +607,10 @@ export interface T7DebugInfo {
   dashboardReceivedAt: string | null;
   apiResponseMs: number | null;
   endToEndDelayMs: number | null;
+  collectorLatencyMs?: number | null;
+  apiLatencyMs?: number | null;
+  frontendLatencyMs?: number | null;
+  totalEndToEndMs?: number | null;
 }
 
 // ─── Main component ───────────────────────────────────────────────────────────
@@ -761,39 +765,43 @@ export const AdditionalSignalsPanel: React.FC<AdditionalSignalsPanelProps> = ({
                   </div>
 
                   <div className="p-2 rounded bg-[#020806] border border-[#1E3A2B]/60">
-                    <span className="text-[10px] text-[#8D9B95] block">API Response Time</span>
+                    <span className="text-[10px] text-[#8D9B95] block">Collector Latency</span>
                     <span className={`text-xs font-bold ${
-                      (t7DebugInfo?.apiResponseMs ?? 0) > 1500 ? 'text-[#F04444]' : 'text-[#35B978]'
+                      (t7DebugInfo?.collectorLatencyMs ?? 0) > 1000 ? 'text-[#F59E0B]' : 'text-[#35B978]'
                     }`}>
-                      {t7DebugInfo?.apiResponseMs !== null && t7DebugInfo?.apiResponseMs !== undefined
-                        ? `${t7DebugInfo.apiResponseMs} ms`
-                        : '~750 ms'}
+                      {t7DebugInfo?.collectorLatencyMs !== null && t7DebugInfo?.collectorLatencyMs !== undefined
+                        ? `${t7DebugInfo.collectorLatencyMs} ms`
+                        : `${t7DebugInfo?.apiResponseMs ?? '~750'} ms`}
                     </span>
                     <span className="text-[9px] text-[#8D9B95] block font-sans">
-                      WingoAI API latency
+                      DB stored - fetched
                     </span>
                   </div>
 
                   <div className="p-2 rounded bg-[#020806] border border-[#1E3A2B]/60">
-                    <span className="text-[10px] text-[#8D9B95] block">Stored in DB</span>
-                    <span className="text-xs font-bold text-[#60A5FA] truncate block">
-                      {t7DebugInfo?.lastSignalStoredAt
-                        ? new Date(t7DebugInfo.lastSignalStoredAt).toLocaleTimeString()
-                        : '—'}
+                    <span className="text-[10px] text-[#8D9B95] block">API Latency</span>
+                    <span className={`text-xs font-bold ${
+                      (t7DebugInfo?.apiLatencyMs ?? 0) > 500 ? 'text-[#F59E0B]' : 'text-[#35B978]'
+                    }`}>
+                      {t7DebugInfo?.apiLatencyMs !== null && t7DebugInfo?.apiLatencyMs !== undefined
+                        ? `${t7DebugInfo.apiLatencyMs} ms`
+                        : '< 50 ms'}
                     </span>
                     <span className="text-[9px] text-[#8D9B95] block font-sans">
-                      Collector timestamp
+                      Server response time
                     </span>
                   </div>
 
                   <div className="p-2 rounded bg-[#020806] border border-[#1E3A2B]/60">
                     <span className="text-[10px] text-[#8D9B95] block">End-to-End Latency</span>
                     <span className={`text-xs font-bold ${
-                      (t7DebugInfo?.endToEndDelayMs ?? 0) > 8000 ? 'text-[#F59E0B]' : 'text-[#35B978]'
+                      (t7DebugInfo?.totalEndToEndMs ?? t7DebugInfo?.endToEndDelayMs ?? 0) > 8000 ? 'text-[#F59E0B]' : 'text-[#35B978]'
                     }`}>
-                      {t7DebugInfo?.endToEndDelayMs !== null && t7DebugInfo?.endToEndDelayMs !== undefined
-                        ? `${(t7DebugInfo.endToEndDelayMs / 1000).toFixed(1)} s`
-                        : '< 2 s'}
+                      {t7DebugInfo?.totalEndToEndMs !== null && t7DebugInfo?.totalEndToEndMs !== undefined
+                        ? `${(t7DebugInfo.totalEndToEndMs / 1000).toFixed(1)} s`
+                        : (t7DebugInfo?.endToEndDelayMs !== null && t7DebugInfo?.endToEndDelayMs !== undefined
+                            ? `${(t7DebugInfo.endToEndDelayMs / 1000).toFixed(1)} s`
+                            : '< 2 s')}
                     </span>
                     <span className="text-[9px] text-[#8D9B95] block font-sans">
                       Fetch → UI delay
@@ -803,6 +811,7 @@ export const AdditionalSignalsPanel: React.FC<AdditionalSignalsPanelProps> = ({
 
                 <div className="flex flex-wrap items-center justify-between text-[10px] text-[#8D9B95] font-mono pt-1">
                   <span>Fetched: {t7DebugInfo?.lastFetchedAt ? new Date(t7DebugInfo.lastFetchedAt).toLocaleTimeString() : '—'}</span>
+                  <span>Stored: {t7DebugInfo?.lastSignalStoredAt ? new Date(t7DebugInfo.lastSignalStoredAt).toLocaleTimeString() : '—'}</span>
                   <span>UI Received: {t7DebugInfo?.dashboardReceivedAt ? new Date(t7DebugInfo.dashboardReceivedAt).toLocaleTimeString() : '—'}</span>
                 </div>
               </div>

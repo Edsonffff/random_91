@@ -1125,7 +1125,8 @@ export interface StoredT7Signal {
 // Returns WingoAI signals directly from public.wingo_t7_signals (and live collector memory).
 // Auth token is NEVER returned or exposed — only period_id, signal, confidence, fetched_at, stored_at.
 app.get('/api/real/t7-signals', async (_req, res) => {
-  const reqTime = new Date().toISOString();
+  const requestStarted = new Date().toISOString();
+  const tReqStart = Date.now();
 
   // Set strict no-cache headers to guarantee fresh data delivery
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
@@ -1209,19 +1210,34 @@ app.get('/api/real/t7-signals', async (_req, res) => {
   const allSignals = Array.from(signalMap.values()).sort((a, b) => b.period_id.localeCompare(a.period_id));
   const latest = allSignals[0] || null;
 
-  // Diagnostic logging matching requirement 15
-  console.log(`[T7 API]\nrequest_time=${reqTime}\nlatest_period=${latest?.period_id || 'none'}\nlatest_fetched_at=${latest?.fetched_at || 'none'}\nlatest_stored_at=${latest?.stored_at || 'none'}`);
+  const responseGenerated = new Date().toISOString();
+  const apiLatencyMs = Date.now() - tReqStart;
+
+  const latestFetchedAt = latest?.fetched_at || null;
+  const latestStoredAt = latest?.stored_at || null;
+  const collectorLatencyMs = latestStoredAt && latestFetchedAt ? Math.max(0, Date.parse(latestStoredAt) - Date.parse(latestFetchedAt)) : 0;
+  const apiResponseMs = collectorTiming?.api_response_ms ?? collectorTiming?.collector_latency_ms ?? latest?.api_response_ms ?? collectorLatencyMs;
+
+  // Diagnostic logging matching requirement
+  console.log(`[T7 API]\nrequest_started=${requestStarted}\nlatest_period=${latest?.period_id || 'none'}\nlatest_fetched_at=${latestFetchedAt || 'none'}\nlatest_stored_at=${latestStoredAt || 'none'}\nresponse_generated=${responseGenerated}\napi_latency_ms=${apiLatencyMs}`);
 
   return res.json({
     success: true,
     count: allSignals.length,
     signals: allSignals,
-    timing: collectorTiming || (latest ? {
-      period_id: latest.period_id,
-      fetched_at: latest.fetched_at,
-      stored_at: latest.stored_at,
-      api_response_ms: latest.api_response_ms ?? null,
-    } : null),
+    timing: {
+      latest_period: latest?.period_id || null,
+      period_id: latest?.period_id || null,
+      fetched_at: latestFetchedAt,
+      latest_fetched_at: latestFetchedAt,
+      stored_at: latestStoredAt,
+      latest_stored_at: latestStoredAt,
+      collector_latency_ms: collectorTiming?.collector_latency_ms ?? collectorLatencyMs,
+      api_response_ms: apiResponseMs,
+      api_latency_ms: apiLatencyMs,
+      request_started: requestStarted,
+      response_generated: responseGenerated,
+    },
   });
 });
 

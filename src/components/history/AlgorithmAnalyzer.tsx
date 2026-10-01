@@ -636,7 +636,8 @@ export const AlgorithmAnalyzer: React.FC = () => {
         });
         clearTimeout(timeoutId);
 
-        const httpReceivedIso = new Date().toISOString();
+        const tHttpReceived = Date.now();
+        const httpReceivedIso = new Date(tHttpReceived).toISOString();
         console.log(`[T7 UI] HTTP response received at: ${httpReceivedIso} (status: ${resp.status})`);
 
         if (!resp.ok) return;
@@ -669,11 +670,23 @@ export const AlgorithmAnalyzer: React.FC = () => {
         const newestSignal = json.signals[0];
         const timing = json.timing || {};
 
-        const fetchedTime = timing.fetched_at || newestSignal?.fetched_at;
-        const storedTime = timing.stored_at || newestSignal?.stored_at || fetchedTime;
-        const period = timing.period_id || newestSignal?.period_id;
-        const apiMs = timing.api_response_ms ?? newestSignal?.api_response_ms ?? null;
-        const endToEnd = fetchedTime ? Math.max(0, updateNow - new Date(fetchedTime).getTime()) : null;
+        const fetchedTime = timing.fetched_at || timing.latest_fetched_at || newestSignal?.fetched_at;
+        const storedTime = timing.stored_at || timing.latest_stored_at || newestSignal?.stored_at || fetchedTime;
+        const period = timing.period_id || timing.latest_period || newestSignal?.period_id;
+
+        // Stage 1: collector_latency = Supabase stored time - WingoAI response/fetch time
+        const collectorLatencyMs = timing.collector_latency_ms ?? (storedTime && fetchedTime ? Math.max(0, Date.parse(storedTime) - Date.parse(fetchedTime)) : null);
+
+        // Stage 2: api_latency = API response generation time - API request start
+        const apiLatencyMs = timing.api_latency_ms ?? null;
+
+        // Stage 3: frontend_latency = Browser response received - Browser request start
+        const frontendLatencyMs = tHttpReceived - now;
+
+        // Stage 4: total_end_to_end = Browser response received - original signal fetched_at
+        const totalEndToEndMs = fetchedTime ? Math.max(0, tHttpReceived - new Date(fetchedTime).getTime()) : null;
+
+        const apiMs = timing.api_response_ms ?? collectorLatencyMs ?? null;
 
         setT7DebugInfo({
           lastFetchedAt: fetchedTime || null,
@@ -681,10 +694,17 @@ export const AlgorithmAnalyzer: React.FC = () => {
           lastSignalStoredAt: storedTime || null,
           dashboardReceivedAt: receivedAtIso,
           apiResponseMs: apiMs,
-          endToEndDelayMs: endToEnd,
+          endToEndDelayMs: totalEndToEndMs,
+          collectorLatencyMs,
+          apiLatencyMs,
+          frontendLatencyMs,
+          totalEndToEndMs,
         });
 
-        console.log(`[T7 UI] state updated at: ${receivedAtIso} (end-to-end latency: ${endToEnd !== null ? (endToEnd / 1000).toFixed(2) + 's' : 'N/A'})`);
+        console.log(`[T7 UI] state updated at: ${receivedAtIso} (end-to-end latency: ${totalEndToEndMs !== null ? (totalEndToEndMs / 1000).toFixed(2) + 's' : 'N/A'})`);
+
+        // Diagnostic logging matching requirement
+        console.log(`[T7 FRONTEND]\nrequest_started=${fetchStartIso}\nresponse_received=${httpReceivedIso}\nlatest_period=${period || 'none'}\nlatest_fetched_at=${fetchedTime || 'none'}\nfrontend_latency_ms=${frontendLatencyMs}\ntotal_end_to_end_ms=${totalEndToEndMs ?? 'none'}`);
       } catch (err: any) {
         clearTimeout(timeoutId);
         if (err?.name !== 'AbortError') {

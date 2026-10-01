@@ -142,12 +142,10 @@ async function fetchAndProcessWingoAISignal(supabaseClient) {
     const confidence = typeof data.confidence === 'number' ? data.confidence : null;
     const fetchedAt = new Date().toISOString();
 
-    // Diagnostic logging matching requirement 15
-    log(`[T7 COLLECTOR]\nperiod=${periodId}\nsignal=${signal}\nfetched_at=${fetchedAt}`);
-
     // Deduplicate Supabase writes: Only insert if not already written
     if (!knownWingoAIPeriods.has(periodId)) {
       const storedAt = new Date().toISOString();
+      const collectorLatencyMs = Math.max(0, Date.parse(storedAt) - Date.parse(fetchedAt));
       const signalRecord = {
         period_id: periodId,
         signal,
@@ -159,17 +157,29 @@ async function fetchAndProcessWingoAISignal(supabaseClient) {
       const storedOk = await storeWingoAISignal(supabaseClient, signalRecord);
       if (storedOk) {
         knownWingoAIPeriods.add(periodId);
-        inMemoryT7Signals.set(periodId, signalRecord);
+        inMemoryT7Signals.set(periodId, {
+          ...signalRecord,
+          wingoai_response_ms: responseTime,
+          collector_latency_ms: collectorLatencyMs,
+        });
         latestWingoAITiming = {
           fetched_at: fetchedAt,
           period_id: periodId,
+          wingoai_response_ms: responseTime,
           api_response_ms: responseTime,
           signal,
           stored_at: storedAt,
+          collector_latency_ms: collectorLatencyMs,
         };
-        // Diagnostic logging matching requirement 15
-        log(`[T7 SUPABASE]\nperiod=${periodId}\nstored_at=${storedAt}`);
+
+        // Diagnostic logging matching requirement
+        log(`[T7 COLLECTOR]\nperiod=${periodId}\nwingoai_response=${responseTime} ms\nfetched_at=${fetchedAt}\nstored_at=${storedAt}\ncollector_latency_ms=${collectorLatencyMs}`);
+        log(`[T7 SUPABASE]\nperiod=${periodId}\nNEW → inserted`);
       }
+    } else {
+      // Period already stored: preserve original timestamps, skip duplicate insert
+      log(`[T7 COLLECTOR]\nperiod=${periodId}\nsignal=${signal}`);
+      log(`[T7 SUPABASE]\nperiod=${periodId}\nalready exists → skipped`);
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -285,7 +295,8 @@ const healthServer = http.createServer((req, res) => {
 
   // GET /api/real/t7-signals or /t7-signals — fast in-memory served with latency telemetry
   if (urlPath === '/api/real/t7-signals' || urlPath === '/t7-signals') {
-    const reqReceivedAt = new Date().toISOString();
+    const requestStarted = new Date().toISOString();
+    const tReqStart = Date.now();
 
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     res.setHeader('Pragma', 'no-cache');
@@ -295,7 +306,24 @@ const healthServer = http.createServer((req, res) => {
     const list = Array.from(inMemoryT7Signals.values()).sort((a, b) => b.period_id.localeCompare(a.period_id));
     const latest = list[0] || null;
 
-    log(`[T7 API]\nrequest_time=${reqReceivedAt}\nlatest_period=${latest?.period_id || 'none'}\nlatest_fetched_at=${latest?.fetched_at || 'none'}\nlatest_stored_at=${latest?.stored_at || 'none'}`);
+    const responseGenerated = new Date().toISOString();
+    const apiLatencyMs = Date.now() - tReqStart;
+
+    // Diagnostic logging matching requirement
+    log(`[T7 API]\nrequest_started=${requestStarted}\nlatest_period=${latest?.period_id || 'none'}\nlatest_fetched_at=${latest?.fetched_at || 'none'}\nlatest_stored_at=${latest?.stored_at || 'none'}\nresponse_generated=${responseGenerated}\napi_latency_ms=${apiLatencyMs}`);
+
+    const collectorLatency = latest?.collector_latency_ms ?? (latest?.stored_at && latest?.fetched_at ? Math.max(0, Date.parse(latest.stored_at) - Date.parse(latest.fetched_at)) : 0);
+
+    const timingData = {
+      latest_period: latest?.period_id || null,
+      latest_fetched_at: latest?.fetched_at || null,
+      latest_stored_at: latest?.stored_at || null,
+      collector_latency_ms: collectorLatency,
+      api_response_ms: latestWingoAITiming?.api_response_ms ?? latest?.wingoai_response_ms ?? collectorLatency,
+      api_latency_ms: apiLatencyMs,
+      request_started: requestStarted,
+      response_generated: responseGenerated,
+    };
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(
@@ -303,7 +331,7 @@ const healthServer = http.createServer((req, res) => {
         success: true,
         count: list.length,
         signals: list,
-        timing: latestWingoAITiming,
+        timing: timingData,
       })
     );
   }
