@@ -607,7 +607,14 @@ export const AlgorithmAnalyzer: React.FC = () => {
         const newMap = new Map<string, WingoAIT7Signal>();
         for (const s of json.signals) {
           if (s.period_id && (s.signal === 'BIG' || s.signal === 'SMALL')) {
-            newMap.set(String(s.period_id), s as WingoAIT7Signal);
+            const pid = String(s.period_id).trim();
+            newMap.set(pid, {
+              period_id: pid,
+              signal: s.signal,
+              confidence: typeof s.confidence === 'number' ? s.confidence : null,
+              lucky_number: typeof s.lucky_number === 'number' ? s.lucky_number : (typeof s.luckyNumber === 'number' ? s.luckyNumber : null),
+              fetched_at: s.fetched_at,
+            });
           }
         }
         setT7SignalsMap(newMap);
@@ -1003,20 +1010,24 @@ export const AlgorithmAnalyzer: React.FC = () => {
     }
 
     const t5Map = new Map<string, 'Big' | 'Small'>();
-    for (const d of test5.details) t5Map.set(d.period, d.predictedSize);
+    for (const d of test5.details) {
+      if (d.predictedSize) t5Map.set(d.period, d.predictedSize);
+    }
 
     const t6Map = new Map<string, 'Big' | 'Small'>();
     for (const d of test6.details) {
-      if (!d.noSignal) t6Map.set(d.period, d.predictedSize);
+      if (!d.noSignal && d.predictedSize) t6Map.set(d.period, d.predictedSize);
     }
 
     const t7Map = new Map<string, 'Big' | 'Small'>();
     for (const d of test7.details) {
-      if (!d.noSignal) t7Map.set(d.period, d.predictedSize);
+      if (!d.noSignal && d.predictedSize) t7Map.set(d.period, d.predictedSize);
     }
 
     const t8Map = new Map<string, 'Big' | 'Small'>();
-    for (const d of test8.details) t8Map.set(d.period, d.predictedSize);
+    for (const d of test8.details) {
+      if (d.predictedSize) t8Map.set(d.period, d.predictedSize);
+    }
 
     const actualMap = new Map<string, 'Big' | 'Small'>();
     for (const item of activeDataset) {

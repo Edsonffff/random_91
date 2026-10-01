@@ -109,6 +109,7 @@ async function fetchWingoAISignal() {
       period_id: String(data.periodId).trim(),
       signal: data.signal,
       confidence: typeof data.confidence === 'number' ? data.confidence : null,
+      lucky_number: typeof data.luckyNumber === 'number' ? data.luckyNumber : null,
       fetched_at: new Date().toISOString(),
     };
   } catch (err) {

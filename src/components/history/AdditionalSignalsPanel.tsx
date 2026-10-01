@@ -44,8 +44,8 @@ export interface TimeTestDetail {
   minute: number;
   /** For Test 5: SS parsed from completedAt; for Tests 6-8: 0 (unused) */
   second: number;
-  predictionNumber: number;
-  predictedSize: BigSmall;
+  predictionNumber: number | null;
+  predictedSize: BigSmall | null;
   actual: number;
   actualSize: BigSmall;
   isHit: boolean;
@@ -293,6 +293,7 @@ export interface WingoAIT7Signal {
   period_id: string;
   signal: 'BIG' | 'SMALL';
   confidence: number | null;
+  lucky_number?: number | null;
   fetched_at: string;
 }
 
@@ -324,22 +325,26 @@ export function computeTest7(
 
   for (let i = 0; i < sorted.length; i++) {
     const item = sorted[i];
-    const stored = t7Signals.get(item.period);
+    const cleanPeriod = String(item.period).trim();
+    const stored = t7Signals.get(cleanPeriod);
 
     const actualSize: BigSmall = toBigSmall(item.number);
 
     if (!stored) {
-      // No signal recorded for this period — mark noSignal, exclude from accuracy
+      // STRICT PERIOD MATCHING: No exact periodId match found in WingoAI records.
+      // Must return prediction = null, luckyNumber = null, noSignal = true, excluded from HIT/MISS and accuracy.
       details.push({
         period: item.period,
-        hour: 0, minute: 0, second: 0,
-        predictionNumber: 0,
-        predictedSize: 'Big',   // placeholder, irrelevant — noSignal=true
+        hour: 0,
+        minute: 0,
+        second: 0,
+        predictionNumber: null,
+        predictedSize: null,
         actual: item.number,
         actualSize,
         isHit: false,
         noSignal: true,
-        extra: { source: 'WingoAI', signal: 'N/A', confidence: -1 },
+        extra: { source: 'WingoAI', signal: 'NO SIGNAL', confidence: -1 },
       });
       continue;
     }
@@ -349,10 +354,14 @@ export function computeTest7(
     if (isHit) hits++;
     total++;
 
+    const luckyNum = typeof stored.lucky_number === 'number' ? stored.lucky_number : null;
+
     details.push({
       period: item.period,
-      hour: 0, minute: 0, second: 0,
-      predictionNumber: stored.signal === 'BIG' ? 7 : 3,  // representative placeholder numbers
+      hour: 0,
+      minute: 0,
+      second: 0,
+      predictionNumber: luckyNum,
       predictedSize,
       actual: item.number,
       actualSize,
@@ -367,8 +376,10 @@ export function computeTest7(
   }
 
   const accuracy = total > 0 ? Math.round((hits / total) * 100) : 0;
-  const validDetails = details.filter((d) => !d.noSignal);
+  const validDetails = details.filter((d) => !d.noSignal && d.predictedSize !== null);
 
+  // Strictly find the signal for the upcoming round (newer than all sorted items).
+  // NEVER fall back to previous settled rounds or stale signals!
   let upcomingPrediction: BigSmall | null = null;
   if (sorted.length > 0) {
     const newestPeriod = sorted[sorted.length - 1].period;
@@ -380,9 +391,12 @@ export function computeTest7(
   }
 
   return {
-    hits, total, accuracy, details,
+    hits,
+    total,
+    accuracy,
+    details,
     ...streakStats(validDetails),
-    latestPrediction: upcomingPrediction || (validDetails.length > 0 ? validDetails[validDetails.length - 1].predictedSize : null),
+    latestPrediction: upcomingPrediction, // Strictly upcoming period signal or null. NO FALLBACK!
   };
 }
 
@@ -512,11 +526,21 @@ function DetailTable({ result, showTime = false, extraHeaders, extraCells }: Det
                 <td key={j} className="py-1.5 px-3 text-gray-400">{cell}</td>
               ))}
               <td className="py-1.5 px-3">
-                <span className="text-gray-400">{row.predictionNumber}</span>
-                <span className="text-[#8D9B95] mx-1">→</span>
-                <span className={`font-bold ${row.predictedSize === 'Big' ? 'text-[#E7B93F]' : 'text-[#60A5FA]'}`}>
-                  {row.predictedSize.toUpperCase()}
-                </span>
+                {row.noSignal || !row.predictedSize ? (
+                  <span className="text-[#8D9B95] text-[10px] font-mono italic">NO SIGNAL</span>
+                ) : (
+                  <>
+                    {row.predictionNumber !== null && (
+                      <>
+                        <span className="text-gray-400">{row.predictionNumber}</span>
+                        <span className="text-[#8D9B95] mx-1">→</span>
+                      </>
+                    )}
+                    <span className={`font-bold ${row.predictedSize === 'Big' ? 'text-[#E7B93F]' : 'text-[#60A5FA]'}`}>
+                      {row.predictedSize.toUpperCase()}
+                    </span>
+                  </>
+                )}
               </td>
               <td className="py-1.5 px-3">
                 <span className="text-gray-400">{row.actual}</span>

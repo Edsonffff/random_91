@@ -1130,6 +1130,7 @@ interface StoredT7Signal {
   period_id: string;
   signal: 'BIG' | 'SMALL';
   confidence: number | null;
+  lucky_number?: number | null;
   fetched_at: string;
 }
 
@@ -1218,10 +1219,12 @@ app.get('/api/real/t7-signals', async (_req, res) => {
         if (!data || data.length === 0) break;
         for (const row of data) {
           if (row.period_id && (row.signal === 'BIG' || row.signal === 'SMALL')) {
-            signalMap.set(String(row.period_id), {
-              period_id: String(row.period_id),
+            const pid = String(row.period_id).trim();
+            signalMap.set(pid, {
+              period_id: pid,
               signal: row.signal as 'BIG' | 'SMALL',
               confidence: row.confidence ?? null,
+              lucky_number: typeof (row as any).lucky_number === 'number' ? (row as any).lucky_number : null,
               fetched_at: row.fetched_at,
             });
           }
