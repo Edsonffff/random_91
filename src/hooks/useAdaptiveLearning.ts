@@ -36,7 +36,7 @@ export interface AdaptiveInputRow {
   period: string;
   t1pred: BigSmall;
   t2pred: BigSmall;
-  t3pred: BigSmall;
+  t3pred?: BigSmall | null;
   t5pred?: BigSmall; // optional — may not exist for early rounds
   t6pred?: BigSmall;
   t7pred?: BigSmall;
@@ -51,7 +51,7 @@ export interface AdaptiveHistoryRow {
   period: string;
   t1pred: BigSmall;
   t2pred: BigSmall;
-  t3pred: BigSmall;
+  t3pred: BigSmall | null;
   t5pred: BigSmall | null;
   t6pred: BigSmall | null;
   t7pred: BigSmall | null;
@@ -206,7 +206,7 @@ function rowPredictions(row: Test4InputRow): Array<BigSmall | null> {
   return [
     row.t1pred,
     row.t2pred,
-    row.t3pred,
+    row.t3pred ?? null,
     row.t5pred ?? null,
     row.t6pred ?? null,
     row.t7pred ?? null,
@@ -291,7 +291,7 @@ export function useAdaptiveLearning(inputs: Test4InputRow[]): AdaptiveResult {
         period: row.period,
         t1pred: row.t1pred,
         t2pred: row.t2pred,
-        t3pred: row.t3pred,
+        t3pred: row.t3pred ?? null,
         t5pred: row.t5pred ?? null,
         t6pred: row.t6pred ?? null,
         t7pred: row.t7pred ?? null,
