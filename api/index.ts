@@ -1243,6 +1243,17 @@ app.get('/api/real/t7-signals', async (_req, res) => {
   });
 });
 
+// Health / Monitoring endpoints
+app.get(['/health', '/api/health', '/ping'], (_req, res) => {
+  res.status(200).json({
+    status: 'ok',
+    health: 'healthy',
+    service: 'Lottery Simulator & Real Proxy API',
+    uptime: Math.round(process.uptime()),
+    timestamp: new Date().toISOString(),
+  });
+});
+
 // Health / Root info endpoint
 app.get('/api', (_req, res) => {
   res.json({

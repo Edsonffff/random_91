@@ -9,12 +9,12 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS || '30000', 10);
 const RETRY_DELAY_MS = parseInt(process.env.RETRY_DELAY_MS || '10000', 10);
-const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : null;
+const PORT = parseInt(process.env.PORT || '10000', 10);
+const HOST = '0.0.0.0';
 
 // WingoAI signal API — token is ONLY stored here on the backend, never in frontend
 const WINGOAI_API_TOKEN = process.env.WINGOAI_API_TOKEN || '';
 const WINGOAI_SIGNAL_URL = 'https://server.wingoaibot.com/signals/current?room=30sec&type=standard';
-
 const OFFICIAL_WINGO_HISTORY_URL = 'https://draw.ar-lottery01.com/WinGo/WinGo_30S/GetHistoryIssuePage.json';
 
 function getTimestamp() {
@@ -72,7 +72,6 @@ function formatRecordForSupabase(item, serviceTime, timeType = 'iso') {
 /**
  * Fetch the current WingoAI signal.
  * Returns null if the API is unavailable, the token is not set, or signalReady is false.
- * The token is NEVER logged, stored in Supabase, or sent to the frontend.
  */
 async function fetchWingoAISignal() {
   const controller = new AbortController();
@@ -98,19 +97,17 @@ async function fetchWingoAISignal() {
 
     const data = await response.json();
 
-    // Only use signal when signalReady === true and signal is BIG or SMALL
     if (
       data?.signalReady !== true ||
       (data?.signal !== 'BIG' && data?.signal !== 'SMALL') ||
       !data?.periodId
     ) {
-      log(`WingoAI signal not ready or invalid (signalReady=${data?.signalReady}, signal=${data?.signal}) — skipping`);
       return null;
     }
 
     return {
       period_id: String(data.periodId).trim(),
-      signal: data.signal,          // 'BIG' or 'SMALL'
+      signal: data.signal,
       confidence: typeof data.confidence === 'number' ? data.confidence : null,
       fetched_at: new Date().toISOString(),
     };
@@ -124,10 +121,6 @@ async function fetchWingoAISignal() {
 
 let wingoSignalsTableMissing = false;
 
-/**
- * Upsert a WingoAI signal row into public.wingo_t7_signals (if table exists).
- * Conflict target is period_id — so the same period will update (never duplicate).
- */
 async function storeWingoAISignal(supabaseClient, signalRow) {
   if (wingoSignalsTableMissing) return;
   const { error } = await supabaseClient
@@ -146,9 +139,6 @@ async function storeWingoAISignal(supabaseClient, signalRow) {
   }
 }
 
-/**
- * Batch-upsert multiple WingoAI signal rows (more efficient than one-by-one).
- */
 async function storeWingoAISignalBatch(supabaseClient, rows) {
   if (wingoSignalsTableMissing || rows.length === 0) return { stored: 0, errors: 0 };
   const { error } = await supabaseClient
@@ -167,19 +157,11 @@ async function storeWingoAISignalBatch(supabaseClient, rows) {
 }
 
 /**
- * Backfill historical WingoAI signals from /history/30sec on startup.
- *
- * Investigation findings (2026-09-30):
- *  - Empirically verified: live signal for period 20260930100051896 (BIG) matched
- *    history row pred (BIG) exactly once the period settled (number: 3, result: SMALL).
- *  - The `prediction` field is confirmed to be a genuine pre-settlement prediction.
- *  - All 500 records are from today (the rolling 500-period window the API keeps)
- *  - Period strings are 17-digit and match real_wingo_30s_history.issue_number exactly
- *  - confidence is not returned by /history — stored as null for historical rows
- *
- * This is safe to call on every restart: upsert is idempotent on period_id.
+ * Backfill historical WingoAI signals from /history/30sec in background.
+ * Runs non-blocking; never delays port binding or health checks.
  */
 async function backfillWingoAIHistory(supabaseClient) {
+  if (wingoSignalsTableMissing) return;
   log('Starting WingoAI historical backfill from /history/30sec...');
 
   const HISTORY_URL = 'https://server.wingoaibot.com/history/30sec';
@@ -200,7 +182,7 @@ async function backfillWingoAIHistory(supabaseClient) {
 
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15000);
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
       const resp = await fetch(url, {
         method: 'GET',
         headers,
@@ -224,7 +206,6 @@ async function backfillWingoAIHistory(supabaseClient) {
 
     totalFetched += rows.length;
 
-    // Build upsert batch — skip entries with null prediction
     const batch = [];
     for (const row of rows) {
       if (!row.period || !row.prediction) {
@@ -239,7 +220,7 @@ async function backfillWingoAIHistory(supabaseClient) {
       batch.push({
         period_id: String(row.period).trim(),
         signal,
-        confidence: null,   // /history endpoint does not return confidence
+        confidence: null,
         fetched_at: new Date().toISOString(),
       });
     }
@@ -247,26 +228,31 @@ async function backfillWingoAIHistory(supabaseClient) {
     if (batch.length > 0) {
       const { stored, errors } = await storeWingoAISignalBatch(supabaseClient, batch);
       totalStored += stored;
-      if (errors > 0) {
-        logError(`Backfill page ${page}: ${errors} rows failed to upsert`);
+      if (errors > 0 && wingoSignalsTableMissing) {
+        break;
       }
     }
 
     log(`WingoAI backfill page ${page}: fetched=${rows.length}, stored=${batch.length}, skipped=${rows.length - batch.length}`);
 
-    // Check if there are more pages
     const totalRecords = typeof data?.totalRecords === 'number' ? data.totalRecords : 0;
     const totalPages = Math.ceil(totalRecords / PAGE_SIZE);
     if (page >= totalPages || rows.length < PAGE_SIZE) break;
     page++;
 
-    // Small delay between pages to avoid rate-limiting
-    await sleep(500);
+    await sleep(300);
   }
 
   log(`WingoAI historical backfill complete: fetched=${totalFetched}, stored=${totalStored}, skipped=${totalSkipped}`);
 }
 
+// ─── COLLECTOR & HEALTH SERVER STATE ──────────────────────────────────────────
+let knownPeriods = new Set();
+let isDbConnected = false;
+let isPollingActive = false;
+let lastCycleStatus = 'initializing';
+let lastFetchTime = null;
+let lastInsertedPeriod = null;
 let running = true;
 let isFetching = false;
 let timeType = 'iso';
@@ -281,9 +267,89 @@ process.on('SIGTERM', () => {
   running = false;
 });
 
-// Load all existing issue numbers from Supabase to prevent duplicate inserts and preserve all 1,042+ records
+// ─── STEP 1: START HTTP HEALTH SERVER IMMEDIATELY (Render Requirement) ────────
+// Render requires the HTTP port to open immediately on 0.0.0.0:PORT and return 200 OK.
+// It must NEVER wait for Supabase or external APIs before listening.
+const healthServer = http.createServer((req, res) => {
+  const urlPath = (req.url || '').split('?')[0];
+
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204);
+    return res.end();
+  }
+
+  // POST /reset or /api/reset — resets in-memory knownPeriods tracker immediately
+  if (req.method === 'POST' && (urlPath === '/reset' || urlPath === '/api/reset')) {
+    const previousCount = knownPeriods.size;
+    knownPeriods.clear();
+    log(`[Collector Reset] In-memory known periods cleared (${previousCount} -> 0). Collector continuing 24/7 polling.`);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(
+      JSON.stringify({
+        success: true,
+        message: 'Collector in-memory known periods cleared successfully',
+        previousCount,
+        currentCount: 0,
+        active: isPollingActive,
+        timestamp: getTimestamp(),
+      })
+    );
+  }
+
+  // GET /health, /api/health, /, /ping — fast, non-blocking 200 OK
+  if (urlPath === '/health' || urlPath === '/api/health' || urlPath === '/' || urlPath === '/ping') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(
+      JSON.stringify({
+        status: 'ok',
+        health: 'healthy',
+        service: 'wingo-collector',
+        uptime: Math.round(process.uptime()),
+        port: PORT,
+        host: HOST,
+        dbConnected: isDbConnected,
+        pollingActive: isPollingActive,
+        totalKnownPeriods: knownPeriods.size,
+        lastCycleStatus,
+        lastFetchTime,
+        lastInsertedPeriod,
+        timestamp: getTimestamp(),
+      })
+    );
+  }
+
+  // Default fallback 200 OK for any other probe path
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(
+    JSON.stringify({
+      status: 'ok',
+      service: 'wingo-collector',
+      timestamp: getTimestamp(),
+    })
+  );
+});
+
+healthServer.on('error', (err) => {
+  logError(`HTTP health server error: ${err.message}`);
+});
+
+healthServer.listen(PORT, HOST, () => {
+  log(`Health-check HTTP server listening immediately on ${HOST}:${PORT}`);
+  log(`Render health endpoint active at http://${HOST}:${PORT}/health (HTTP 200)`);
+
+  // Start background collector only AFTER the HTTP port is officially open & listening
+  startCollector().catch((err) => {
+    logError(`Fatal collector background error: ${err.message}`);
+  });
+});
+
+// ─── STEP 2: LOAD EXISTING PERIODS STRICTLY FROM CURRENT SUPABASE TABLE ───────
 async function loadExistingPeriods(supabaseClient) {
-  const known = new Set();
+  knownPeriods.clear();
   let from = 0;
   const BATCH_SIZE = 1000;
   let totalRows = 0;
@@ -311,7 +377,7 @@ async function loadExistingPeriods(supabaseClient) {
     for (const row of data) {
       if (row.issue_number) {
         const issue = String(row.issue_number).trim();
-        known.add(issue);
+        knownPeriods.add(issue);
         if (!newestPeriod) {
           newestPeriod = issue;
         }
@@ -322,18 +388,18 @@ async function loadExistingPeriods(supabaseClient) {
     from += data.length;
   }
 
-  return { known, totalRows: totalRows || known.size, newestPeriod };
+  return { totalRows: typeof totalRows === 'number' ? totalRows : knownPeriods.size, newestPeriod };
 }
 
+// ─── STEP 3: INITIALIZE SUPABASE & RUN 24/7 POLLING LOOP ──────────────────────
 async function startCollector() {
   log('=== WinGo 30S Standalone Backend Collector Starting ===');
 
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
     logError('CRITICAL: SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY environment variable is missing.');
     logError('Please provide these in collector/.env or your deployment environment settings.');
-    // Keep process alive to allow user to supply env without crashing the container immediately
     while (running && (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY)) {
-      await sleep(10000);
+      await sleep(5000);
     }
     if (!running) return;
   }
@@ -349,50 +415,22 @@ async function startCollector() {
     }
   );
 
+  isDbConnected = true;
   log(`Connecting to Supabase at: ${process.env.SUPABASE_URL.replace(/https?:\/\//, '').split('.')[0]}...`);
-  const { known: knownPeriods, totalRows, newestPeriod } = await loadExistingPeriods(supabaseClient);
+
+  // Query current Supabase periods strictly from the CURRENT database
+  const { totalRows, newestPeriod } = await loadExistingPeriods(supabaseClient);
   log(`Initialized. Preserved ${totalRows} existing records in Supabase. Newest period: ${newestPeriod || 'None'}`);
 
-  // Backfill historical WingoAI signals (non-fatal, runs once on startup)
-  try {
-    await backfillWingoAIHistory(supabaseClient);
-  } catch (backfillErr) {
+  // Background non-blocking historical WingoAI backfill (does not delay polling loop)
+  backfillWingoAIHistory(supabaseClient).catch((backfillErr) => {
     const backfillMsg = backfillErr instanceof Error ? backfillErr.message : String(backfillErr);
-    logError(`Historical WingoAI backfill error (non-fatal): ${backfillMsg}`);
-  }
+    log(`Historical WingoAI backfill notice: ${backfillMsg}`);
+  });
 
   log(`Starting 24/7 continuous polling loop (interval: ${POLL_INTERVAL_MS / 1000}s)...`);
-
-  // Optional HTTP health-check server for platforms like Render/Railway Web Services
-  const portToListen = PORT || 8080;
-  const server = http.createServer((req, res) => {
-    if (req.method === 'POST' && (req.url === '/reset' || req.url === '/api/reset')) {
-      const previousCount = knownPeriods.size;
-      knownPeriods.clear();
-      log(`[Collector Reset] In-memory known periods cleared (${previousCount} -> 0). Collector continuing 24/7 polling.`);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ success: true, previousCount, active: true }));
-    }
-
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(
-      JSON.stringify({
-        status: 'running',
-        service: 'wingo-collector',
-        totalKnownPeriods: knownPeriods.size,
-        lastCheck: getTimestamp(),
-      })
-    );
-  });
-
-  server.on('error', (err) => {
-    // Port in use or permission error — log warning, collector keeps running
-    logError(`Collector HTTP server warning: ${err.message}`);
-  });
-
-  server.listen(portToListen, () => {
-    log(`Health-check & reset HTTP server listening on port ${portToListen}`);
-  });
+  isPollingActive = true;
+  lastCycleStatus = 'active';
 
   while (running) {
     if (isFetching) {
@@ -420,6 +458,7 @@ async function startCollector() {
       }
 
       log('Fetch started');
+      lastFetchTime = getTimestamp();
 
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 15000);
@@ -492,14 +531,13 @@ async function startCollector() {
           logError(`Database insertion failure for Period ${issueNumber}: ${insertError.message}`);
         } else {
           knownPeriods.add(issueNumber);
+          lastInsertedPeriod = issueNumber;
           const size = num >= 5 ? 'Big' : 'Small';
           log(`New result → inserted (Period: ${issueNumber}, Number: ${num}, Size: ${size})`);
         }
       }
 
       // ── WingoAI Signal fetch (non-fatal — errors here never stop WinGo collection) ──
-      // Fetch AFTER processing results so the signal is associated with the NEXT period
-      // that is about to be drawn, not the one already settled.
       try {
         const wingoSignal = await fetchWingoAISignal();
         if (wingoSignal) {
@@ -509,9 +547,12 @@ async function startCollector() {
         const signalMsg = signalErr instanceof Error ? signalErr.message : String(signalErr);
         logError(`WingoAI signal cycle error (non-fatal): ${signalMsg}`);
       }
+
+      lastCycleStatus = 'healthy';
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       logError(`API request failed: ${errMsg} → retrying`);
+      lastCycleStatus = `error: ${errMsg}`;
       nextDelay = RETRY_DELAY_MS;
     } finally {
       isFetching = false;
@@ -525,7 +566,3 @@ async function startCollector() {
   log('WinGo 30S Collector stopped.');
 }
 
-startCollector().catch((err) => {
-  logError(`Fatal collector error: ${err.message}`);
-  process.exit(1);
-});
