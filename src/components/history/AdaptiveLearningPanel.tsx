@@ -249,20 +249,20 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data, activeSchedule })
           <div className="flex items-center gap-2">
             <TrendingUp className="w-4 h-4 text-[#E7B93F]" />
             <span className="text-xs font-mono font-black uppercase tracking-wider text-[#F5F5F5]">
-              Next Active Prediction
+              Adaptive Final Result
             </span>
           </div>
           <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[#E7B93F]/15 text-[#E7B93F] border border-[#E7B93F]/30 uppercase font-bold">
-            Decision before result
+            Status: Decision before result
           </span>
         </div>
 
         {activePrediction ? (
           <div className="space-y-3">
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 font-mono">
-              <StatBox label="Next Active Period" value={activePrediction.period.slice(-7)} />
+              <StatBox label="Period" value={activePrediction.period.slice(-7)} />
               <StatBox
-                label="Prediction"
+                label="Result"
                 value={activePrediction.decision.toUpperCase()}
                 color={activePrediction.decision === 'Big' ? 'text-[#E7B93F]' : 'text-[#60A5FA]'}
               />
