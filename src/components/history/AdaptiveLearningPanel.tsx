@@ -274,7 +274,10 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data, activeSchedule })
             </div>
             <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-[11px] font-mono">
               <span className="text-[#8D9B95]">
-                Signals voting: <span className="text-[#35B978] font-bold">{activePrediction.signalsAvailable} / 7</span>
+                Signals voting:{' '}
+                <span className="text-[#35B978] font-bold">
+                  {activePrediction.signalsAvailable} / {SIGNAL_LABELS.length}
+                </span>
               </span>
               <span className="text-[#8D9B95]">
                 Actual: <span className="text-[#8D9B95] font-bold">PENDING</span>
@@ -342,7 +345,7 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data, activeSchedule })
                 </div>
               </div>
               <p className="text-[10px] text-[#8D9B95] mt-1.5 font-mono">
-                Signals used: {lastRow.signalsAvailable} / 7
+                Signals used: {lastRow.signalsAvailable} / {SIGNAL_LABELS.length}
               </p>
             </div>
           )}
@@ -538,7 +541,7 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data, activeSchedule })
         <div>
           <span className="text-xs font-mono font-bold text-[#F5F5F5]">Reset Learned Weights</span>
           <p className="text-[11px] text-[#8D9B95] mt-0.5">
-            Restores equal initial weights (1/7 each) and clears online weight adaptation.
+            Restores equal initial weights (1/{SIGNAL_LABELS.length} each) and clears online weight adaptation.
           </p>
         </div>
         {!confirmReset ? (
@@ -573,5 +576,6 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data, activeSchedule })
   );
 };
 
-// fallback display constant (never referenced by logic)
-const INITIAL_WEIGHT_DISPLAY = 1 / 7;
+// Fallback display constant (never referenced by logic). Derived from the
+// signal list so it stays correct when the number of signals changes.
+const INITIAL_WEIGHT_DISPLAY = 1 / SIGNAL_LABELS.length;
