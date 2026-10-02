@@ -1,11 +1,13 @@
-# Render deployment for the WingoAI Test 7 signal collector.
+# Render deployment for the WinGo 30S + Test 7 collector.
 #
 # Division of responsibility:
-#   - Vercel Cron (vercel.json)  -> public.real_wingo_30s_history  (WinGo results)
-#   - This worker                 -> public.wingo_t7_signals        (WingoAI signals)
+#   - This worker        -> public.real_wingo_30s_history  (WinGo results)
+#   - This worker        -> public.wingo_t7_signals        (external predictions)
 #
-# T7 signals rotate every 30 seconds. Vercel Cron cannot fire faster than once
-# per minute, so T7 must run on an always-on process to keep dense capture.
+# The same process owns both tables. It can equally be run anywhere Node
+# runs (for example Termux on a phone); this blueprint just makes that the
+# default. T7 predictions rotate every 30 seconds, so collection needs an
+# always-on process rather than a scheduled one.
 #
 # Secrets (SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, WINGOAI_API_TOKEN) are NOT
 # stored here. Set them in the Render dashboard; `sync: false` means Render will
@@ -25,8 +27,8 @@ services:
     envVars:
       - key: NODE_VERSION
         value: "22"
-      # History polling is now owned by Vercel Cron; the collector's own
-      # 30s loop is retained but T7 is the reason this worker exists.
+      # Both history and T7 run on this loop, so it is tuned for the
+      # faster of the two requirements.
       - key: POLL_INTERVAL_MS
         value: "30000"
       - key: PORT
