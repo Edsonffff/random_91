@@ -1218,6 +1218,19 @@ export const AlgorithmAnalyzer: React.FC = () => {
     adaptiveLearning.totalPredictions,
   ]);
 
+  // ── TEMPORARY diagnostics: why T2/T6 do or don't reach Adaptive Learning ──
+  useEffect(() => {
+    for (const d of testLinearRecurrence.details) {
+      console.log(`[T2] period=${d.period} signal=${d.insufficient ? '—' : d.predictedSize}`);
+    }
+    for (const d of test6.details) {
+      console.log(`[T6] period=${d.period} signal=${d.noSignal || !d.predictedSize ? '—' : d.predictedSize}`);
+    }
+    for (const row of adaptiveInputs) {
+      console.log(`[Adaptive] period=${row.period} T2=${row.t2pred ?? '—'} T6=${row.t6pred ?? '—'}`);
+    }
+  }, [testLinearRecurrence.details, test6.details, adaptiveInputs]);
+
   // ==========================================
   // INPUT SIGNALS SUMMARY (Tests 1, 2, 3, 5, 6, 7, 8)
   // ==========================================
