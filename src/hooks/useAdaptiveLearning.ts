@@ -32,16 +32,34 @@ const LEGACY_STORAGE_KEY = 'wingo_test4_model_v4';
 
 export type BigSmall = 'Big' | 'Small';
 
-export interface AdaptiveInputRow {
-  period: string;
+export interface SignalPredictions {
   t1pred: BigSmall;
-  t2pred: BigSmall;
+  t2pred?: BigSmall | null; // optional — Markov needs ≥ MIN samples and is absent in short windows
   t3pred?: BigSmall | null;
-  t5pred?: BigSmall; // optional — may not exist for early rounds
-  t6pred?: BigSmall;
-  t7pred?: BigSmall;
-  t8pred?: BigSmall;
+  t5pred?: BigSmall | null; // optional — may not exist for early rounds
+  t6pred?: BigSmall | null;
+  t7pred?: BigSmall | null;
+  t8pred?: BigSmall | null;
+}
+
+export interface AdaptiveInputRow extends SignalPredictions {
+  period: string;
   actual: BigSmall;
+}
+
+/** Active (not-yet-settled) round inputs — predictions only, no actual result yet. */
+export interface ActiveInputRow extends SignalPredictions {
+  period: string;
+}
+
+/** Forward-looking decision for the active (unsettled) period. Never learns/scored. */
+export interface ActivePrediction {
+  period: string;
+  decision: BigSmall;
+  probBig: number;
+  probSmall: number;
+  signalsAvailable: number;
+  weights: number[];
 }
 
 // Backwards compatibility alias
@@ -50,7 +68,7 @@ export type Test4InputRow = AdaptiveInputRow;
 export interface AdaptiveHistoryRow {
   period: string;
   t1pred: BigSmall;
-  t2pred: BigSmall;
+  t2pred: BigSmall | null;
   t3pred: BigSmall | null;
   t5pred: BigSmall | null;
   t6pred: BigSmall | null;
@@ -110,6 +128,9 @@ export interface AdaptiveResult {
 
   /** Latest signal agreement (from last row) */
   lastSignalAgreement: SignalAgreement;
+
+  /** Decision generated for the active (unsettled) period, if one was supplied */
+  activePrediction: ActivePrediction | null;
 
   resetLearning: (fullCleanSlate?: boolean) => void;
 }
@@ -202,10 +223,10 @@ function rollingWindow(history: Test4HistoryRow[], n: number) {
  * Extract the 7 optional predictions from a row as an array.
  * Index matches SIGNAL_LABELS: [t1,t2,t3,t5,t6,t7,t8]
  */
-function rowPredictions(row: Test4InputRow): Array<BigSmall | null> {
+function rowPredictions(row: SignalPredictions): Array<BigSmall | null> {
   return [
     row.t1pred,
-    row.t2pred,
+    row.t2pred ?? null,
     row.t3pred ?? null,
     row.t5pred ?? null,
     row.t6pred ?? null,
@@ -214,9 +235,48 @@ function rowPredictions(row: Test4InputRow): Array<BigSmall | null> {
   ];
 }
 
+interface VoteComputation {
+  decision: BigSmall;
+  probBig: number;
+  probSmall: number;
+  available: Array<{ idx: number; pred: BigSmall; weight: number }>;
+}
+
+/**
+ * Weighted ensemble vote. Missing signals (null/undefined) are excluded and the
+ * remaining weights are normalized for this vote only. Single source of truth for
+ * both the settled-round replay and the active-period prediction.
+ */
+function computeVote(preds: Array<BigSmall | null>, weights: number[]): VoteComputation {
+  const available: Array<{ idx: number; pred: BigSmall; weight: number }> = [];
+  for (let k = 0; k < N_SIGNALS; k++) {
+    if (preds[k] != null) {
+      available.push({ idx: k, pred: preds[k]!, weight: weights[k] });
+    }
+  }
+
+  const availableSum = available.reduce((s, a) => s + a.weight, 0);
+  let bigScore = 0;
+  let smallScore = 0;
+  for (const sig of available) {
+    const normW = availableSum > 0 ? sig.weight / availableSum : 1 / Math.max(1, available.length);
+    if (sig.pred === 'Big') bigScore += normW;
+    else smallScore += normW;
+  }
+
+  const totalScore = bigScore + smallScore;
+  const rawProbBig = totalScore > 0 ? bigScore / totalScore : 0.5;
+  return {
+    decision: rawProbBig >= 0.5 ? 'Big' : 'Small',
+    probBig: Math.round(rawProbBig * 1000) / 10,
+    probSmall: Math.round((1 - rawProbBig) * 1000) / 10,
+    available,
+  };
+}
+
 // ─── Hook ────────────────────────────────────────────────────────────────────
 
-export function useAdaptiveLearning(inputs: Test4InputRow[]): AdaptiveResult {
+export function useAdaptiveLearning(inputs: Test4InputRow[], activeInput?: ActiveInputRow | null): AdaptiveResult {
   const [modelState, setModelState] = useState<ModelState>(() => loadModel());
 
   const resetLearning = useCallback((fullCleanSlate = false) => {
@@ -258,39 +318,15 @@ export function useAdaptiveLearning(inputs: Test4InputRow[]): AdaptiveResult {
     for (const row of ascending) {
       const preds = rowPredictions(row);
 
-      // ── Build the available signal set for this round ──────────────
-      // Exclude signals that have no prediction (null). This handles Tests
-      // 5/7/8 which skip the first round (need a previous result).
-      const available: Array<{ idx: number; pred: BigSmall; weight: number }> = [];
-      for (let k = 0; k < N_SIGNALS; k++) {
-        if (preds[k] !== null) {
-          available.push({ idx: k, pred: preds[k]!, weight: ws[k] });
-        }
-      }
-
-      // Normalise available weights for this round's vote
-      const availableSum = available.reduce((s, a) => s + a.weight, 0);
-      let bigScore = 0;
-      let smallScore = 0;
-      let bigVotes = 0;
-      let smallVotes = 0;
-      for (const sig of available) {
-        const normW = availableSum > 0 ? sig.weight / availableSum : 1 / available.length;
-        if (sig.pred === 'Big') { bigScore += normW; bigVotes++; }
-        else { smallScore += normW; smallVotes++; }
-      }
-
-      const totalScore = bigScore + smallScore;
-      const rawProbBig = totalScore > 0 ? bigScore / totalScore : 0.5;
-      const t4pred: BigSmall = rawProbBig >= 0.5 ? 'Big' : 'Small';
+      // ── Weighted vote for this round (same formula as the active prediction) ──
+      const vote = computeVote(preds, ws);
+      const t4pred = vote.decision;
       const isHit = t4pred === row.actual;
-      const probBig = Math.round(rawProbBig * 1000) / 10;
-      const probSmall = Math.round((1 - rawProbBig) * 1000) / 10;
 
       history.push({
         period: row.period,
         t1pred: row.t1pred,
-        t2pred: row.t2pred,
+        t2pred: row.t2pred ?? null,
         t3pred: row.t3pred ?? null,
         t5pred: row.t5pred ?? null,
         t6pred: row.t6pred ?? null,
@@ -300,14 +336,14 @@ export function useAdaptiveLearning(inputs: Test4InputRow[]): AdaptiveResult {
         t4pred,
         actual: row.actual,
         isHit,
-        probBig,
-        probSmall,
+        probBig: vote.probBig,
+        probSmall: vote.probSmall,
         weights: [...ws],
-        signalsAvailable: available.length,
+        signalsAvailable: vote.available.length,
       });
 
       // ── Learn: update weights from each available signal ────────────
-      for (const sig of available) {
+      for (const sig of vote.available) {
         const correct = sig.pred === row.actual;
         ws[sig.idx] = clamp(ws[sig.idx] + (correct ? LEARNING_RATE : -LEARNING_RATE));
       }
@@ -316,6 +352,22 @@ export function useAdaptiveLearning(inputs: Test4InputRow[]): AdaptiveResult {
 
     // Live weights after full replay
     const liveWeights = [...ws];
+
+    // ── Active (unsettled) period prediction ────────────────────────────
+    // Uses the SAME weighted-vote formula against the final live weights.
+    // It is NOT added to history/stats and never learns (its actual is unknown).
+    let activePrediction: ActivePrediction | null = null;
+    if (activeInput) {
+      const activeVote = computeVote(rowPredictions(activeInput), liveWeights);
+      activePrediction = {
+        period: activeInput.period,
+        decision: activeVote.decision,
+        probBig: activeVote.probBig,
+        probSmall: activeVote.probSmall,
+        signalsAvailable: activeVote.available.length,
+        weights: [...liveWeights],
+      };
+    }
 
     // ── Stats ──────────────────────────────────────────────────────────
     const totalPredictions = history.length;
@@ -395,9 +447,10 @@ export function useAdaptiveLearning(inputs: Test4InputRow[]): AdaptiveResult {
       last100,
       last250,
       lastSignalAgreement,
+      activePrediction,
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [inputs, modelState.processedPeriods.length, modelState.allTimeLongestHitStreak, modelState.allTimeLongestMissStreak, ...modelState.weights]);
+  }, [inputs, activeInput, modelState.processedPeriods.length, modelState.allTimeLongestHitStreak, modelState.allTimeLongestMissStreak, ...modelState.weights]);
 
   // Sync persisted weights back into state when localStorage changes externally
   useEffect(() => {
@@ -427,6 +480,7 @@ export function useAdaptiveLearning(inputs: Test4InputRow[]): AdaptiveResult {
     last100: { hits: 0, total: 0 },
     last250: { hits: 0, total: 0 },
     lastSignalAgreement: { bigVotes: 0, smallVotes: 0, total: 0, majority: null },
+    activePrediction: null,
     resetLearning,
   };
 

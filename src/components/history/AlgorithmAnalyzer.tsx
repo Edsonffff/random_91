@@ -18,7 +18,7 @@ import {
 } from 'lucide-react';
 import { CollapsibleCard } from '../common/CollapsibleCard';
 import { useAdaptiveLearning } from '../../hooks/useAdaptiveLearning';
-import type { Test4InputRow } from '../../hooks/useAdaptiveLearning';
+import type { Test4InputRow, ActiveInputRow } from '../../hooks/useAdaptiveLearning';
 import { AdaptiveLearningPanel } from './AdaptiveLearningPanel';
 import {
   AdditionalSignalsPanel,
@@ -579,7 +579,7 @@ export interface Test3Result {
 
 export const AlgorithmAnalyzer: React.FC = () => {
   const { results, loadBigMumbaiSample } = useResults();
-  const { realHistory, resetAllSystemData } = useRealHistory();
+  const { realHistory, realSchedule, resetAllSystemData } = useRealHistory();
   const [dataSource, setDataSource] = useState<'realLive' | 'sample3' | 'sample2' | 'sample1' | 'live'>('realLive');
   const [activeTestTab, setActiveTestTab] = useState<'periodSum' | 'linearDelta' | 'alternation' | 'additional'>('periodSum');
   const [expandedSources, setExpandedSources] = useState<Record<string, boolean>>({});
@@ -1083,8 +1083,11 @@ export const AlgorithmAnalyzer: React.FC = () => {
   // ADAPTIVE LEARNING MAIN DECISION ENGINE
   // ==========================================
   // Build aligned input rows for Adaptive Learning.
-  // T1/T2/T3 + actual are required; T5–T8 are optional.
-  // Missing T5–T8 are excluded from that round's vote inside the hook.
+  // T1 + actual are required; T2–T8 are optional.
+  // Test 2 (Markov) has no prediction until it accumulates ≥ MIN samples, which
+  // never happens inside a short (e.g. 10-round) live window — so it must not be
+  // allowed to block every row. Missing signals are excluded from that round's
+  // vote inside the hook (same rule already used for T3/T5–T8).
   const adaptiveInputs = useMemo((): Test4InputRow[] => {
     if (testPeriodSum.details.length === 0) return [];
 
@@ -1128,13 +1131,12 @@ export const AlgorithmAnalyzer: React.FC = () => {
 
     const rows: Test4InputRow[] = [];
     for (const [period, t1pred] of t1Map) {
-      const t2pred = t2Map.get(period);
       const actual = actualMap.get(period);
-      if (!t2pred || !actual) continue;
+      if (!actual) continue;
       rows.push({
         period,
         t1pred,
-        t2pred,
+        t2pred: t2Map.get(period) ?? null,
         t3pred: t3Map.get(period) ?? null,
         t5pred: t5Map.get(period),
         t6pred: t6Map.get(period),
@@ -1155,7 +1157,66 @@ export const AlgorithmAnalyzer: React.FC = () => {
     activeDataset,
   ]);
 
-  const adaptiveLearning = useAdaptiveLearning(adaptiveInputs);
+  // Active (unsettled) round inputs: predictions from the SAME tests that feed
+  // the settled rows, keyed by the active issue id. T1 is computable pre-draw
+  // from the period digits (identical formula to Test 1). No extra fetch/polling.
+  const activePeriodId = realSchedule?.currentIssue || '';
+  const adaptiveActiveInput = useMemo((): ActiveInputRow | null => {
+    if (!activePeriodId) return null;
+    const digitSum = activePeriodId.split('').reduce((acc, ch) => acc + parseInt(ch, 10), 0);
+    const t1pred: 'Big' | 'Small' = digitSum % 10 >= 5 ? 'Big' : 'Small';
+    return {
+      period: activePeriodId,
+      t1pred,
+      t2pred: testLinearRecurrence.latestPrediction,
+      t3pred: test3.latestPrediction,
+      t5pred: test5.latestPrediction,
+      t6pred: test6.latestPrediction,
+      t7pred: test7.latestPrediction,
+      t8pred: test8.latestPrediction,
+    };
+  }, [
+    activePeriodId,
+    testLinearRecurrence.latestPrediction,
+    test3.latestPrediction,
+    test5.latestPrediction,
+    test6.latestPrediction,
+    test7.latestPrediction,
+    test8.latestPrediction,
+  ]);
+
+  const adaptiveLearning = useAdaptiveLearning(adaptiveInputs, adaptiveActiveInput);
+
+  // ── TEMPORARY diagnostics: verify Adaptive Learning is connected to the live feed ──
+  useEffect(() => {
+    const liveCount = realHistory.length;
+    let latestSettled = '';
+    for (const r of realHistory) {
+      const p = String(r.periodNumber || '').trim();
+      if (p && (!latestSettled || compareIssuesAsc(latestSettled, p) < 0)) latestSettled = p;
+    }
+    const activePeriod = realSchedule?.currentIssue || '';
+    const evaluationPeriod = latestSettled;
+    const activePred = adaptiveLearning.activePrediction;
+    const predictionPeriod = activePred?.period || activePeriod || latestSettled;
+    console.log(`[Adaptive] live_history_count=${liveCount}`);
+    console.log(`[Adaptive] latest_settled_period=${latestSettled}`);
+    console.log(`[Adaptive] active_period=${activePeriod}`);
+    console.log(`[Adaptive] available_test_inputs=${adaptiveInputs.length}`);
+    console.log(`[Adaptive] prediction_period=${predictionPeriod}`);
+    console.log(`[Adaptive] evaluation_period=${evaluationPeriod}`);
+    console.log(
+      `[Adaptive] active_prediction=${activePred ? `${activePred.decision} (BIG ${activePred.probBig.toFixed(1)}% / SMALL ${activePred.probSmall.toFixed(1)}%, ${activePred.signalsAvailable} signals)` : 'n/a'}`
+    );
+  }, [
+    realHistory,
+    realSchedule,
+    adaptiveInputs,
+    adaptiveLearning.activePrediction?.period,
+    adaptiveLearning.activePrediction?.decision,
+    adaptiveLearning.activePrediction?.signalsAvailable,
+    adaptiveLearning.totalPredictions,
+  ]);
 
   // ==========================================
   // INPUT SIGNALS SUMMARY (Tests 1, 2, 3, 5, 6, 7, 8)
