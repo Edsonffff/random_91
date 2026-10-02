@@ -40,9 +40,9 @@ export interface TimeTestDetail {
   period: string;
   /** For Test 5: HH parsed from completedAt */
   hour: number;
-  /** For Test 5: MM parsed from completedAt; for Tests 6-8: 0 (unused) */
+  /** For Test 5: MM parsed from completedAt; for Tests 6-7: 0 (unused) */
   minute: number;
-  /** For Test 5: SS parsed from completedAt; for Tests 6-8: 0 (unused) */
+  /** For Test 5: SS parsed from completedAt; for Tests 6-7: 0 (unused) */
   second: number;
   predictionNumber: number | null;
   predictedSize: BigSmall | null;

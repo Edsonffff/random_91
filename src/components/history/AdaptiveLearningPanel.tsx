@@ -18,15 +18,14 @@ interface Props {
   activeSchedule?: RealGameSchedule | null;
 }
 
-// ─── Accent colours per signal index [T1,T2,T3,T5,T6,T7,T8] ─────────────────
+// ─── Accent colours per signal index [T2,T3,T5,T6,T7] ─────────────────────
+// Indexed against SIGNAL_LABELS, so the order here must match it exactly.
 const SIGNAL_COLORS = [
-  '#E7B93F', // T1 amber
   '#60A5FA', // T2 blue
   '#35B978', // T3 green
   '#A78BFA', // T5 violet
   '#F59E0B', // T6 orange
-  '#34D399', // T7 teal (WingoAI)
-  '#F472B6', // T8 pink
+  '#34D399', // T7 teal (external prediction)
 ];
 
 // ─── Small sub-components ────────────────────────────────────────────────────
@@ -138,8 +137,10 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data, activeSchedule })
               </span>
             </div>
             <div className="flex items-center gap-2 text-xs font-mono">
-              <span className="text-[10px] text-[#8D9B95] uppercase">7 Signals Active:</span>
-              <span className="text-[#F5F5F5] font-bold">T1, T2, T3, T5, T6, T7 (WingoAI), T8</span>
+              <span className="text-[10px] text-[#8D9B95] uppercase">{SIGNAL_LABELS.length} Signals Active:</span>
+              <span className="text-[#F5F5F5] font-bold">
+                {SIGNAL_LABELS.map((l) => l.replace('Test ', 'T')).join(', ')}
+              </span>
             </div>
           </div>
 
@@ -189,7 +190,9 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data, activeSchedule })
                   Weighted Vote Distribution
                 </span>
                 <span className="text-[10px] font-mono text-[#35B978]">
-                  {lastRow ? `${lastRow.signalsAvailable} of 7 signals voting` : '7 signals configured'}
+                  {lastRow
+                    ? `${lastRow.signalsAvailable} of ${SIGNAL_LABELS.length} signals voting`
+                    : `${SIGNAL_LABELS.length} signals configured`}
                 </span>
               </div>
 
@@ -415,7 +418,7 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data, activeSchedule })
               ))}
             </div>
             <p className="text-[10px] text-[#8D9B95] font-sans">
-              Weights update after every settled round and always sum to 100%. Missing signals (e.g. T5–T8 for early rounds) are temporarily excluded per round.
+              Weights update after every settled round and always sum to 100%. Missing signals (e.g. T5–T7 for early rounds) are temporarily excluded per round.
             </p>
           </div>
 

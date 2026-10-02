@@ -1815,7 +1815,7 @@ export const AlgorithmAnalyzer: React.FC = () => {
                 </span>
               </div>
             }
-            subtitle="Time-of-day, minute, SMA-10, WingoAI API signal (Test 7), and streak formulas"
+            subtitle="Digit mix (Test 5), moving average (Test 6), and external prediction signal (Test 7)"
           >
             <AdditionalSignalsPanel
               test5={test5}
