@@ -937,9 +937,33 @@ async function fetchLiveOfficialHistory(): Promise<LiveUpstreamResult> {
   throw new Error(`all official hosts failed -> ${lastError}`);
 }
 
+/**
+ * Return the subset of `issues` that already exist in public.real_wingo_30s_history.
+ * Used to distinguish newly discovered periods from already-stored ones (dedupe).
+ */
+async function getExistingIssues(client: SupabaseClient, issues: string[]): Promise<Set<string>> {
+  const existing = new Set<string>();
+  if (!issues || issues.length === 0) return existing;
+  try {
+    const { data, error } = await client
+      .from('real_wingo_30s_history')
+      .select('issue_number')
+      .eq('game_code', 'WinGo_30S')
+      .in('issue_number', issues);
+    if (!error && Array.isArray(data)) {
+      for (const row of data) existing.add(String(row.issue_number).trim());
+    }
+  } catch {
+    // Non-fatal: treat all as new — the unique constraint still prevents duplicates.
+  }
+  return existing;
+}
+
 // GET /api/real/history
-// PRIMARY SOURCE: live official WinGo 30S API (Render is NOT involved anywhere).
-// Fallback: Supabase -> in-memory cache (legacy behavior, only if live fetch fails).
+// LIVE WinGo upstream = source of NEW/current rounds.
+// Supabase public.real_wingo_30s_history = persistent FULL history served to the app.
+// Flow: upstream (newest N) -> upsert new periods -> serve full stored history.
+// Fallback: live window -> in-memory cache (only if Supabase is unavailable/empty).
 app.get('/api/real/history', async (req, res) => {
   // Strict no-cache: every request must return the latest available result
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
@@ -957,9 +981,15 @@ app.get('/api/real/history', async (req, res) => {
     if (!isNaN(parsed) && parsed > 0) limit = parsed;
   }
 
-  // 1. Live upstream fetch — primary source, works even if Render is completely offline
+  const supabaseClient = getSupabaseClient();
+  let live: LiveUpstreamResult | null = null;
+
+  // 1. Live upstream fetch — source of NEW/current rounds (fast, always first)
   try {
-    const live = await fetchLiveOfficialHistory();
+    live = await fetchLiveOfficialHistory();
+
+    console.log(`[real/history] upstream_latest_period=${live.records[0]?.issueNumber || 'none'}`);
+    console.log(`[real/history] upstream_count=${live.records.length}`);
 
     // Refresh in-memory cache for fallback paths
     const liveMap = new Map<string, RealCompletedRecord>();
@@ -967,33 +997,46 @@ app.get('/api/real/history', async (req, res) => {
     for (const r of live.records) liveMap.set(r.issueNumber, r);
     accumulatedRealHistory = sortRealRecordsDescending(Array.from(liveMap.values()));
     lastRealFetchTime = Date.now();
-
-    const liveResults = limit === 'all' ? live.records : live.records.slice(0, limit);
-
-    return res.json({
-      success: true,
-      totalAvailable: live.totalCount,
-      returnedCount: liveResults.length,
-      lastUpdated: new Date().toISOString(),
-      lastSyncTime: lastSupabaseSyncTime,
-      storage: 'live-upstream',
-      source: 'COMPLETED REAL HISTORY',
-      results: liveResults,
-      error: null,
-    });
   } catch (liveErr) {
-    const liveMsg = describeFetchError(liveErr);
     console.warn(
-      `[real/history] live_upstream_failed reason=${liveMsg}; falling back to Supabase/in-memory (last resort)`
+      `[real/history] live_upstream_failed reason=${describeFetchError(liveErr)}; serving stored Supabase history`
     );
   }
 
-  // 2. Fallback: Supabase then in-memory (unchanged legacy behavior)
-  const supabaseClient = getSupabaseClient();
+  // 2. Persist newly discovered periods into Supabase (dedupe; never deletes)
+  if (supabaseClient && live && live.records.length > 0) {
+    try {
+      const issues = live.records.map((r) => r.issueNumber);
+      const existingSet = await getExistingIssues(supabaseClient, issues);
+      const newRecords = live.records.filter((r) => !existingSet.has(r.issueNumber));
+      const existingCount = live.records.length - newRecords.length;
+
+      let inserted = 0;
+      if (newRecords.length > 0) {
+        const syncRes = await syncRecordsToSupabase(newRecords);
+        if (syncRes.success) {
+          inserted = newRecords.length;
+          lastSupabaseSyncTime = new Date().toISOString();
+        } else {
+          console.error('[real/history] supabase_upsert_failed', syncRes.error);
+        }
+      }
+
+      console.log(`[real/history] supabase_inserted=${inserted}`);
+      console.log(`[real/history] supabase_existing=${existingCount}`);
+    } catch (syncErr) {
+      console.warn(`[real/history] supabase_sync_error reason=${describeFetchError(syncErr)}`);
+    }
+  }
+
+  // 3. Serve the FULL persistent history from Supabase (pagination inside readFromSupabase)
   if (supabaseClient) {
     const { records, totalCount, error } = await readFromSupabase(limit);
+
+    console.log(`[real/history] supabase_total=${totalCount}`);
+
     if (!error && records.length > 0) {
-      // Merge into in-memory store as well
+      // Merge stored history into in-memory cache as well
       const map = new Map<string, RealCompletedRecord>();
       for (const r of accumulatedRealHistory) map.set(r.issueNumber, r);
       for (const r of records) map.set(r.issueNumber, r);
@@ -1013,7 +1056,23 @@ app.get('/api/real/history', async (req, res) => {
     }
   }
 
-  // Fallback to in-memory store if Supabase is not configured or empty
+  // 4. Fallback: if Supabase is unavailable/empty, serve the live upstream window
+  if (live && live.records.length > 0) {
+    const liveResults = limit === 'all' ? live.records : live.records.slice(0, limit);
+    return res.json({
+      success: true,
+      totalAvailable: live.totalCount,
+      returnedCount: liveResults.length,
+      lastUpdated: new Date().toISOString(),
+      lastSyncTime: lastSupabaseSyncTime,
+      storage: 'live-upstream',
+      source: 'COMPLETED REAL HISTORY',
+      results: liveResults,
+      error: supabaseClient ? null : 'Supabase not configured; serving live upstream window only.',
+    });
+  }
+
+  // 5. Last resort: in-memory cache
   const sliceCount = limit === 'all' ? accumulatedRealHistory.length : limit;
   res.json({
     success: true,
