@@ -776,84 +776,165 @@ app.get('/api/real/status', (req, res) => {
   });
 });
 
-// Official WinGo 30S history source already used by this project (browser service
-// and collector). /api/real/history now reads directly from here, so the flow no
-// longer depends on any Render-collected copy.
-const OFFICIAL_WINGO_HISTORY_URL = 'https://draw.ar-lottery01.com/WinGo/WinGo_30S/GetHistoryIssuePage.json';
+// Official WinGo 30S source (same game, same JSON schema, same issue-number stream).
+// Cloudflare blocks datacenter IPs (Vercel/AWS) with HTTP 403 on some official mirror
+// hosts, so we fail over across the official mirror hosts. No third-party API is used.
+// Hosts are tried in order — datacenter-friendly mirrors first, then the legacy host.
+const OFFICIAL_WINGO_HISTORY_HOSTS = [
+  'https://draw.ar-lottery02.com',
+  'https://draw.ar-lottery03.com',
+  'https://draw.ar-lottery01.com',
+];
+const OFFICIAL_WINGO_HISTORY_PATH = '/WinGo/WinGo_30S/GetHistoryIssuePage.json';
+
+// Short per-host timeout so a blocked/hanging host cannot stall a 5s polling cycle.
+const UPSTREAM_TIMEOUT_MS = 3000;
+
+interface LiveUpstreamResult {
+  records: RealCompletedRecord[];
+  totalCount: number;
+  host: string;
+  status: number;
+  responseMs: number;
+}
+
+/**
+ * Extract the real reason from a fetch/network error. Undici (Node fetch) surfaces
+ * generic failures as message "fetch failed"; the actual cause lives in err.cause.
+ */
+function describeFetchError(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  const parts: string[] = [`${err.name}: ${err.message}`];
+  const cause = (err as { cause?: unknown }).cause;
+  if (cause instanceof Error) {
+    parts.push(`cause: ${cause.name}: ${cause.message}`);
+  } else if (typeof cause === 'string') {
+    parts.push(`cause: ${cause}`);
+  } else if (cause && typeof cause === 'object') {
+    const code = (cause as { code?: string }).code;
+    const message = (cause as { message?: string }).message;
+    parts.push(`cause: ${code || message || JSON.stringify(cause).slice(0, 200)}`);
+  }
+  return parts.join(' | ');
+}
 
 /**
  * Fetch the latest settled WinGo 30S draws straight from the official source API.
  * Reuses the upstream endpoint already present in the project — no new API invented.
  */
-async function fetchLiveOfficialHistory(): Promise<{ records: RealCompletedRecord[]; totalCount: number }> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 8000);
+async function fetchLiveOfficialHistory(): Promise<LiveUpstreamResult> {
+  let lastError = 'no upstream host attempted';
 
-  try {
-    const response = await fetch(`${OFFICIAL_WINGO_HISTORY_URL}?ts=${Date.now()}`, {
-      method: 'GET',
-      cache: 'no-store',
-      headers: {
-        Accept: 'application/json, text/plain, */*',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      },
-      signal: controller.signal,
-    });
+  for (const host of OFFICIAL_WINGO_HISTORY_HOSTS) {
+    const startedAt = Date.now();
+    const url = `${host}${OFFICIAL_WINGO_HISTORY_PATH}?ts=${startedAt}`;
+    console.log(`[real/history] upstream_request_started host=${host}`);
 
-    if (!response.ok) {
-      throw new Error(`Live upstream HTTP ${response.status} ${response.statusText}`);
-    }
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
 
-    const payload = (await response.json()) as {
-      serviceTime?: number;
-      data?: {
-        list?: Array<{
-          issueNumber?: string;
-          number?: string | number;
-          color?: string;
-          premium?: string | number;
-          sum?: number;
-        }>;
-      };
-    };
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+        cache: 'no-store',
+        headers: {
+          Accept: 'application/json, text/plain, */*',
+          'Accept-Language': 'en-US,en;q=0.9',
+          Referer: `${host}/`,
+          'Cache-Control': 'no-cache',
+          Pragma: 'no-cache',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        },
+        signal: controller.signal,
+      });
 
-    const list = payload?.data?.list;
-    if (!Array.isArray(list) || list.length === 0) {
-      throw new Error('Live upstream returned an empty or invalid records list');
-    }
+      const responseMs = Date.now() - startedAt;
+      console.log(`[real/history] upstream_response_ms=${responseMs} host=${host}`);
+      console.log(`[real/history] upstream_status=${response.status} host=${host}`);
 
-    const dedupeMap = new Map<string, RealCompletedRecord>();
-    for (const item of list) {
-      const issue = String(item.issueNumber || '').trim();
-      const rawNum = item.number;
-      const num = typeof rawNum === 'number' ? rawNum : parseInt(String(rawNum ?? ''), 10);
-
-      if (issue && !isNaN(num) && num >= 0 && num <= 9) {
-        dedupeMap.set(issue, {
-          issueNumber: issue,
-          periodNumber: issue,
-          winningNumber: num,
-          size: num >= 5 ? 'Big' : 'Small',
-          colors: parseRealColors(item.color, num),
-          premium: String(item.premium ?? num),
-          sum: typeof item.sum === 'number' ? item.sum : 0,
-          completedAt: payload.serviceTime
-            ? new Date(payload.serviceTime).toISOString()
-            : new Date().toISOString(),
-          source: 'COMPLETED REAL HISTORY',
-        });
+      if (!response.ok) {
+        const bodySnippet = (await response.text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 120);
+        lastError = `HTTP ${response.status} ${response.statusText} from ${host}${bodySnippet ? ` (${bodySnippet})` : ''}`;
+        console.warn(`[real/history] upstream_failed host=${host} status=${response.status} response_ms=${responseMs} reason=${lastError}`);
+        continue;
       }
-    }
 
-    if (dedupeMap.size === 0) {
-      throw new Error('Live upstream response contained no valid draw records');
-    }
+      const rawText = await response.text();
+      let payload: {
+        serviceTime?: number;
+        data?: {
+          list?: Array<{
+            issueNumber?: string;
+            number?: string | number;
+            color?: string;
+            premium?: string | number;
+            sum?: number;
+          }>;
+        };
+      };
+      try {
+        payload = JSON.parse(rawText) as typeof payload;
+      } catch {
+        lastError = `${host} returned non-JSON body (${rawText.slice(0, 120).replace(/\s+/g, ' ')})`;
+        console.warn(`[real/history] upstream_failed host=${host} status=${response.status} reason=${lastError}`);
+        continue;
+      }
 
-    const records = sortRealRecordsDescending(Array.from(dedupeMap.values()));
-    return { records, totalCount: records.length };
-  } finally {
-    clearTimeout(timeoutId);
+      const list = payload?.data?.list;
+      if (!Array.isArray(list) || list.length === 0) {
+        lastError = `${host} returned an empty or invalid records list`;
+        console.warn(`[real/history] upstream_failed host=${host} status=${response.status} reason=${lastError}`);
+        continue;
+      }
+
+      const dedupeMap = new Map<string, RealCompletedRecord>();
+      for (const item of list) {
+        const issue = String(item.issueNumber || '').trim();
+        const rawNum = item.number;
+        const num = typeof rawNum === 'number' ? rawNum : parseInt(String(rawNum ?? ''), 10);
+
+        if (issue && !isNaN(num) && num >= 0 && num <= 9) {
+          dedupeMap.set(issue, {
+            issueNumber: issue,
+            periodNumber: issue,
+            winningNumber: num,
+            size: num >= 5 ? 'Big' : 'Small',
+            colors: parseRealColors(item.color, num),
+            premium: String(item.premium ?? num),
+            sum: typeof item.sum === 'number' ? item.sum : 0,
+            completedAt: payload.serviceTime
+              ? new Date(payload.serviceTime).toISOString()
+              : new Date().toISOString(),
+            source: 'COMPLETED REAL HISTORY',
+          });
+        }
+      }
+
+      if (dedupeMap.size === 0) {
+        lastError = `${host} response contained no valid draw records`;
+        console.warn(`[real/history] upstream_failed host=${host} status=${response.status} reason=${lastError}`);
+        continue;
+      }
+
+      const records = sortRealRecordsDescending(Array.from(dedupeMap.values()));
+      console.log(`[real/history] latest_period=${records[0].issueNumber} host=${host} count=${records.length}`);
+      return {
+        records,
+        totalCount: records.length,
+        host,
+        status: response.status,
+        responseMs,
+      };
+    } catch (err) {
+      const responseMs = Date.now() - startedAt;
+      lastError = `${host}: ${describeFetchError(err)}`;
+      console.warn(`[real/history] upstream_failed host=${host} response_ms=${responseMs} reason=${lastError}`);
+    } finally {
+      clearTimeout(timeoutId);
+    }
   }
+
+  throw new Error(`all official hosts failed -> ${lastError}`);
 }
 
 // GET /api/real/history
@@ -876,7 +957,7 @@ app.get('/api/real/history', async (req, res) => {
     if (!isNaN(parsed) && parsed > 0) limit = parsed;
   }
 
-  // 1. Live upstream fetch — works even if Render is completely offline
+  // 1. Live upstream fetch — primary source, works even if Render is completely offline
   try {
     const live = await fetchLiveOfficialHistory();
 
@@ -901,8 +982,10 @@ app.get('/api/real/history', async (req, res) => {
       error: null,
     });
   } catch (liveErr) {
-    const liveMsg = liveErr instanceof Error ? liveErr.message : String(liveErr);
-    console.warn('[real/history] Live upstream fetch failed, falling back to Supabase/in-memory:', liveMsg);
+    const liveMsg = describeFetchError(liveErr);
+    console.warn(
+      `[real/history] live_upstream_failed reason=${liveMsg}; falling back to Supabase/in-memory (last resort)`
+    );
   }
 
   // 2. Fallback: Supabase then in-memory (unchanged legacy behavior)
