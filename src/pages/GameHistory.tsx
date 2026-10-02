@@ -3,9 +3,8 @@ import { useResults } from '../context/ResultContext';
 import { HistoryTable } from '../components/history/HistoryTable';
 import { ResultChart } from '../components/history/ResultChart';
 import { StrategySummary } from '../components/history/StrategySummary';
-import { AlgorithmAnalyzer } from '../components/history/AlgorithmAnalyzer';
 import { RealHistoryView } from '../components/history/RealHistoryView';
-import { History, LineChart, Target, RefreshCw, Brain, Zap, Code2, X, Radio } from 'lucide-react';
+import { History, LineChart, Target, RefreshCw, Zap, Code2, X, Radio } from 'lucide-react';
 import { CollapsibleCard } from '../components/common/CollapsibleCard';
 
 import { useRealHistory } from '../context/RealHistoryContext';
@@ -23,7 +22,7 @@ export const GameHistory: React.FC = () => {
 
   const { importRealHistoryCurlJson } = useRealHistory();
 
-  const [activeTab, setActiveTab] = useState<'real' | 'history' | 'chart' | 'strategy' | 'analyzer'>('real');
+  const [activeTab, setActiveTab] = useState<'real' | 'history' | 'chart' | 'strategy'>('real');
   const [isImportModalOpen, setIsImportModalOpen] = useState<boolean>(false);
   const [rawJsonText, setRawJsonText] = useState<string>('');
   const [importing, setImporting] = useState<boolean>(false);
@@ -139,17 +138,6 @@ export const GameHistory: React.FC = () => {
           Follow Strategy
         </button>
 
-        <button
-          onClick={() => setActiveTab('analyzer')}
-          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-            activeTab === 'analyzer'
-              ? 'bg-[#E7B93F] text-[#020806] shadow'
-              : 'text-[#8D9B95] hover:text-[#F5F5F5]'
-          }`}
-        >
-          <Brain className="w-3.5 h-3.5 text-[#35B978]" />
-          Algorithm & Formula Analyzer
-        </button>
       </div>
 
       {/* Tab Panels */}
@@ -190,10 +178,6 @@ export const GameHistory: React.FC = () => {
 
       {activeTab === 'strategy' && (
         <StrategySummary results={filteredResults} />
-      )}
-
-      {activeTab === 'analyzer' && (
-        <AlgorithmAnalyzer />
       )}
 
       {/* Import Curl JSON Modal */}

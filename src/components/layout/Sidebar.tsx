@@ -4,6 +4,7 @@ import {
   LayoutDashboard,
   Sparkles,
   History,
+  Brain,
   Terminal,
   Code2,
   FileText,
@@ -26,6 +27,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose }) => {
     { name: 'Result Simulator', path: '/simulator', icon: Sparkles },
     { name: 'Game Client (Live UI)', path: '/game-client', icon: Smartphone },
     { name: 'Game History', path: '/history', icon: History },
+    { name: 'Adaptive Learning', path: '/adaptive-learning', icon: Brain },
     { name: 'API Console', path: '/api-console', icon: Terminal },
   ];
 

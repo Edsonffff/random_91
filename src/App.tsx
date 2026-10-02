@@ -7,6 +7,7 @@ import { Shell } from './components/layout/Shell';
 import { Dashboard } from './pages/Dashboard';
 import { ResultSimulator } from './pages/ResultSimulator';
 import { GameHistory } from './pages/GameHistory';
+import { AdaptiveLearningPage } from './pages/AdaptiveLearningPage';
 import { ApiConsolePage } from './pages/ApiConsolePage';
 import { ApiLogsPage } from './pages/ApiLogsPage';
 import { Configuration } from './pages/Configuration';
@@ -26,6 +27,7 @@ export function App() {
               <Route path="/" element={<Dashboard />} />
               <Route path="/simulator" element={<ResultSimulator />} />
               <Route path="/history" element={<GameHistory />} />
+              <Route path="/adaptive-learning" element={<AdaptiveLearningPage />} />
               <Route path="/game-client" element={<GameClientView />} />
               <Route path="/api-console" element={<ApiConsolePage />} />
               <Route path="/mock-api" element={<MockApiPage />} />
