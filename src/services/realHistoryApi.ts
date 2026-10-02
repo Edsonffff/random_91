@@ -336,7 +336,8 @@ export async function debugSupabaseBackend(): Promise<Record<string, unknown>> {
 }
 
 /**
- * Read persistent real history records from Supabase via server /api/real/history.
+ * Read the latest real WinGo 30S history via server /api/real/history.
+ * The server now serves this directly from the official source API (no Render dependency).
  */
 export async function fetchRealHistoryFromSupabase(
   limit: number | 'all' = 'all'

@@ -333,9 +333,9 @@ app.delete('/api/test/results/:id', (req, res) => {
 
 // ========================================================
 // REAL WINGO 30S IN-MEMORY STORE & STATUS ENDPOINTS
-// Note: Upstream (draw.ar-lottery01.com) blocks cloud datacenter/server IPs
-// with HTTP 403 (Cloudflare). Live real history is fetched directly by the browser.
-// /api/real/history remains as a fallback and status endpoint.
+// /api/real/history is now served directly from the official WinGo 30S source
+// API (server-side), so the history flow does NOT depend on the Render collector.
+// Supabase / in-memory stores remain only as fallback if the upstream is unreachable.
 // ========================================================
 
 export interface RealCompletedRecord {
@@ -776,8 +776,96 @@ app.get('/api/real/status', (req, res) => {
   });
 });
 
-// GET /api/real/history (Reads from Supabase with in-memory fallback)
+// Official WinGo 30S history source already used by this project (browser service
+// and collector). /api/real/history now reads directly from here, so the flow no
+// longer depends on any Render-collected copy.
+const OFFICIAL_WINGO_HISTORY_URL = 'https://draw.ar-lottery01.com/WinGo/WinGo_30S/GetHistoryIssuePage.json';
+
+/**
+ * Fetch the latest settled WinGo 30S draws straight from the official source API.
+ * Reuses the upstream endpoint already present in the project — no new API invented.
+ */
+async function fetchLiveOfficialHistory(): Promise<{ records: RealCompletedRecord[]; totalCount: number }> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 8000);
+
+  try {
+    const response = await fetch(`${OFFICIAL_WINGO_HISTORY_URL}?ts=${Date.now()}`, {
+      method: 'GET',
+      cache: 'no-store',
+      headers: {
+        Accept: 'application/json, text/plain, */*',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      },
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(`Live upstream HTTP ${response.status} ${response.statusText}`);
+    }
+
+    const payload = (await response.json()) as {
+      serviceTime?: number;
+      data?: {
+        list?: Array<{
+          issueNumber?: string;
+          number?: string | number;
+          color?: string;
+          premium?: string | number;
+          sum?: number;
+        }>;
+      };
+    };
+
+    const list = payload?.data?.list;
+    if (!Array.isArray(list) || list.length === 0) {
+      throw new Error('Live upstream returned an empty or invalid records list');
+    }
+
+    const dedupeMap = new Map<string, RealCompletedRecord>();
+    for (const item of list) {
+      const issue = String(item.issueNumber || '').trim();
+      const rawNum = item.number;
+      const num = typeof rawNum === 'number' ? rawNum : parseInt(String(rawNum ?? ''), 10);
+
+      if (issue && !isNaN(num) && num >= 0 && num <= 9) {
+        dedupeMap.set(issue, {
+          issueNumber: issue,
+          periodNumber: issue,
+          winningNumber: num,
+          size: num >= 5 ? 'Big' : 'Small',
+          colors: parseRealColors(item.color, num),
+          premium: String(item.premium ?? num),
+          sum: typeof item.sum === 'number' ? item.sum : 0,
+          completedAt: payload.serviceTime
+            ? new Date(payload.serviceTime).toISOString()
+            : new Date().toISOString(),
+          source: 'COMPLETED REAL HISTORY',
+        });
+      }
+    }
+
+    if (dedupeMap.size === 0) {
+      throw new Error('Live upstream response contained no valid draw records');
+    }
+
+    const records = sortRealRecordsDescending(Array.from(dedupeMap.values()));
+    return { records, totalCount: records.length };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+// GET /api/real/history
+// PRIMARY SOURCE: live official WinGo 30S API (Render is NOT involved anywhere).
+// Fallback: Supabase -> in-memory cache (legacy behavior, only if live fetch fails).
 app.get('/api/real/history', async (req, res) => {
+  // Strict no-cache: every request must return the latest available result
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  res.setHeader('Surrogate-Control', 'no-store');
+
   const limitParam = req.query.limit as string;
 
   let limit: number | 'all' = 'all';
@@ -788,6 +876,36 @@ app.get('/api/real/history', async (req, res) => {
     if (!isNaN(parsed) && parsed > 0) limit = parsed;
   }
 
+  // 1. Live upstream fetch — works even if Render is completely offline
+  try {
+    const live = await fetchLiveOfficialHistory();
+
+    // Refresh in-memory cache for fallback paths
+    const liveMap = new Map<string, RealCompletedRecord>();
+    for (const r of accumulatedRealHistory) liveMap.set(r.issueNumber, r);
+    for (const r of live.records) liveMap.set(r.issueNumber, r);
+    accumulatedRealHistory = sortRealRecordsDescending(Array.from(liveMap.values()));
+    lastRealFetchTime = Date.now();
+
+    const liveResults = limit === 'all' ? live.records : live.records.slice(0, limit);
+
+    return res.json({
+      success: true,
+      totalAvailable: live.totalCount,
+      returnedCount: liveResults.length,
+      lastUpdated: new Date().toISOString(),
+      lastSyncTime: lastSupabaseSyncTime,
+      storage: 'live-upstream',
+      source: 'COMPLETED REAL HISTORY',
+      results: liveResults,
+      error: null,
+    });
+  } catch (liveErr) {
+    const liveMsg = liveErr instanceof Error ? liveErr.message : String(liveErr);
+    console.warn('[real/history] Live upstream fetch failed, falling back to Supabase/in-memory:', liveMsg);
+  }
+
+  // 2. Fallback: Supabase then in-memory (unchanged legacy behavior)
   const supabaseClient = getSupabaseClient();
   if (supabaseClient) {
     const { records, totalCount, error } = await readFromSupabase(limit);
