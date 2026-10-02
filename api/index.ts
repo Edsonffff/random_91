@@ -1526,6 +1526,8 @@ app.get('/api/real/history/export', async (req, res) => {
 // Shape of a row in public.wingo_t7_signals as served by /api/real/t7-signals.
 // `stored_at` / `api_response_ms` are optional because they are supplied by the
 // always-on collector, not by the table's base columns.
+// The fields below come from the bdgtharu.com source and are optional so the
+// legacy WingoAI rows (which have NULL there) stay valid and unchanged.
 export interface StoredT7Signal {
   period_id: string;
   signal: 'BIG' | 'SMALL';
@@ -1534,6 +1536,17 @@ export interface StoredT7Signal {
   fetched_at: string;
   stored_at?: string;
   api_response_ms?: number;
+  color?: string | null;
+  status?: string | null;
+  source?: string | null;
+  algorithm_version?: number | null;
+  guard_applied?: boolean | null;
+  actual_number?: number | null;
+  actual_color?: string | null;
+  size_hit?: boolean | null;
+  color_hit?: boolean | null;
+  settled_at?: string | null;
+  prediction_created_at?: string | null;
 }
 
 // GET /api/real/t7-signals
@@ -1555,11 +1568,33 @@ app.get('/api/real/t7-signals', async (_req, res) => {
   const supabaseClient = getSupabaseClient();
   if (supabaseClient) {
     try {
-      const { data, error } = await supabaseClient
+      const T7_BASE_COLUMNS = 'period_id, signal, confidence, fetched_at, stored_at';
+      const T7_ALL_COLUMNS =
+        T7_BASE_COLUMNS +
+        ', color, status, source, algorithm_version, guard_applied, actual_number' +
+        ', actual_color, size_hit, color_hit, settled_at, prediction_created_at';
+
+      let t7Query: any = await supabaseClient
         .from('wingo_t7_signals')
-        .select('period_id, signal, confidence, fetched_at, stored_at')
+        .select(T7_ALL_COLUMNS)
         .order('period_id', { ascending: false })
         .limit(500);
+
+      // Graceful degradation: if the bdgtharu column migration has not been
+      // applied yet, fall back to the legacy columns so Test 7 still serves.
+      if (t7Query.error) {
+        console.warn(
+          '[T7 API] Extended column select failed (' + t7Query.error.message +
+          '). Falling back to legacy columns.'
+        );
+        t7Query = await supabaseClient
+          .from('wingo_t7_signals')
+          .select(T7_BASE_COLUMNS)
+          .order('period_id', { ascending: false })
+          .limit(500);
+      }
+
+      const { data, error } = t7Query;
 
       if (!error && Array.isArray(data)) {
         for (const row of data) {
@@ -1571,6 +1606,17 @@ app.get('/api/real/t7-signals', async (_req, res) => {
               confidence: row.confidence !== null ? Number(row.confidence) : null,
               fetched_at: row.fetched_at,
               stored_at: row.stored_at,
+              color: row.color ?? null,
+              status: row.status ?? null,
+              source: row.source ?? null,
+              algorithm_version: row.algorithm_version ?? null,
+              guard_applied: row.guard_applied ?? null,
+              actual_number: row.actual_number ?? null,
+              actual_color: row.actual_color ?? null,
+              size_hit: row.size_hit ?? null,
+              color_hit: row.color_hit ?? null,
+              settled_at: row.settled_at ?? null,
+              prediction_created_at: row.prediction_created_at ?? null,
             });
           }
         }
@@ -1612,6 +1658,17 @@ app.get('/api/real/t7-signals', async (_req, res) => {
           fetched_at?: string;
           stored_at?: string;
           api_response_ms?: number;
+          color?: string | null;
+          status?: string | null;
+          source?: string | null;
+          algorithm_version?: number | null;
+          guard_applied?: boolean | null;
+          actual_number?: number | null;
+          actual_color?: string | null;
+          size_hit?: boolean | null;
+          color_hit?: boolean | null;
+          settled_at?: string | null;
+          prediction_created_at?: string | null;
         }>;
       };
       if (cJson?.timing) collectorTiming = cJson.timing;
@@ -1630,6 +1687,17 @@ app.get('/api/real/t7-signals', async (_req, res) => {
               fetched_at: s.fetched_at,
               stored_at: s.stored_at,
               api_response_ms: s.api_response_ms,
+              color: s.color ?? null,
+              status: s.status ?? null,
+              source: s.source ?? null,
+              algorithm_version: s.algorithm_version ?? null,
+              guard_applied: s.guard_applied ?? null,
+              actual_number: s.actual_number ?? null,
+              actual_color: s.actual_color ?? null,
+              size_hit: s.size_hit ?? null,
+              color_hit: s.color_hit ?? null,
+              settled_at: s.settled_at ?? null,
+              prediction_created_at: s.prediction_created_at ?? null,
             });
           }
         }

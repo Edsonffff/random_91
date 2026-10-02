@@ -273,12 +273,13 @@ export function computeTest6(
   };
 }
 
-// ─── Test 7 — WingoAI External Signal ────────────────────────────────────────
-// Source: https://server.wingoaibot.com/signals/current?room=30sec&type=standard
+// ─── Test 7 — External Prediction Source ─────────────────────────────────────
+// Source: https://bdgtharu.com/api.php  (server-side only)
 //
-// The backend collector fetches the WingoAI signal each polling cycle and stores
-// it in Supabase (wingo_t7_signals).  The frontend reads those stored signals via
-// GET /api/real/t7-signals and passes them here as a Map<period_id → WingoAIT7Signal>.
+// The backend collector fetches the external prediction each polling cycle and
+// stores it in Supabase (wingo_t7_signals).  The frontend reads those stored
+// signals via GET /api/real/t7-signals and passes them here as a
+// Map<period_id → WingoAIT7Signal>.  The browser never calls bdgtharu.com.
 //
 // Rules:
 //  · Only periods where a stored signal exists are evaluated.
@@ -286,7 +287,7 @@ export function computeTest6(
 //  · signal 'SMALL' → predictedSize = 'Small'
 //  · Periods with no stored signal → noSignal = true (excluded from accuracy & Adaptive Learning)
 //
-// Authentication: The Bearer token is STORED ONLY IN THE BACKEND COLLECTOR ENV.
+// Authentication: Any credential is STORED ONLY IN THE BACKEND COLLECTOR ENV.
 // It is NEVER sent to the frontend, logged, or stored in Supabase.
 
 export interface WingoAIT7Signal {
@@ -295,6 +296,21 @@ export interface WingoAIT7Signal {
   confidence: number | null;
   lucky_number?: number | null;
   fetched_at: string;
+  // Fields supplied by the bdgtharu.com source. All optional so the legacy
+  // WingoAI rows (NULL for these) keep working untouched. The hit/miss
+  // statistics below are still computed exactly as before, from `signal`
+  // compared against the actual draw — these fields are recorded metadata.
+  color?: string | null;
+  status?: string | null;
+  source?: string | null;
+  algorithm_version?: number | null;
+  guard_applied?: boolean | null;
+  actual_number?: number | null;
+  actual_color?: string | null;
+  size_hit?: boolean | null;
+  color_hit?: boolean | null;
+  settled_at?: string | null;
+  prediction_created_at?: string | null;
 }
 
 export function computeTest7(

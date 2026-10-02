@@ -12,9 +12,17 @@ const RETRY_DELAY_MS = parseInt(process.env.RETRY_DELAY_MS || '10000', 10);
 const PORT = parseInt(process.env.PORT || '10000', 10);
 const HOST = '0.0.0.0';
 
-// WingoAI signal API — token is ONLY stored here on the backend, never in frontend
-const WINGOAI_API_TOKEN = process.env.WINGOAI_API_TOKEN || '';
-const WINGOAI_SIGNAL_URL = 'https://server.wingoaibot.com/signals/current?room=30sec&type=standard';
+// ─── Test 7 prediction source: https://bdgtharu.com/api.php ─────────────────
+// This REPLACES the old WingoAI source (https://server.wingoaibot.com/signals/current).
+// The request is made HERE, server-side. The React frontend never contacts this
+// host — it only reads what this collector stores in Supabase.
+// Any credential lives ONLY in the environment and is never logged.
+const T7_API_BASE_URL = 'https://bdgtharu.com/api.php';
+const T7_API_TOKEN = process.env.BDGTHARU_API_TOKEN || '';
+
+// Timeout for a single T7 request. The polling cadence (5s) stays
+// separate: a slow upstream simply makes a cycle overrun, it does not stack.
+const T7_REQUEST_TIMEOUT_MS = 15000;
 const OFFICIAL_WINGO_HISTORY_URL = 'https://draw.ar-lottery01.com/WinGo/WinGo_30S/GetHistoryIssuePage.json';
 
 function getTimestamp() {
@@ -70,172 +78,397 @@ function formatRecordForSupabase(item, serviceTime, timeType = 'iso') {
 }
 
 /**
- * Timing & Cache state for WingoAI signals
+ * Timing & dedup state for Test 7 (bdgtharu.com) predictions.
  */
-const WINGOAI_POLL_INTERVAL_MS = 5000;
-let isWingoAIPolling = false;
-const knownWingoAIPeriods = new Set();
+const T7_POLL_INTERVAL_MS = 5000;
+let isT7Polling = false;
+const knownT7Periods = new Set();
 const inMemoryT7Signals = new Map();
-let latestWingoAITiming = null;
+let latestT7Timing = null;
+// Flipped once if the bdgtharu column migration has not been applied yet, so the
+// actionable hint is logged a single time instead of on every poll.
+let t7SchemaWarned = false;
+let t7WriteSchemaWarned = false;
 
-let wingoSignalsTableMissing = false;
+// Columns added by supabase/migrations/20261002_wingo_t7_signals_bdgtharu.sql
+const T7_EXTRA_COLUMNS = [
+  'color',
+  'status',
+  'source',
+  'algorithm_version',
+  'guard_applied',
+  'actual_number',
+  'actual_color',
+  'size_hit',
+  'color_hit',
+  'settled_at',
+  'prediction_created_at',
+];
 
-async function storeWingoAISignal(supabaseClient, signalRow) {
+/**
+ * Map one bdgtharu.com prediction/history entry onto a wingo_t7_signals row.
+ * Returns null when the entry is unusable (missing issue or non BIG/SMALL size),
+ * which is how an empty/garbled prediction is tolerated without crashing.
+ *
+ * The upstream `size`/`color`/`confidence`/`status` are recorded EXACTLY as
+ * returned. No prediction is ever derived, recomputed or invented here.
+ */
+function normalizeT7Entry(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+
+  const periodId = String(raw.issue ?? '').trim();
+  const size = String(raw.size ?? '').trim().toUpperCase();
+  if (!periodId || (size !== 'BIG' && size !== 'SMALL')) return null;
+
+  const num = (v) => {
+    const n = typeof v === 'string' ? Number(v) : v;
+    return typeof n === 'number' && Number.isFinite(n) ? n : null;
+  };
+  const bool = (v) => (typeof v === 'boolean' ? v : null);
+  // Upstream timestamps are epoch milliseconds.
+  const iso = (v) => (num(v) !== null ? new Date(num(v)).toISOString() : null);
+  const str = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+
+  return {
+    period_id: periodId,
+    signal: size,
+    confidence: num(raw.confidence),
+    color: str(raw.color) ? str(raw.color).toUpperCase() : null,
+    status: str(raw.status) ? str(raw.status).toLowerCase() : null,
+    source: str(raw.source),
+    algorithm_version: num(raw.algorithmVersion),
+    guard_applied: bool(raw.guardApplied),
+    // The ACTUAL outcome — never conflated with the prediction above.
+    actual_number: num(raw.actualNumber),
+    actual_color: str(raw.actualColor),
+    size_hit: bool(raw.sizeHit),
+    color_hit: bool(raw.colorHit),
+    settled_at: iso(raw.settledAt),
+    prediction_created_at: iso(raw.createdAt),
+  };
+}
+
+async function storeT7Signal(supabaseClient, signalRow) {
+  // `upsert ... onConflict: 'period_id'` makes a duplicate row impossible even
+  // if the in-memory dedup set is stale, because period_id is the primary key.
   const { error } = await supabaseClient
     .from('wingo_t7_signals')
     .upsert([signalRow], { onConflict: 'period_id' });
 
   if (error) {
-    logError(`Failed to store WingoAI signal for period ${signalRow.period_id}: ${error.message}`);
+    const missingColumn =
+      error.code === '42703' ||
+      /column .* does not exist/i.test(error.message) ||
+      /Could not find the '.*' column/i.test(error.message);
+
+    if (missingColumn) {
+      // Log the cause once, not once per row per poll.
+      if (!t7WriteSchemaWarned) {
+        t7WriteSchemaWarned = true;
+        logError(
+          '[T7] Supabase is missing the bdgtharu columns, so nothing is being stored. Apply ' +
+            'supabase/migrations/20261002_wingo_t7_signals_bdgtharu.sql once. ' +
+            'Polling continues and will start persisting immediately after.'
+        );
+      }
+    } else {
+      logError(`Failed to store T7 prediction for period ${signalRow.period_id}: ${error.message}`);
+    }
     return false;
   }
   return true;
 }
 
 /**
- * Dedicated WingoAI signal worker function.
- * Implements non-overlapping 5s fast polling, strict logging, and deduplication.
+ * Persist a single bdgtharu entry.
+ *  · unknown issue        -> insert (new prediction, or backfill from history[])
+ *  · known, still pending -> left alone (no duplicate write, original capture
+ *                            timestamps preserved)
+ *  · pending -> settled   -> updated with the upstream settlement
  */
-async function fetchAndProcessWingoAISignal(supabaseClient) {
-  if (isWingoAIPolling) return;
-  isWingoAIPolling = true;
+async function handleT7Entry(supabaseClient, entry, responseTime, origin) {
+  const existing = inMemoryT7Signals.get(entry.period_id);
+
+  if (!existing) {
+    const storedAt = new Date().toISOString();
+    // For a fresh prediction prediction_created_at is ~now, so fetched_at stays
+    // an accurate capture time. For backfilled history it is the true age.
+    const fetchedAt = entry.prediction_created_at || storedAt;
+
+    const signalRecord = {
+      ...entry,
+      fetched_at: fetchedAt,
+      stored_at: storedAt,
+    };
+
+    const storedOk = await storeT7Signal(supabaseClient, signalRecord);
+    if (!storedOk) return;
+
+    knownT7Periods.add(entry.period_id);
+    inMemoryT7Signals.set(entry.period_id, {
+      ...signalRecord,
+      wingoai_response_ms: responseTime,
+      collector_latency_ms: Math.max(0, Date.parse(storedAt) - Date.parse(fetchedAt)),
+    });
+
+    if (origin === 'prediction') {
+      latestT7Timing = {
+        fetched_at: fetchedAt,
+        period_id: entry.period_id,
+        wingoai_response_ms: responseTime,
+        api_response_ms: responseTime,
+        signal: entry.signal,
+        stored_at: storedAt,
+        collector_latency_ms: Math.max(0, Date.parse(storedAt) - Date.parse(fetchedAt)),
+      };
+    }
+
+    log(
+      `[T7 SUPABASE]\nissue=${entry.period_id}\nNEW -> inserted (${origin}, status=${entry.status ?? 'n/a'})`
+    );
+    return;
+  }
+
+  const existingStatus = existing.status ?? null;
+  const nextStatus = entry.status ?? null;
+  const isSettledNow = nextStatus !== null && nextStatus !== 'pending';
+  const wasPending = existingStatus === null || existingStatus === 'pending';
+
+  // Settle a pending record, or refresh it if status changed. A settled record
+  // is never overwritten by a pending one.
+  const shouldUpdate = (wasPending && isSettledNow) || nextStatus !== existingStatus;
+  if (!shouldUpdate) return;
+
+  const storedAt = new Date().toISOString();
+  const settleRow = {
+    period_id: entry.period_id,
+    signal: entry.signal,
+    confidence: entry.confidence,
+    color: entry.color,
+    status: entry.status,
+    source: entry.source,
+    algorithm_version: entry.algorithm_version,
+    guard_applied: entry.guard_applied,
+    actual_number: entry.actual_number,
+    actual_color: entry.actual_color,
+    size_hit: entry.size_hit,
+    color_hit: entry.color_hit,
+    settled_at: entry.settled_at,
+    prediction_created_at: entry.prediction_created_at,
+    // fetched_at must be sent on EVERY upsert: this column is NOT NULL with no
+    // DEFAULT, and PostgREST evaluates the INSERT branch before conflict
+    // handling, so omitting it fails even for a pure update. We write the
+    // EXISTING value back, which preserves the original capture time exactly.
+    fetched_at: existing.fetched_at || entry.prediction_created_at || storedAt,
+    stored_at: storedAt,
+  };
+
+  const storedOk = await storeT7Signal(supabaseClient, settleRow);
+  if (!storedOk) return;
+
+  inMemoryT7Signals.set(entry.period_id, { ...existing, ...settleRow });
+
+  log(
+    `[T7 SUPABASE]\nissue=${entry.period_id}\nUPDATED ${existingStatus ?? 'pending'} -> ${nextStatus}` +
+      `\nactual_number=${entry.actual_number ?? 'n/a'} actual_color=${entry.actual_color ?? 'n/a'}` +
+      `\nsizeHit=${entry.size_hit} colorHit=${entry.color_hit}`
+  );
+}
+
+/**
+ * Test 7 worker: fetch https://bdgtharu.com/api.php?_=<cache-buster>, store the
+ * prediction, backfill history[], and settle pending rows. Tolerates timeout,
+ * HTTP errors, malformed JSON, an empty prediction and network failure without
+ * ever throwing out of the polling loop.
+ */
+async function fetchAndProcessT7Prediction(supabaseClient) {
+  if (isT7Polling) return;
+  isT7Polling = true;
 
   try {
     const startTime = Date.now();
-    log('[WINGOAI] Request started');
+    // The trailing parameter is cache-busting ONLY.
+    const requestUrl = `${T7_API_BASE_URL}?_=${Date.now()}`;
+    log(`[T7] API request -> ${T7_API_BASE_URL}?_=<cache-buster>`);
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 6000);
+    let timedOut = false;
+    const timeoutId = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, T7_REQUEST_TIMEOUT_MS);
 
-    const headers = { 'Accept': 'application/json' };
-    if (WINGOAI_API_TOKEN) {
-      headers['Authorization'] = `Bearer ${WINGOAI_API_TOKEN}`;
+    const headers = { Accept: 'application/json' };
+    if (T7_API_TOKEN) {
+      headers['Authorization'] = `Bearer ${T7_API_TOKEN}`;
     }
 
-    const response = await fetch(WINGOAI_SIGNAL_URL, {
-      method: 'GET',
-      headers,
-      signal: controller.signal,
-    });
+    // NOTE: never log `headers` — they may contain T7_API_TOKEN.
+    let response;
+    try {
+      response = await fetch(requestUrl, { method: 'GET', headers, signal: controller.signal });
+    } catch (fetchErr) {
+      clearTimeout(timeoutId);
+      const elapsedMs = Date.now() - startTime;
+      const errName = fetchErr instanceof Error ? fetchErr.name : 'UnknownError';
+      const errMsg = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
+      const cause = fetchErr instanceof Error ? fetchErr.cause : undefined;
+      const causeMsg =
+        cause instanceof Error ? `${cause.name}: ${cause.message}` : cause ? String(cause) : 'none';
+
+      const failureKind = timedOut
+        ? 'timeout/abort'
+        : errName === 'AbortError'
+        ? 'aborted'
+        : 'network/unreachable';
+
+      logError(
+        `[T7] API request FAILED kind=${failureKind}\n` +
+          `url=${T7_API_BASE_URL}?_=<cache-buster>\n` +
+          `elapsed_ms=${elapsedMs}\ntimeout_ms=${T7_REQUEST_TIMEOUT_MS}\n` +
+          `http_status=none (no response headers received)\n` +
+          `error=${errName}: ${errMsg}\ncause=${causeMsg}`
+      );
+      return;
+    }
     clearTimeout(timeoutId);
 
     const responseTime = Date.now() - startTime;
-    log('[WINGOAI] Response received');
-    log(`[WINGOAI] Response time: ${responseTime} ms`);
+    log(`[T7] HTTP ${response.status} ${response.statusText || ''}`.trimEnd() + ` in ${responseTime} ms`);
 
     if (!response.ok) {
-      logError(`[WINGOAI] API returned HTTP ${response.status}`);
+      const bodySnippet = await response
+        .text()
+        .then((t) => t.replace(/\s+/g, ' ').slice(0, 300))
+        .catch(() => '<body unreadable>');
+      logError(
+        `[T7] API returned HTTP ${response.status}\n` +
+          `status_text=${response.statusText || 'none'}\nresponse_ms=${responseTime}\nbody=${bodySnippet}`
+      );
       return;
     }
 
-    const data = await response.json();
-    if (
-      data?.signalReady !== true ||
-      (data?.signal !== 'BIG' && data?.signal !== 'SMALL') ||
-      !data?.periodId
-    ) {
+    let data;
+    try {
+      data = await response.json();
+    } catch (jsonErr) {
+      logError(
+        `[T7] Malformed JSON in response (${jsonErr instanceof Error ? jsonErr.message : String(jsonErr)})`
+      );
       return;
     }
 
-    const periodId = String(data.periodId).trim();
-    const signal = String(data.signal).toUpperCase();
-    const confidence = typeof data.confidence === 'number' ? data.confidence : null;
-    const fetchedAt = new Date().toISOString();
+    const prediction = normalizeT7Entry(data?.prediction);
+    if (!prediction) {
+      log('[T7] Empty or unusable prediction in response — skipped (nothing stored)');
+      return;
+    }
 
-    // Deduplicate Supabase writes: Only insert if not already written
-    if (!knownWingoAIPeriods.has(periodId)) {
-      const storedAt = new Date().toISOString();
-      const collectorLatencyMs = Math.max(0, Date.parse(storedAt) - Date.parse(fetchedAt));
-      const signalRecord = {
-        period_id: periodId,
-        signal,
-        confidence,
-        fetched_at: fetchedAt,
-        stored_at: storedAt,
-      };
+    log('[T7] Prediction received');
+    log(`[T7] Issue: ${prediction.period_id}`);
+    log(`[T7] Size: ${prediction.signal}`);
+    log(`[T7] Color: ${prediction.color ?? 'n/a'}`);
+    log(`[T7] Confidence: ${prediction.confidence ?? 'n/a'}`);
+    log(`[T7] Status: ${prediction.status ?? 'n/a'}`);
 
-      const storedOk = await storeWingoAISignal(supabaseClient, signalRecord);
-      if (storedOk) {
-        knownWingoAIPeriods.add(periodId);
-        inMemoryT7Signals.set(periodId, {
-          ...signalRecord,
-          wingoai_response_ms: responseTime,
-          collector_latency_ms: collectorLatencyMs,
-        });
-        latestWingoAITiming = {
-          fetched_at: fetchedAt,
-          period_id: periodId,
-          wingoai_response_ms: responseTime,
-          api_response_ms: responseTime,
-          signal,
-          stored_at: storedAt,
-          collector_latency_ms: collectorLatencyMs,
-        };
+    // 1. The live prediction. A new one is recognised purely by issue change.
+    await handleT7Entry(supabaseClient, prediction, responseTime, 'prediction');
 
-        // Diagnostic logging matching requirement
-        log(`[T7 COLLECTOR]\nperiod=${periodId}\nwingoai_response=${responseTime} ms\nfetched_at=${fetchedAt}\nstored_at=${storedAt}\ncollector_latency_ms=${collectorLatencyMs}`);
-        log(`[T7 SUPABASE]\nperiod=${periodId}\nNEW → inserted`);
-      }
-    } else {
-      // Period already stored: preserve original timestamps, skip duplicate insert
-      log(`[T7 COLLECTOR]\nperiod=${periodId}\nsignal=${signal}`);
-      log(`[T7 SUPABASE]\nperiod=${periodId}\nalready exists → skipped`);
+    // 2. history[] — backfills older issues and settles rows still pending.
+    const history = Array.isArray(data?.history) ? data.history : [];
+    for (const raw of history) {
+      const entry = normalizeT7Entry(raw);
+      if (!entry) continue;
+      await handleT7Entry(supabaseClient, entry, responseTime, 'history');
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    logError(`[WINGOAI] Cycle error: ${msg}`);
+    logError(`[T7] Cycle error: ${msg}`);
   } finally {
-    isWingoAIPolling = false;
+    isT7Polling = false;
   }
 }
 
 async function loadExistingT7Signals(supabaseClient) {
+  const baseSelect = 'period_id, signal, confidence, fetched_at, stored_at';
+  const fullSelect = `${baseSelect}, ${T7_EXTRA_COLUMNS.join(', ')}`;
+
+  let data = null;
+  let error = null;
+
   try {
-    const { data, error } = await supabaseClient
+    ({ data, error } = await supabaseClient
       .from('wingo_t7_signals')
-      .select('period_id, signal, confidence, fetched_at, stored_at')
+      .select(fullSelect)
       .order('period_id', { ascending: false })
-      .limit(500);
-
-    if (error) {
-      logError(`Failed to preload existing T7 signals: ${error.message}`);
-      return;
-    }
-
-    if (Array.isArray(data)) {
-      for (const row of data) {
-        if (row.period_id) {
-          const pid = String(row.period_id).trim();
-          knownWingoAIPeriods.add(pid);
-          inMemoryT7Signals.set(pid, {
-            period_id: pid,
-            signal: row.signal,
-            confidence: row.confidence !== null ? Number(row.confidence) : null,
-            fetched_at: row.fetched_at,
-            stored_at: row.stored_at,
-          });
-        }
-      }
-      log(`Preloaded ${data.length} existing Test 7 signals from public.wingo_t7_signals into collector memory.`);
-    }
+      .limit(500));
   } catch (err) {
-    logError(`Error preloading T7 signals: ${err.message}`);
+    error = err;
+  }
+
+  // Graceful degradation: if the bdgtharu columns have not been added yet, fall
+  // back to the legacy column set so the collector still boots and serves.
+  if (error) {
+    if (!t7SchemaWarned) {
+      t7SchemaWarned = true;
+      logError(
+        `[T7] Full column select failed (${error.message}). Falling back to legacy columns. ` +
+          'Apply supabase/migrations/20261002_wingo_t7_signals_bdgtharu.sql to persist the new fields.'
+      );
+    }
+    ({ data, error } = await supabaseClient
+      .from('wingo_t7_signals')
+      .select(baseSelect)
+      .order('period_id', { ascending: false })
+      .limit(500));
+  }
+
+  if (error) {
+    logError(`Failed to preload existing T7 signals: ${error.message}`);
+    return;
+  }
+
+  if (Array.isArray(data)) {
+    for (const row of data) {
+      if (!row.period_id) continue;
+      const pid = String(row.period_id).trim();
+      knownT7Periods.add(pid);
+      inMemoryT7Signals.set(pid, {
+        period_id: pid,
+        signal: row.signal,
+        confidence: row.confidence !== null ? Number(row.confidence) : null,
+        fetched_at: row.fetched_at,
+        stored_at: row.stored_at,
+        color: row.color ?? null,
+        status: row.status ?? null,
+        source: row.source ?? null,
+        algorithm_version: row.algorithm_version ?? null,
+        guard_applied: row.guard_applied ?? null,
+        actual_number: row.actual_number ?? null,
+        actual_color: row.actual_color ?? null,
+        size_hit: row.size_hit ?? null,
+        color_hit: row.color_hit ?? null,
+        settled_at: row.settled_at ?? null,
+        prediction_created_at: row.prediction_created_at ?? null,
+      });
+    }
+    log(`Preloaded ${data.length} existing Test 7 signals from public.wingo_t7_signals into collector memory.`);
   }
 }
 
-async function startWingoAIPolling(supabaseClient) {
-  log(`[WINGOAI] Starting dedicated fast polling worker (interval: ${WINGOAI_POLL_INTERVAL_MS / 1000}s)...`);
+async function startT7Polling(supabaseClient) {
+  log(`[T7] Starting prediction worker against ${T7_API_BASE_URL} (interval: ${T7_POLL_INTERVAL_MS / 1000}s)...`);
   while (running) {
     try {
-      await fetchAndProcessWingoAISignal(supabaseClient);
+      await fetchAndProcessT7Prediction(supabaseClient);
     } catch (err) {
-      logError(`[WINGOAI] Polling worker unhandled error: ${err.message}`);
+      logError(`[T7] Polling worker unhandled error: ${err.message}`);
     }
     if (running) {
-      await sleep(WINGOAI_POLL_INTERVAL_MS);
+      await sleep(T7_POLL_INTERVAL_MS);
     }
   }
-  log('[WINGOAI] Polling worker stopped.');
+  log('[T7] Polling worker stopped.');
 }
 
 // ─── COLLECTOR & HEALTH SERVER STATE ──────────────────────────────────────────
@@ -277,11 +510,11 @@ const healthServer = http.createServer((req, res) => {
   // POST /reset or /api/reset or /api/real/reset or /real/reset — resets in-memory knownPeriods and T7 signals
   if (req.method === 'POST' && (urlPath === '/reset' || urlPath === '/api/reset' || urlPath === '/api/real/reset' || urlPath === '/real/reset')) {
     const previousCount = knownPeriods.size;
-    const previousT7Count = knownWingoAIPeriods.size;
+    const previousT7Count = knownT7Periods.size;
     knownPeriods.clear();
-    knownWingoAIPeriods.clear();
+    knownT7Periods.clear();
     inMemoryT7Signals.clear();
-    latestWingoAITiming = null;
+    latestT7Timing = null;
     log(`[Collector Reset] In-memory known periods cleared (${previousCount} -> 0) and T7 signals cleared (${previousT7Count} -> 0). Collector continuing 24/7 polling.`);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(
@@ -323,7 +556,7 @@ const healthServer = http.createServer((req, res) => {
       latest_fetched_at: latest?.fetched_at || null,
       latest_stored_at: latest?.stored_at || null,
       collector_latency_ms: collectorLatency,
-      api_response_ms: latestWingoAITiming?.api_response_ms ?? latest?.wingoai_response_ms ?? collectorLatency,
+      api_response_ms: latestT7Timing?.api_response_ms ?? latest?.wingoai_response_ms ?? collectorLatency,
       api_latency_ms: apiLatencyMs,
       request_started: requestStarted,
       response_generated: responseGenerated,
@@ -354,8 +587,8 @@ const healthServer = http.createServer((req, res) => {
         dbConnected: isDbConnected,
         pollingActive: isPollingActive,
         totalKnownPeriods: knownPeriods.size,
-        wingoAiLastPeriod: latestWingoAITiming?.period_id || null,
-        wingoAiLatencyMs: latestWingoAITiming?.api_response_ms || null,
+        wingoAiLastPeriod: latestT7Timing?.period_id || null,
+        wingoAiLatencyMs: latestT7Timing?.api_response_ms || null,
         lastCycleStatus,
         lastFetchTime,
         lastInsertedPeriod,
@@ -467,10 +700,10 @@ async function startCollector() {
   // Preload existing Test 7 signals from public.wingo_t7_signals into collector memory
   await loadExistingT7Signals(supabaseClient);
 
-  // Dedicated background fast 5-second WingoAI polling worker
-  startWingoAIPolling(supabaseClient).catch((wErr) => {
+  // Dedicated background 5-second Test 7 prediction worker (bdgtharu.com)
+  startT7Polling(supabaseClient).catch((wErr) => {
     const wMsg = wErr instanceof Error ? wErr.message : String(wErr);
-    logError(`[WINGOAI] Background poller error: ${wMsg}`);
+    logError(`[T7] Background poller error: ${wMsg}`);
   });
 
   log(`Starting 24/7 continuous polling loop (interval: ${POLL_INTERVAL_MS / 1000}s)...`);
@@ -502,17 +735,17 @@ async function startCollector() {
         }
       }
 
-      // If knownWingoAIPeriods has entries, verify Supabase wingo_t7_signals was not reset to 0
-      if (knownWingoAIPeriods.size > 0) {
+      // If knownT7Periods has entries, verify Supabase wingo_t7_signals was not reset to 0
+      if (knownT7Periods.size > 0) {
         try {
           const { count: currentT7Count, error: t7CheckErr } = await supabaseClient
             .from('wingo_t7_signals')
             .select('period_id', { count: 'exact', head: true });
           if (!t7CheckErr && currentT7Count === 0) {
-            log(`[Database Reset Detected] Supabase wingo_t7_signals table is empty. Cleared ${knownWingoAIPeriods.size} cached T7 periods.`);
-            knownWingoAIPeriods.clear();
+            log(`[Database Reset Detected] Supabase wingo_t7_signals table is empty. Cleared ${knownT7Periods.size} cached T7 periods.`);
+            knownT7Periods.clear();
             inMemoryT7Signals.clear();
-            latestWingoAITiming = null;
+            latestT7Timing = null;
           }
         } catch {
           // Non-fatal check
