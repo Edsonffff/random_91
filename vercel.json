@@ -1,4 +1,14 @@
 {
+  "crons": [
+    {
+      "path": "/api/real/collect",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/real/collect/backfill",
+      "schedule": "*/5 * * * *"
+    }
+  ],
   "rewrites": [
     {
       "source": "/api",

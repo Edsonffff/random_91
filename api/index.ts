@@ -959,11 +959,173 @@ async function getExistingIssues(client: SupabaseClient, issues: string[]): Prom
   return existing;
 }
 
+// ========================================================
+// BACKGROUND COLLECTOR WORKER
+// Invoked by Vercel Cron -> writes new WinGo 30S periods into
+// public.real_wingo_30s_history. Runs entirely server-side, so collection
+// continues with the browser fully closed.
+//
+// Security: Vercel Cron automatically sends `Authorization: Bearer $CRON_SECRET`
+// when the CRON_SECRET environment variable is set. Requests without a valid
+// secret are rejected, so this endpoint cannot be abused as a free public
+// polling endpoint (each accepted hit costs an upstream fetch plus a DB write).
+// ========================================================
+
+/**
+ * Constant-time-ish bearer check against CRON_SECRET. Fails CLOSED when the
+ * secret is not configured, so a missing env var can never open the endpoint.
+ */
+function isAuthorizedWorkerRequest(req: express.Request): boolean {
+  const secret = process.env.CRON_SECRET;
+  if (!secret || secret.length === 0) return false;
+
+  const header = req.headers.authorization || '';
+  const match = /^Bearer\s+(.*)$/i.exec(header.trim());
+  const provided = (match?.[1] || '').trim();
+  if (provided.length !== secret.length) return false;
+
+  let diff = 0;
+  for (let i = 0; i < provided.length; i++) {
+    diff |= provided.charCodeAt(i) ^ secret.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
+interface CollectRunResult {
+  success: boolean;
+  upstreamLatestPeriod: string | null;
+  upstreamCount: number;
+  inserted: number;
+  duplicates: number;
+  tableTotal: number | null;
+  durationMs: number;
+  error: string | null;
+}
+
+/**
+ * One idempotent collection cycle: fetch upstream -> diff against stored
+ * periods -> insert only the new ones. Never deletes or rewrites history.
+ * Safe to run every minute; the same period always resolves to one row.
+ */
+async function runCollectOnce(): Promise<CollectRunResult> {
+  const startedAt = Date.now();
+  const durationMs = () => Date.now() - startedAt;
+
+  console.log('[worker] started');
+
+  const client = getSupabaseClient();
+  if (!client) {
+    const error = 'SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is not configured on the server';
+    console.error(`[worker] failed reason=${error}`);
+    return {
+      success: false,
+      upstreamLatestPeriod: null,
+      upstreamCount: 0,
+      inserted: 0,
+      duplicates: 0,
+      tableTotal: null,
+      durationMs: durationMs(),
+      error,
+    };
+  }
+
+  // 1. Fetch the newest settled draws from the official upstream source
+  let live: LiveUpstreamResult;
+  try {
+    live = await fetchLiveOfficialHistory();
+  } catch (err) {
+    const error = describeFetchError(err);
+    console.error(`[worker] upstream_failed reason=${error}`);
+    return {
+      success: false,
+      upstreamLatestPeriod: null,
+      upstreamCount: 0,
+      inserted: 0,
+      duplicates: 0,
+      tableTotal: null,
+      durationMs: durationMs(),
+      error,
+    };
+  }
+
+  const upstreamLatestPeriod = live.records[0]?.issueNumber || null;
+  const upstreamCount = live.records.length;
+  console.log(`[worker] upstream_latest_period=${upstreamLatestPeriod}`);
+  console.log(`[worker] upstream_count=${upstreamCount}`);
+
+  // 2. Dedupe against what is already persisted
+  const issues = live.records.map((r) => r.issueNumber);
+  const existing = await getExistingIssues(client, issues);
+  const newRecords = live.records.filter((r) => !existing.has(r.issueNumber));
+  const duplicates = live.records.length - newRecords.length;
+
+  // 3. Insert only the newly discovered periods. The upsert conflict target
+  //    (game_code,issue_number) is the second line of defence if two cron
+  //    invocations overlap, so duplicates cannot be created either way.
+  let inserted = 0;
+  if (newRecords.length > 0) {
+    const syncRes = await syncRecordsToSupabase(newRecords);
+    if (syncRes.success) {
+      inserted = newRecords.length;
+      lastSupabaseSyncTime = new Date().toISOString();
+    } else {
+      console.error('[worker] supabase_upsert_failed', syncRes.error);
+    }
+  }
+
+  const { count } = await client
+    .from('real_wingo_30s_history')
+    .select('issue_number', { count: 'exact', head: true })
+    .eq('game_code', 'WinGo_30S');
+
+  console.log(`[worker] inserted=${inserted}`);
+  console.log(`[worker] duplicates=${duplicates}`);
+  console.log('[worker] completed');
+
+  return {
+    success: true,
+    upstreamLatestPeriod,
+    upstreamCount,
+    inserted,
+    duplicates,
+    tableTotal: count ?? null,
+    durationMs: durationMs(),
+    error: null,
+  };
+}
+
+// GET /api/real/collect — scheduled collection worker (Vercel Cron target)
+const handleCollectWorker = async (_req: express.Request, res: express.Response) => {
+  if (!process.env.CRON_SECRET) {
+    console.error('[worker] misconfigured CRON_SECRET is not set on the server');
+    return res.status(503).json({
+      success: false,
+      error: 'CRON_SECRET is not configured. Set it in Vercel project environment variables.',
+    });
+  }
+
+  if (!isAuthorizedWorkerRequest(_req)) {
+    return res.status(401).json({ success: false, error: 'Unauthorized' });
+  }
+
+  res.setHeader('Cache-Control', 'no-store');
+  const result = await runCollectOnce();
+  return res.status(result.success ? 200 : 502).json(result);
+};
+
+app.get('/api/real/collect', handleCollectWorker);
+// GET /api/real/collect/backfill — same idempotent cycle, invoked less often by
+// cron to recover any periods a missed per-minute run left behind. Each run
+// already re-fetches the newest upstream window, so a missed run is
+// self-healing; this is a low-frequency safety net, not the primary path.
+app.get('/api/real/collect/backfill', handleCollectWorker);
+
 // GET /api/real/history
-// LIVE WinGo upstream = source of NEW/current rounds.
-// Supabase public.real_wingo_30s_history = persistent FULL history served to the app.
-// Flow: upstream (newest N) -> upsert new periods -> serve full stored history.
-// Fallback: live window -> in-memory cache (only if Supabase is unavailable/empty).
+// READ-ONLY. public.real_wingo_30s_history is populated exclusively by the
+// background collector (GET /api/real/collect) via Vercel Cron, so the browser
+// only displays persisted data and never drives collection.
+// Fallback: if Supabase is unreachable, serve the live upstream window read-only
+// (nothing is written) so the UI degrades instead of going blank.
 app.get('/api/real/history', async (req, res) => {
   // Strict no-cache: every request must return the latest available result
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
@@ -984,52 +1146,7 @@ app.get('/api/real/history', async (req, res) => {
   const supabaseClient = getSupabaseClient();
   let live: LiveUpstreamResult | null = null;
 
-  // 1. Live upstream fetch — source of NEW/current rounds (fast, always first)
-  try {
-    live = await fetchLiveOfficialHistory();
-
-    console.log(`[real/history] upstream_latest_period=${live.records[0]?.issueNumber || 'none'}`);
-    console.log(`[real/history] upstream_count=${live.records.length}`);
-
-    // Refresh in-memory cache for fallback paths
-    const liveMap = new Map<string, RealCompletedRecord>();
-    for (const r of accumulatedRealHistory) liveMap.set(r.issueNumber, r);
-    for (const r of live.records) liveMap.set(r.issueNumber, r);
-    accumulatedRealHistory = sortRealRecordsDescending(Array.from(liveMap.values()));
-    lastRealFetchTime = Date.now();
-  } catch (liveErr) {
-    console.warn(
-      `[real/history] live_upstream_failed reason=${describeFetchError(liveErr)}; serving stored Supabase history`
-    );
-  }
-
-  // 2. Persist newly discovered periods into Supabase (dedupe; never deletes)
-  if (supabaseClient && live && live.records.length > 0) {
-    try {
-      const issues = live.records.map((r) => r.issueNumber);
-      const existingSet = await getExistingIssues(supabaseClient, issues);
-      const newRecords = live.records.filter((r) => !existingSet.has(r.issueNumber));
-      const existingCount = live.records.length - newRecords.length;
-
-      let inserted = 0;
-      if (newRecords.length > 0) {
-        const syncRes = await syncRecordsToSupabase(newRecords);
-        if (syncRes.success) {
-          inserted = newRecords.length;
-          lastSupabaseSyncTime = new Date().toISOString();
-        } else {
-          console.error('[real/history] supabase_upsert_failed', syncRes.error);
-        }
-      }
-
-      console.log(`[real/history] supabase_inserted=${inserted}`);
-      console.log(`[real/history] supabase_existing=${existingCount}`);
-    } catch (syncErr) {
-      console.warn(`[real/history] supabase_sync_error reason=${describeFetchError(syncErr)}`);
-    }
-  }
-
-  // 3. Serve the FULL persistent history from Supabase (pagination inside readFromSupabase)
+  // 1. Serve the FULL persistent history from Supabase, written by the collector.
   if (supabaseClient) {
     const { records, totalCount, error } = await readFromSupabase(limit);
 
@@ -1056,7 +1173,22 @@ app.get('/api/real/history', async (req, res) => {
     }
   }
 
-  // 4. Fallback: if Supabase is unavailable/empty, serve the live upstream window
+  // 2. Fallback: if Supabase is unavailable/empty, serve the live upstream window
+  //    READ-ONLY — nothing is persisted from this path. Collection is the
+  //    background worker's job (GET /api/real/collect).
+  try {
+    live = await fetchLiveOfficialHistory();
+    const liveMap = new Map<string, RealCompletedRecord>();
+    for (const r of accumulatedRealHistory) liveMap.set(r.issueNumber, r);
+    for (const r of live.records) liveMap.set(r.issueNumber, r);
+    accumulatedRealHistory = sortRealRecordsDescending(Array.from(liveMap.values()));
+    lastRealFetchTime = Date.now();
+  } catch (liveErr) {
+    console.warn(
+      `[real/history] live_upstream_failed reason=${describeFetchError(liveErr)}; serving stored Supabase history`
+    );
+  }
+
   if (live && live.records.length > 0) {
     const liveResults = limit === 'all' ? live.records : live.records.slice(0, limit);
     return res.json({
@@ -1065,14 +1197,16 @@ app.get('/api/real/history', async (req, res) => {
       returnedCount: liveResults.length,
       lastUpdated: new Date().toISOString(),
       lastSyncTime: lastSupabaseSyncTime,
-      storage: 'live-upstream',
+      storage: 'live-upstream-readonly',
       source: 'COMPLETED REAL HISTORY',
       results: liveResults,
-      error: supabaseClient ? null : 'Supabase not configured; serving live upstream window only.',
+      error: supabaseClient
+        ? null
+        : 'Supabase not configured; serving live upstream window only (not persisted).',
     });
   }
 
-  // 5. Last resort: in-memory cache
+  // 3. Last resort: in-memory cache
   const sliceCount = limit === 'all' ? accumulatedRealHistory.length : limit;
   res.json({
     success: true,
