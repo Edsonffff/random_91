@@ -1,0 +1,39 @@
+# Render deployment for the WingoAI Test 7 signal collector.
+#
+# Division of responsibility:
+#   - Vercel Cron (vercel.json)  -> public.real_wingo_30s_history  (WinGo results)
+#   - This worker                 -> public.wingo_t7_signals        (WingoAI signals)
+#
+# T7 signals rotate every 30 seconds. Vercel Cron cannot fire faster than once
+# per minute, so T7 must run on an always-on process to keep dense capture.
+#
+# Secrets (SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, WINGOAI_API_TOKEN) are NOT
+# stored here. Set them in the Render dashboard; `sync: false` means Render will
+# not create/overwrite them from this file. The WingoAI token stays server-side
+# and is never exposed to the frontend.
+services:
+  - type: worker
+    name: wingo-t7-collector
+    runtime: node
+    plan: starter
+    rootDir: collector
+    buildCommand: npm install
+    startCommand: npm start
+    # The collector still binds PORT and serves /health (200 OK); that endpoint
+    # is simply not health-checked by Render for a background worker.
+    autoDeploy: false
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      # History polling is now owned by Vercel Cron; the collector's own
+      # 30s loop is retained but T7 is the reason this worker exists.
+      - key: POLL_INTERVAL_MS
+        value: "30000"
+      - key: PORT
+        value: "10000"
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: WINGOAI_API_TOKEN
+        sync: false
