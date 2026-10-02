@@ -1208,6 +1208,15 @@ export const AlgorithmAnalyzer: React.FC = () => {
     console.log(
       `[Adaptive] active_prediction=${activePred ? `${activePred.decision} (BIG ${activePred.probBig.toFixed(1)}% / SMALL ${activePred.probSmall.toFixed(1)}%, ${activePred.signalsAvailable} signals)` : 'n/a'}`
     );
+    if (activePred) {
+      console.log(`[Adaptive Next] active_period=${activePred.period}`);
+      console.log(`[Adaptive Next] prediction=${activePred.decision}`);
+      console.log(`[Adaptive Next] big_weight=${activePred.probBig.toFixed(1)}`);
+      console.log(`[Adaptive Next] small_weight=${activePred.probSmall.toFixed(1)}`);
+      console.log(`[Adaptive Next] signals_voting=${activePred.signalsAvailable}`);
+    } else {
+      console.log(`[Adaptive Next] active_period=${activePeriod || 'none'} prediction=n/a`);
+    }
   }, [
     realHistory,
     realSchedule,
@@ -1403,7 +1412,7 @@ export const AlgorithmAnalyzer: React.FC = () => {
         }
         defaultExpanded={true}
       >
-        <AdaptiveLearningPanel data={adaptiveLearning} />
+        <AdaptiveLearningPanel data={adaptiveLearning} activeSchedule={realSchedule} />
       </CollapsibleCard>
 
       {/* ======================================================== */}

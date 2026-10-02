@@ -9,10 +9,13 @@ import React, { useState, useMemo } from 'react';
 import { CheckCircle2, XCircle, Brain, RotateCcw, TrendingUp, ShieldCheck } from 'lucide-react';
 import type { AdaptiveResult, AdaptiveHistoryRow } from '../../hooks/useAdaptiveLearning';
 import { SIGNAL_LABELS } from '../../hooks/useAdaptiveLearning';
+import type { RealGameSchedule } from '../../types/result';
 import { CollapsibleCard } from '../common/CollapsibleCard';
 
 interface Props {
   data: AdaptiveResult;
+  /** Live feed schedule — used only for the active-round countdown if available. */
+  activeSchedule?: RealGameSchedule | null;
 }
 
 // ─── Accent colours per signal index [T1,T2,T3,T5,T6,T7,T8] ─────────────────
@@ -84,11 +87,12 @@ function SigCell({ pred }: { pred: 'Big' | 'Small' | null }) {
 
 // ─── Main component ───────────────────────────────────────────────────────────
 
-export const AdaptiveLearningPanel: React.FC<Props> = ({ data }) => {
+export const AdaptiveLearningPanel: React.FC<Props> = ({ data, activeSchedule }) => {
   const [confirmReset, setConfirmReset] = useState(false);
 
   const {
     history,
+    activePrediction,
     totalPredictions,
     totalHits,
     totalMisses,
@@ -237,6 +241,53 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data }) => {
             </div>
           </div>
         </div>
+      </div>
+
+      {/* ── NEXT ACTIVE PREDICTION (decision before the active round's result) ── */}
+      <div className="p-4 sm:p-5 rounded-2xl bg-[#071A14] border border-[#E7B93F]/40 shadow-lg space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#1E3A2B]/60 pb-2.5">
+          <div className="flex items-center gap-2">
+            <TrendingUp className="w-4 h-4 text-[#E7B93F]" />
+            <span className="text-xs font-mono font-black uppercase tracking-wider text-[#F5F5F5]">
+              Next Active Prediction
+            </span>
+          </div>
+          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[#E7B93F]/15 text-[#E7B93F] border border-[#E7B93F]/30 uppercase font-bold">
+            Decision before result
+          </span>
+        </div>
+
+        {activePrediction ? (
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 font-mono">
+              <StatBox label="Next Active Period" value={activePrediction.period.slice(-7)} />
+              <StatBox
+                label="Prediction"
+                value={activePrediction.decision.toUpperCase()}
+                color={activePrediction.decision === 'Big' ? 'text-[#E7B93F]' : 'text-[#60A5FA]'}
+              />
+              <StatBox label="Weighted BIG" value={`${activePrediction.probBig.toFixed(1)}%`} color="text-[#E7B93F]" />
+              <StatBox label="Weighted SMALL" value={`${activePrediction.probSmall.toFixed(1)}%`} color="text-[#60A5FA]" />
+            </div>
+            <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-[11px] font-mono">
+              <span className="text-[#8D9B95]">
+                Signals voting: <span className="text-[#35B978] font-bold">{activePrediction.signalsAvailable} / 7</span>
+              </span>
+              <span className="text-[#8D9B95]">
+                Actual: <span className="text-[#8D9B95] font-bold">PENDING</span>
+              </span>
+              {activeSchedule && (
+                <span className="text-[#35B978] font-bold">
+                  Next round in {Math.max(0, activeSchedule.remainingSeconds)}s
+                </span>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="py-4 text-center text-[#8D9B95] font-mono text-xs">
+            Awaiting the active period from the live feed…
+          </div>
+        )}
       </div>
 
       {/* ── Row 1: Dashboard + Weights ─────────────────────────────────── */}

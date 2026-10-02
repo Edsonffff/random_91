@@ -27,6 +27,9 @@ const INITIAL_WEIGHT = 1 / N_SIGNALS;
 const MIN_WEIGHT = 0.01;
 const STORAGE_KEY = 'wingo_adaptive_model_v5';
 const LEGACY_STORAGE_KEY = 'wingo_test4_model_v4';
+/** Active-period predictions persisted by exact period ID (audit / settlement record). */
+const ACTIVE_PREDICTION_KEY = 'wingo_adaptive_next_v1';
+const ACTIVE_PREDICTION_MAX = 500;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -186,6 +189,28 @@ function saveModel(state: ModelState): void {
     localStorage.removeItem(LEGACY_STORAGE_KEY);
   } catch {
     // ignore quota errors
+  }
+}
+
+/**
+ * Persist the active-period prediction keyed by its EXACT period ID. Once a period
+ * has a stored prediction it is never overwritten, so the decision made before the
+ * draw stays on record for that period.
+ */
+function persistActivePrediction(pred: ActivePrediction): void {
+  try {
+    const raw = localStorage.getItem(ACTIVE_PREDICTION_KEY);
+    const store = raw ? (JSON.parse(raw) as Record<string, ActivePrediction>) : {};
+    if (!store[pred.period]) {
+      store[pred.period] = pred;
+      const keys = Object.keys(store).sort();
+      if (keys.length > ACTIVE_PREDICTION_MAX) {
+        for (const k of keys.slice(0, keys.length - ACTIVE_PREDICTION_MAX)) delete store[k];
+      }
+      localStorage.setItem(ACTIVE_PREDICTION_KEY, JSON.stringify(store));
+    }
+  } catch {
+    // ignore quota / parse errors
   }
 }
 
@@ -367,6 +392,8 @@ export function useAdaptiveLearning(inputs: Test4InputRow[], activeInput?: Activ
         signalsAvailable: activeVote.available.length,
         weights: [...liveWeights],
       };
+      // Store by exact period ID (never overwrites an earlier prediction for the same period)
+      persistActivePrediction(activePrediction);
     }
 
     // ── Stats ──────────────────────────────────────────────────────────
