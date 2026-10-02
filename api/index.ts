@@ -1396,11 +1396,12 @@ const handleResetEndpoint = async (_req: express.Request, res: express.Response)
   }
 
   // 4. Clear server in-memory store
+  //    Only the WinGo history store is cached at module scope here. T7 signals
+  //    are read fresh from Supabase on every request (signalMap is per-request),
+  //    so clearing the table above is all the T7 reset that is required.
   accumulatedRealHistory = [];
   lastRealFetchTime = 0;
   lastSupabaseSyncTime = null;
-  cachedT7Signals.clear();
-  lastT7HistoryFetchTime = 0;
 
   // 5. Notify backend collector if reachable
   const collectorPort = process.env.COLLECTOR_PORT || process.env.PORT || '8080';
@@ -1522,6 +1523,9 @@ app.get('/api/real/history/export', async (req, res) => {
 });
 
 // ─── WingoAI T7 Signals (Historical & Live) ──────────────────────────────────
+// Shape of a row in public.wingo_t7_signals as served by /api/real/t7-signals.
+// `stored_at` / `api_response_ms` are optional because they are supplied by the
+// always-on collector, not by the table's base columns.
 export interface StoredT7Signal {
   period_id: string;
   signal: 'BIG' | 'SMALL';
@@ -1529,16 +1533,6 @@ export interface StoredT7Signal {
   lucky_number?: number | null;
   fetched_at: string;
   stored_at?: string;
-  api_response_ms?: number;
-}
-
-// ─── WingoAI T7 Signals (Historical & Live) ──────────────────────────────────
-export interface StoredT7Signal {
-  period_id: string;
-  signal: 'BIG' | 'SMALL';
-  confidence: number | null;
-  fetched_at: string;
-  stored_at: string;
   api_response_ms?: number;
 }
 
@@ -1605,11 +1599,29 @@ app.get('/api/real/t7-signals', async (_req, res) => {
     });
     clearTimeout(cTimeout);
     if (cResp.ok) {
-      const cJson = await cResp.json();
+      // Shape returned by the collector's GET /api/real/t7-signals.
+      const cJson = (await cResp.json()) as {
+        timing?: {
+          api_response_ms?: number;
+          collector_latency_ms?: number;
+        };
+        signals?: Array<{
+          period_id?: string;
+          signal?: string;
+          confidence?: number | null;
+          fetched_at?: string;
+          stored_at?: string;
+          api_response_ms?: number;
+        }>;
+      };
       if (cJson?.timing) collectorTiming = cJson.timing;
       if (Array.isArray(cJson?.signals)) {
         for (const s of cJson.signals) {
-          if (s.period_id && (s.signal === 'BIG' || s.signal === 'SMALL')) {
+          if (
+            s.period_id &&
+            s.fetched_at &&
+            (s.signal === 'BIG' || s.signal === 'SMALL')
+          ) {
             const pid = String(s.period_id).trim();
             signalMap.set(pid, {
               period_id: pid,
