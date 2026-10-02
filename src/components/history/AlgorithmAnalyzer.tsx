@@ -25,7 +25,6 @@ import {
   computeTest5,
   computeTest6,
   computeTest7,
-  computeTest8,
 } from './AdditionalSignalsPanel';
 import type { WingoAIT7Signal, T7DebugInfo } from './AdditionalSignalsPanel';
 import { SignalSummaryPanel } from './SignalSummaryPanel';
@@ -581,7 +580,7 @@ export const AlgorithmAnalyzer: React.FC = () => {
   const { results, loadBigMumbaiSample } = useResults();
   const { realHistory, realSchedule, resetAllSystemData } = useRealHistory();
   const [dataSource, setDataSource] = useState<'realLive' | 'sample3' | 'sample2' | 'sample1' | 'live'>('realLive');
-  const [activeTestTab, setActiveTestTab] = useState<'periodSum' | 'linearDelta' | 'alternation' | 'additional'>('periodSum');
+  const [activeTestTab, setActiveTestTab] = useState<'linearDelta' | 'alternation' | 'additional'>('linearDelta');
   const [expandedSources, setExpandedSources] = useState<Record<string, boolean>>({});
   const showAllSequence = Boolean(expandedSources[dataSource]);
 
@@ -810,34 +809,6 @@ export const AlgorithmAnalyzer: React.FC = () => {
   // ==========================================
   // 2. TESTED FORMULAS (Mathematical Evaluations)
   // ==========================================
-  // Test A: Period Digit Sum Modulo 10
-  const testPeriodSum = useMemo(() => {
-    let hits = 0;
-    const toBigSmall = (n: number): 'Big' | 'Small' => (n >= 5 ? 'Big' : 'Small');
-    const sorted = [...activeDataset].sort((a, b) => compareIssuesAsc(a.period, b.period));
-    const details = sorted.map((item) => {
-      const sum = item.period
-        .split('')
-        .reduce((acc, char) => acc + parseInt(char, 10), 0);
-      const predicted = sum % 10;
-      const predictedSize = toBigSmall(predicted);
-      const actualSize = toBigSmall(item.number);
-      const isHit = predictedSize === actualSize;
-      if (isHit) hits++;
-      return {
-        period: item.period,
-        actual: item.number,
-        actualSize,
-        predicted,
-        predictedSize,
-        isHit,
-      };
-    });
-
-    const accuracy = activeDataset.length > 0 ? Math.round((hits / activeDataset.length) * 100) : 0;
-    return { hits, total: activeDataset.length, accuracy, details };
-  }, [activeDataset]);
-
   // Test B: Markov Chain Transition Model
   // P(next | prev) = N(prev→next) / Σ N(prev→*)
   // Anti-leakage: matrix built from rounds 0..i-1; prediction made before actual of round i is seen.
@@ -1048,10 +1019,6 @@ export const AlgorithmAnalyzer: React.FC = () => {
     };
   }, [activeDataset]);
 
-  const streakStatsPeriodSum = useMemo(() => {
-    return calculateStreakStats(testPeriodSum.details.map((d) => (d.isHit ? 'H' : 'M')));
-  }, [testPeriodSum.details]);
-
   const streakStatsLinearRecurrence = useMemo(() => {
     return calculateStreakStats(
       testLinearRecurrence.details
@@ -1077,22 +1044,18 @@ export const AlgorithmAnalyzer: React.FC = () => {
   const test5 = useMemo(() => computeTest5(activeDataset), [activeDataset]);
   const test6 = useMemo(() => computeTest6(activeDataset), [activeDataset]);
   const test7 = useMemo(() => computeTest7(activeDataset, t7SignalsMap), [activeDataset, t7SignalsMap]);
-  const test8 = useMemo(() => computeTest8(activeDataset), [activeDataset]);
 
   // ==========================================
   // ADAPTIVE LEARNING MAIN DECISION ENGINE
   // ==========================================
   // Build aligned input rows for Adaptive Learning.
-  // T1 + actual are required; T2–T8 are optional.
+  // Every period with a known actual is a row; all signals are optional.
   // Test 2 (Markov) has no prediction until it accumulates ≥ MIN samples, which
   // never happens inside a short (e.g. 10-round) live window — so it must not be
   // allowed to block every row. Missing signals are excluded from that round's
-  // vote inside the hook (same rule already used for T3/T5–T8).
+  // vote inside the hook (same rule already used for T3/T5–T7).
   const adaptiveInputs = useMemo((): Test4InputRow[] => {
-    if (testPeriodSum.details.length === 0) return [];
-
-    const t1Map = new Map<string, 'Big' | 'Small'>();
-    for (const d of testPeriodSum.details) t1Map.set(d.period, d.predictedSize);
+    if (activeDataset.length === 0) return [];
 
     const t2Map = new Map<string, 'Big' | 'Small'>();
     for (const d of testLinearRecurrence.details) {
@@ -1119,61 +1082,45 @@ export const AlgorithmAnalyzer: React.FC = () => {
       if (!d.noSignal && d.predictedSize) t7Map.set(d.period, d.predictedSize);
     }
 
-    const t8Map = new Map<string, 'Big' | 'Small'>();
-    for (const d of test8.details) {
-      if (d.predictedSize) t8Map.set(d.period, d.predictedSize);
-    }
-
     const actualMap = new Map<string, 'Big' | 'Small'>();
     for (const item of activeDataset) {
       actualMap.set(item.period, item.number >= 5 ? 'Big' : 'Small');
     }
 
     const rows: Test4InputRow[] = [];
-    for (const [period, t1pred] of t1Map) {
-      const actual = actualMap.get(period);
-      if (!actual) continue;
+    for (const [period, actual] of actualMap) {
       rows.push({
         period,
-        t1pred,
         t2pred: t2Map.get(period) ?? null,
         t3pred: t3Map.get(period) ?? null,
         t5pred: t5Map.get(period),
         t6pred: t6Map.get(period),
         t7pred: t7Map.get(period),
-        t8pred: t8Map.get(period),
         actual,
       });
     }
     return rows;
   }, [
-    testPeriodSum.details,
     testLinearRecurrence.details,
     test3.details,
     test5.details,
     test6.details,
     test7.details,
-    test8.details,
     activeDataset,
   ]);
 
   // Active (unsettled) round inputs: predictions from the SAME tests that feed
-  // the settled rows, keyed by the active issue id. T1 is computable pre-draw
-  // from the period digits (identical formula to Test 1). No extra fetch/polling.
+  // the settled rows, keyed by the active issue id. No extra fetch/polling.
   const activePeriodId = realSchedule?.currentIssue || '';
   const adaptiveActiveInput = useMemo((): ActiveInputRow | null => {
     if (!activePeriodId) return null;
-    const digitSum = activePeriodId.split('').reduce((acc, ch) => acc + parseInt(ch, 10), 0);
-    const t1pred: 'Big' | 'Small' = digitSum % 10 >= 5 ? 'Big' : 'Small';
     return {
       period: activePeriodId,
-      t1pred,
       t2pred: testLinearRecurrence.latestPrediction,
       t3pred: test3.latestPrediction,
       t5pred: test5.latestPrediction,
       t6pred: test6.latestPrediction,
       t7pred: test7.latestPrediction,
-      t8pred: test8.latestPrediction,
     };
   }, [
     activePeriodId,
@@ -1182,7 +1129,6 @@ export const AlgorithmAnalyzer: React.FC = () => {
     test5.latestPrediction,
     test6.latestPrediction,
     test7.latestPrediction,
-    test8.latestPrediction,
   ]);
 
   const adaptiveLearning = useAdaptiveLearning(adaptiveInputs, adaptiveActiveInput);
@@ -1241,19 +1187,17 @@ export const AlgorithmAnalyzer: React.FC = () => {
   }, [testLinearRecurrence.details, test6.details, adaptiveInputs]);
 
   // ==========================================
-  // INPUT SIGNALS SUMMARY (Tests 1, 2, 3, 5, 6, 7, 8)
+  // INPUT SIGNALS SUMMARY (Tests 2, 3, 5, 6, 7)
   // ==========================================
   const signalSummaryData = useMemo(() => {
     return [
-      { testNum: 1, label: 'Period Digit Sum', prediction: testPeriodSum.details.length > 0 ? testPeriodSum.details[testPeriodSum.details.length - 1]?.predictedSize ?? null : null },
       { testNum: 2, label: 'Markov Chain', prediction: testLinearRecurrence.latestPrediction },
       { testNum: 3, label: 'Previous 2 Pattern', prediction: test3.latestPrediction },
       { testNum: 5, label: 'Digit Mix', prediction: test5.latestPrediction },
       { testNum: 6, label: 'SMA-10', prediction: test6.latestPrediction },
       { testNum: 7, label: 'WingoAI Signal', prediction: test7.latestPrediction },
-      { testNum: 8, label: 'Round ID + Streak', prediction: test8.latestPrediction },
     ];
-  }, [testPeriodSum.details, testLinearRecurrence.latestPrediction, test3.latestPrediction, test5.latestPrediction, test6.latestPrediction, test7.latestPrediction, test8.latestPrediction]);
+  }, [testLinearRecurrence.latestPrediction, test3.latestPrediction, test5.latestPrediction, test6.latestPrediction, test7.latestPrediction]);
 
   const handleFullReset = async () => {
     setIsResetting(true);
@@ -1559,23 +1503,12 @@ export const AlgorithmAnalyzer: React.FC = () => {
         }
         headerRight={
           <span className="text-xs text-[#8D9B95]">
-            Tests 1, 2, 3, 5, 6, 7, 8 — independent input signals feeding into Adaptive Learning
+            Tests 2, 3, 5, 6, 7 — independent input signals feeding into Adaptive Learning
           </span>
         }
       >
         {/* Sub tabs for formula tests */}
         <div className="flex flex-wrap items-center gap-2 text-xs">
-          <button
-            onClick={() => setActiveTestTab('periodSum')}
-            className={`px-3 py-1.5 rounded-lg font-medium transition-colors cursor-pointer ${
-              activeTestTab === 'periodSum'
-                ? 'bg-[#E7B93F] text-[#020806] font-bold shadow'
-                : 'bg-[#06130F] text-[#8D9B95] hover:text-[#F5F5F5] border border-[#1E3A2B]'
-            }`}
-          >
-            Test 1: Period Digit Sum Mod 10
-          </button>
-
           <button
             onClick={() => setActiveTestTab('linearDelta')}
             className={`px-3 py-1.5 rounded-lg font-medium transition-colors cursor-pointer ${
@@ -1606,101 +1539,9 @@ export const AlgorithmAnalyzer: React.FC = () => {
                 : 'bg-[#06130F] text-[#35B978] hover:text-[#F5F5F5] border border-[#35B978]/40'
             }`}
           >
-            ⏱ Tests 5–8: Additional Signals (incl. WingoAI)
+            ⏱ Tests 5–7: Additional Signals (incl. WingoAI)
           </button>
         </div>
-
-        {/* Test 1 Table & Hit Rate */}
-        {activeTestTab === 'periodSum' && (
-          <div className="space-y-4">
-            <div className="flex flex-wrap items-center justify-between gap-4 p-4 rounded-xl bg-[#06130F] border border-[#1E3A2B]">
-              <div>
-                <span className="font-mono font-bold text-xs text-[#F5F5F5]">
-                  Formula: (Sum of Period Digits) mod 10
-                </span>
-                <p className="text-[11px] text-[#8D9B95] mt-0.5">
-                  Evaluates whether period numbers encode winning digits mathematically.
-                </p>
-              </div>
-
-              <div className="flex items-center gap-4 text-xs font-mono">
-                <div>
-                  <span className="text-[#8D9B95] block text-[10px]">BIG/SMALL HIT RATE:</span>
-                  <span className="text-base font-bold text-[#F04444]">
-                    {testPeriodSum.accuracy}% ({testPeriodSum.hits} / {testPeriodSum.total})
-                  </span>
-                </div>
-                <div>
-                  <span className="text-[#8D9B95] block text-[10px]">RANDOM BASELINE:</span>
-                  <span className="text-base font-bold text-[#8D9B95]">50.0%</span>
-                </div>
-              </div>
-            </div>
-
-            {/* Streak Analysis Panel */}
-            <StreakAnalysisPanel
-              stats={streakStatsPeriodSum}
-              title="Period Digit Sum Mod 10"
-              id="streak_test1"
-            />
-
-            <CollapsibleCard
-              id="test1_predictions_table"
-              variant="subcard"
-              title={
-                <span className="font-mono text-xs font-bold text-[#F5F5F5]">
-                  Formula Evaluation Table (Test 1)
-                </span>
-              }
-              subtitle="Per-period predicted digit vs actual outcome"
-            >
-              <div className="overflow-x-auto rounded-lg border border-[#1E3A2B]/60">
-                <table className="w-full text-left text-xs font-mono">
-                  <thead className="bg-[#06130F] text-[#8D9B95] uppercase text-[10px]">
-                    <tr>
-                      <th className="py-2.5 px-4">Period</th>
-                      <th className="py-2.5 px-4">Actual (Digit → Size)</th>
-                      <th className="py-2.5 px-4">Prediction (Digit → Size)</th>
-                      <th className="py-2.5 px-4 text-right">Outcome</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-[#1E3A2B]/40">
-                    {[...testPeriodSum.details].reverse().map((row, i) => (
-                      <tr key={i} className="hover:bg-[#06130F]/80">
-                        <td className="py-2 px-4 text-gray-300">{row.period}</td>
-                        <td className="py-2 px-4 font-bold text-[#E7B93F]">
-                          {row.actual}{' '}
-                          <span className="text-[10px] text-[#8D9B95]">→</span>{' '}
-                          <span className={row.actualSize === 'Big' ? 'text-[#E7B93F]' : 'text-[#60A5FA]'}>
-                            {row.actualSize.toUpperCase()}
-                          </span>
-                        </td>
-                        <td className="py-2 px-4 text-gray-400">
-                          {row.predicted}{' '}
-                          <span className="text-[10px] text-[#8D9B95]">→</span>{' '}
-                          <span className={row.predictedSize === 'Big' ? 'text-[#E7B93F]' : 'text-[#60A5FA]'}>
-                            {row.predictedSize.toUpperCase()}
-                          </span>
-                        </td>
-                        <td className="py-2 px-4 text-right">
-                          {row.isHit ? (
-                            <span className="inline-flex items-center gap-1 text-[#35B978] font-bold">
-                              <CheckCircle2 className="w-3.5 h-3.5" /> Hit
-                            </span>
-                          ) : (
-                            <span className="inline-flex items-center gap-1 text-[#F04444]">
-                              <XCircle className="w-3.5 h-3.5" /> Miss
-                            </span>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </CollapsibleCard>
-          </div>
-        )}
 
         {/* Test 2 Table & Hit Rate */}
         {activeTestTab === 'linearDelta' && (
@@ -1980,7 +1821,7 @@ export const AlgorithmAnalyzer: React.FC = () => {
               test5={test5}
               test6={test6}
               test7={test7}
-              test8={test8}
+  
               t7DebugInfo={t7DebugInfo}
             />
           </CollapsibleCard>

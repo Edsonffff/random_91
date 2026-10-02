@@ -64,7 +64,6 @@ export const RealHistoryView: React.FC = () => {
     dismissSupabaseError,
     totalSupabaseRows,
     syncAllToSupabase,
-    testSingleSupabaseSync,
     refreshRealResults,
     importRealHistoryCurlJson,
   } = useRealHistory();
@@ -275,17 +274,6 @@ export const RealHistoryView: React.FC = () => {
             ))}
           </div>
 
-          {/* Test 1 Record button (Requirement 13) */}
-          <button
-            onClick={testSingleSupabaseSync}
-            disabled={realHistory.length === 0 || supabaseStatus === 'syncing'}
-            className="px-3.5 py-2 rounded-xl bg-[#06130F] hover:bg-[#0E2E22] text-teal-300 border border-teal-500/40 text-xs font-bold transition-all cursor-pointer shadow flex items-center gap-1.5 disabled:opacity-50"
-            title="Test inserting 1 real record into Supabase to verify schema and RLS permissions"
-          >
-            <Database className="w-3.5 h-3.5 text-teal-400" />
-            Test 1 Record
-          </button>
-
           {/* Sync to Supabase button */}
           <button
             onClick={syncAllToSupabase}
@@ -406,15 +394,6 @@ export const RealHistoryView: React.FC = () => {
               </div>
             </div>
             <div className="flex items-center gap-2 shrink-0">
-              <button
-                onClick={testSingleSupabaseSync}
-                disabled={supabaseStatus === 'syncing'}
-                className="px-3 py-1.5 rounded-lg bg-teal-600 hover:bg-teal-500 text-white font-bold text-xs cursor-pointer shadow flex items-center gap-1"
-                title="Run single record test write"
-              >
-                <Database className="w-3.5 h-3.5" />
-                Test 1 Record
-              </button>
               <button
                 onClick={dismissSupabaseError}
                 className="px-2 py-1 rounded text-red-300 hover:text-white text-xs border border-red-700/50 hover:bg-red-900/40 cursor-pointer"

@@ -47,7 +47,6 @@ export interface RealHistoryContextType {
   refreshRealResults: (force?: boolean) => Promise<void>;
   refreshSchedule: () => Promise<void>;
   syncAllToSupabase: () => Promise<void>;
-  testSingleSupabaseSync: () => Promise<void>;
   importRealHistoryCurlJson: (rawJsonText: string) => boolean;
   resetAllSystemData: () => Promise<{ success: boolean; message?: string; error?: string }>;
 }
@@ -206,47 +205,6 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
     }
   }, [showToast]);
 
-  // Single-record test button
-  const testSingleSupabaseSync = useCallback(async () => {
-    if (realHistoryRef.current.length === 0) {
-      showToast('No records available to test Supabase write.', 'warning');
-      return;
-    }
-    setSupabaseStatus('syncing');
-    try {
-      const single = [realHistoryRef.current[0]];
-      const res = await realHistoryApiService.syncRealHistoryToSupabase(single);
-      if (res.success) {
-        syncedIssueNumbersRef.current.add(single[0].issueNumber);
-        setLastSyncedIssue(single[0].issueNumber);
-        const time = res.lastSyncTime || new Date().toISOString();
-        setLastSupabaseSyncTime(time);
-        setSupabaseStatus('synced');
-        setSupabaseError(null);
-        if (typeof res.totalTableRows === 'number') {
-          setTotalSupabaseRows(res.totalTableRows);
-        }
-        showToast('Single record test passed! Row verified in Supabase.', 'success');
-      } else {
-        setSupabaseStatus('error');
-        setSupabaseError({
-          message: res.error || 'Single record test failed',
-          details: res.details,
-          hint: res.hint,
-          code: res.code,
-          status: res.status,
-          stage: res.stage,
-          testedPayload: res.testedPayload,
-        });
-        showToast(`Single record test failed: ${res.error}`, 'error');
-      }
-    } catch (err: unknown) {
-      setSupabaseStatus('error');
-      const msg = err instanceof Error ? err.message : 'Test failed';
-      setSupabaseError({ message: msg });
-      showToast(msg, 'error');
-    }
-  }, [showToast]);
 
   /**
    * Dashboard synchronization cycle (Read-only from Supabase):
@@ -598,7 +556,6 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
         refreshRealResults,
         refreshSchedule,
         syncAllToSupabase,
-        testSingleSupabaseSync,
         importRealHistoryCurlJson,
         resetAllSystemData,
       }}

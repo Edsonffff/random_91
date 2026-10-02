@@ -420,56 +420,6 @@ export function computeTest7(
   };
 }
 
-// ─── Test 8 — Round ID + Current Streak ──────────────────────────────────────
-// predictionNumber = (roundNumber + streak) % 10
-// streak = consecutive BIG or SMALL run length BEFORE this round (from sorted[0..i-1])
-
-export function computeTest8(dataset: RoundEntryForTests[]): TimeTestResult {
-  const sorted = sortedAscending(dataset);
-  let hits = 0;
-  const details: TimeTestDetail[] = [];
-
-  for (let i = 1; i < sorted.length; i++) {
-    const item = sorted[i];
-    const roundNum = roundNumberFromPeriod(item.period);
-    if (roundNum === null) continue;
-
-    // Streak: count backward from i-1 — only previously-known results
-    const prevSize = sorted[i - 1].number >= 5 ? 'Big' : 'Small';
-    let streak = 1;
-    for (let j = i - 2; j >= 0; j--) {
-      if ((sorted[j].number >= 5 ? 'Big' : 'Small') === prevSize) streak++;
-      else break;
-    }
-
-    const predNum = (roundNum + streak) % 10;
-    const predictedSize = toBigSmall(predNum);
-    const actualSize = toBigSmall(item.number);
-    const isHit = predictedSize === actualSize;
-    if (isHit) hits++;
-    details.push({
-      period: item.period,
-      hour: 0,
-      minute: 0,
-      second: 0,
-      predictionNumber: predNum,
-      predictedSize,
-      actual: item.number,
-      actualSize,
-      isHit,
-      extra: { roundNumber: roundNum, streak },
-    });
-  }
-
-  const total = details.length;
-  const accuracy = total > 0 ? Math.round((hits / total) * 100) : 0;
-  return {
-    hits, total, accuracy, details,
-    ...streakStats(details),
-    latestPrediction: details.length > 0 ? details[details.length - 1].predictedSize : null,
-  };
-}
-
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
 interface SignalRowProps {
@@ -635,7 +585,6 @@ export interface AdditionalSignalsPanelProps {
   test5: TimeTestResult;
   test6: TimeTestResult & { smaValues: { sma5: number | null; sma10: number | null; sma20: number | null } };
   test7: TimeTestResult;
-  test8: TimeTestResult;
   t7DebugInfo?: T7DebugInfo | null;
 }
 
@@ -643,12 +592,11 @@ export const AdditionalSignalsPanel: React.FC<AdditionalSignalsPanelProps> = ({
   test5,
   test6,
   test7,
-  test8,
   t7DebugInfo,
 }) => {
   const [showDetails, setShowDetails] = useState(false);
 
-  const ACCENT_COLORS = ['#35B978', '#60A5FA', '#F59E0B', '#A78BFA'];
+  const ACCENT_COLORS = ['#35B978', '#60A5FA', '#F59E0B'];
 
   return (
     <div className="space-y-3">
@@ -664,7 +612,6 @@ export const AdditionalSignalsPanel: React.FC<AdditionalSignalsPanelProps> = ({
         <SignalRow testNum={5} label="Digit Mix" formula="(dSum×3+P×2+first+last)%10 → B/S" result={test5} accentColor={ACCENT_COLORS[0]} />
         <SignalRow testNum={6} label="SMA-10" formula="avg(prev 10 states)>0.5→BIG, <0.5→SML" result={test6} accentColor={ACCENT_COLORS[1]} />
         <SignalRow testNum={7} label="WingoAI Signal" formula="External API signal: BIG→Big · SMALL→Small" result={test7} accentColor={ACCENT_COLORS[2]} />
-        <SignalRow testNum={8} label="Round ID + Streak" formula="(roundNum+streak)%10 → B/S" result={test8} accentColor={ACCENT_COLORS[3]} />
       </div>
 
       {/* ── Toggle details ────────────────────────────────────────────────── */}
@@ -861,26 +808,12 @@ export const AdditionalSignalsPanel: React.FC<AdditionalSignalsPanelProps> = ({
             </div>
           </CollapsibleCard>
 
-          {/* Test 8 */}
-          <CollapsibleCard id="test8_detail" variant="subcard"
-            title={<span className="font-mono text-xs font-bold text-[#A78BFA]">Test 8 — Round ID + Current Streak</span>}
-            subtitle={`${test8.total} predictions · ${test8.accuracy}% accuracy · Cur Hit: ${test8.currentHitStreak} · Cur Miss: ${test8.currentMissStreak}`}
-          >
-            <div className="space-y-3">
-              <StreakMini result={test8} />
-              <DetailTable result={test8}
-                extraHeaders={['Round #', 'Streak']}
-                extraCells={(row) => [row.extra?.roundNumber ?? '—', row.extra?.streak ?? '—']}
-              />
-            </div>
-          </CollapsibleCard>
-
         </div>
       )}
 
       {/* Disclaimer */}
       <p className="text-[10px] text-[#8D9B95] font-sans">
-        ⚠ Test 5 uses the actual draw timestamp from the server (if available and unique per round). Tests 6–8 use the sequential round ID as the temporal variable. All predictions are generated before the actual result is known. Past accuracy does not imply future predictability.
+        ⚠ Test 5 uses the actual draw timestamp from the server (if available and unique per round). Test 7 uses the external prediction signal. All predictions are generated before the actual result is known. Past accuracy does not imply future predictability.
       </p>
     </div>
   );

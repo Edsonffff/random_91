@@ -477,13 +477,11 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data, activeSchedule })
             <thead className="bg-[#06130F] text-[#8D9B95] uppercase text-[10px]">
               <tr>
                 <th className="py-2.5 px-3">Period</th>
-                <th className="py-2.5 px-2 text-center">T1</th>
                 <th className="py-2.5 px-2 text-center">T2</th>
                 <th className="py-2.5 px-2 text-center">T3</th>
                 <th className="py-2.5 px-2 text-center">T5</th>
                 <th className="py-2.5 px-2 text-center">T6</th>
                 <th className="py-2.5 px-2 text-center">T7</th>
-                <th className="py-2.5 px-2 text-center">T8</th>
                 <th className="py-2.5 px-3 text-center text-[#35B978] font-bold">DECISION</th>
                 <th className="py-2.5 px-2 text-center">Actual</th>
                 <th className="py-2.5 px-3 text-right">Outcome</th>
@@ -493,13 +491,11 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data, activeSchedule })
               {historyDesc.map((row, i) => (
                 <tr key={i} className="hover:bg-[#06130F]/80">
                   <td className="py-1.5 px-3 text-gray-300">{row.period.slice(-7)}</td>
-                  <SigCell pred={row.t1pred} />
                   <SigCell pred={row.t2pred} />
                   <SigCell pred={row.t3pred} />
                   <SigCell pred={row.t5pred} />
                   <SigCell pred={row.t6pred} />
                   <SigCell pred={row.t7pred} />
-                  <SigCell pred={row.t8pred} />
                   <td className={`py-1.5 px-3 font-bold text-center ${row.adaptiveDecision === 'Big' ? 'text-[#E7B93F]' : 'text-[#60A5FA]'}`}>
                     {row.adaptiveDecision.toUpperCase()}
                   </td>
