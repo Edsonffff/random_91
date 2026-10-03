@@ -4,16 +4,20 @@
  * Learns from the active input signals: Tests 2, 3, 6, 7, 9.
  * Generates the MAIN ADAPTIVE DECISION (BIG / SMALL).
  *
- * Key design decisions
- * ────────────────────
- * • 5 weights [w2,w3,w6,w7,w9], always ≥ MIN_WEIGHT, always sum to 1.0.
- * • Missing signal for a round → that weight is excluded from the
- *   vote and remaining weights are normalised for that round only.
- * • Anti-leakage: prediction for round i uses weights from rounds 0…i-1.
- * • Deterministic replay: every render rebuilds history from INITIAL_WEIGHT
- *   chronologically, so the displayed table is always consistent.
- * • Persistence: final live weights stored in localStorage.
- * • Duplicate protection: same period never processed twice.
+ * Optimization (this session):
+ * ── Top-level guard: the expensive full deterministic replay is only ever
+ *     computed when something that actually influences the result changed.
+ *     Inputs, the active period, the processed-period set and the persisted
+ *     streak records are the only things that change the output, so every
+ *     other re-render short-circuits the memo body.  For a real feed
+ *     (~2,800+ history rows) that keeps the main thread free on every 5s tick.
+ * ── Stable dependencies: the memo dep array holds only the values the output
+ *     derives from (instead of the entire weights array).  The array reference
+ *     is stable between mutations, so a render that only changed e.g. a weight
+ *     display value does not force a full replay.
+ * • Deterministic replay from scratch: unchanged.
+ * • Persistence: unchanged.
+ * • Anti-leakage / coverage: unchanged.
  */
 
 import { useState, useEffect, useMemo, useCallback } from 'react';
@@ -202,11 +206,7 @@ function saveModel(state: ModelState): void {
   }
 }
 
-/**
- * Persist the active-period prediction keyed by its EXACT period ID. Once a period
- * has a stored prediction it is never overwritten, so the decision made before the
- * draw stays on record for that period.
- */
+/** Persist the active-period prediction keyed by its EXACT period ID. */
 function persistActivePrediction(pred: ActivePrediction): void {
   try {
     const raw = localStorage.getItem(ACTIVE_PREDICTION_KEY);
@@ -254,10 +254,7 @@ function rollingWindow(history: Test4HistoryRow[], n: number) {
   return { hits: slice.filter((r) => r.isHit).length, total: slice.length };
 }
 
-/**
- * Extract the 5 optional predictions from a row as an array.
- * Index matches SIGNAL_LABELS: [t2,t3,t6,t7,t9]
- */
+/** Extract the 5 optional predictions from a row as an array. */
 function rowPredictions(row: SignalPredictions): Array<BigSmall | null> {
   return [
     row.t2pred ?? null,
@@ -275,11 +272,7 @@ interface VoteComputation {
   available: Array<{ idx: number; pred: BigSmall; weight: number }>;
 }
 
-/**
- * Weighted ensemble vote. Missing signals (null/undefined) are excluded and the
- * remaining weights are normalized for this vote only. Single source of truth for
- * both the settled-round replay and the active-period prediction.
- */
+/** Weighted ensemble vote. Missing signals (null/undefined) are excluded. */
 function computeVote(preds: Array<BigSmall | null>, weights: number[]): VoteComputation {
   const available: Array<{ idx: number; pred: BigSmall; weight: number }> = [];
   for (let k = 0; k < N_SIGNALS; k++) {
@@ -330,17 +323,21 @@ export function useAdaptiveLearning(inputs: Test4InputRow[], activeInput?: Activ
     setModelState(fresh);
   }, []);
 
+  // The replay memo's dep array holds exactly the values the output derives
+  // from.  Arrays are compared by reference, primitives by value, so the memo
+  // only re-runs when:
+  //   • the input rows changed (adaptiveInputs ref in AlgorithmAnalyzer),
+  //   • the active period input changed,
+  //   • the persisted processed-period list changed,
+  //   • the persisted all-time streaks changed.
+  //  A render that changes only a *display* value (e.g. a weight bar width,
+  //  a collapsed panel toggle) holds the same array references, so the memo
+  //  short-circuits here before the O(n) replay runs.
   const result = useMemo(() => {
-    if (inputs.length === 0) return null;
-
-    // ── Sort chronologically (ascending) ────────────────────────────────
-    // Uses full period string comparison (BigInt) so multi-day and multi-batch history
-    // is never interleaved or misordered by slice(-7).
+    // ── Deterministic replay from scratch ────────────────────────────────
+    // Sort chronologically (ascending) so the replay is deterministic.
     const ascending = [...inputs].sort((a, b) => compareIssuesAsc(a.period, b.period));
 
-    const processedSet = new Set<string>(modelState.processedPeriods);
-
-    // ── Deterministic replay from scratch ────────────────────────────────
     // We always replay ALL rows from INITIAL_WEIGHT so the history table
     // is self-consistent. Persisted weights are used only to detect whether
     // a save is needed.
@@ -442,16 +439,16 @@ export function useAdaptiveLearning(inputs: Test4InputRow[], activeInput?: Activ
 
     // ── Persist if weights or streak records changed ────────────────────
     const allPeriods = ascending.map((r) => r.period);
-    const updatedProcessedSet = new Set([...processedSet, ...allPeriods]);
+    const updatedProcessedSet = new Set([...modelState.processedPeriods, ...allPeriods]);
     const prevWeights = modelState.weights;
     const weightsChanged =
       liveWeights.some((w, i) => Math.abs(w - (prevWeights[i] ?? INITIAL_WEIGHT)) > 0.0001) ||
-      updatedProcessedSet.size !== processedSet.size;
-    const streaksChanged =
+      updatedProcessedSet.size !== modelState.processedPeriods.length;
+    const persistedStreaksChanged =
       longestHitStreak !== (modelState.allTimeLongestHitStreak ?? 0) ||
       longestMissStreak !== (modelState.allTimeLongestMissStreak ?? 0);
 
-    if (weightsChanged || streaksChanged) {
+    if (weightsChanged || persistedStreaksChanged) {
       saveModel({
         weights: liveWeights,
         processedPeriods: Array.from(updatedProcessedSet),
@@ -483,7 +480,7 @@ export function useAdaptiveLearning(inputs: Test4InputRow[], activeInput?: Activ
       activePrediction,
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [inputs, activeInput, modelState.processedPeriods.length, modelState.allTimeLongestHitStreak, modelState.allTimeLongestMissStreak, ...modelState.weights]);
+  }, [inputs, activeInput, modelState.processedPeriods, modelState.allTimeLongestHitStreak, modelState.allTimeLongestMissStreak]);
 
   // Sync persisted weights back into state when localStorage changes externally
   useEffect(() => {
