@@ -7,14 +7,19 @@
  * loss-streak metrics look better.
  */
 
-import type { ExperimentalSize, WalkForwardRow } from './periodicLogisticAlgorithm';
+// `.js` specifiers are required: these modules are consumed both by Vite (which
+// resolves extensionless specifiers) and by the Vercel Node runtime, which
+// transpiles each file separately and then runs real Node ESM. Node ESM does not
+// perform extensionless resolution, so an extensionless specifier here breaks
+// module loading for every API route.
+import type { ExperimentalSize, WalkForwardRow } from './periodicLogisticAlgorithm.js';
 import {
   compareIssueNumbers,
   dateFromIssue,
   positionFromIssue,
-} from './periodicLogisticAlgorithm';
-import type { LossStreakMetrics, ScoredRow } from './cpl2ConfidenceGate';
-import { calculateLossStreakMetrics } from './cpl2ConfidenceGate';
+} from './periodicLogisticAlgorithm.js';
+import type { LossStreakMetrics, ScoredRow } from './cpl2ConfidenceGate.js';
+import { calculateLossStreakMetrics } from './cpl2ConfidenceGate.js';
 
 export const CPL3_MINIMUM_COVERAGE = 0.8;
 export const CPL3_CONFIGS = [

@@ -1,15 +1,38 @@
 import express from 'express';
 import cors from 'cors';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import {
-  compareIssueNumbers,
-  evaluateWalkForward,
-  predictExperimentalPeriod,
-  sizeOfNumber,
-  type ExperimentalHistoryRecord,
-  type PeriodicFeature,
+// Type-only import: erased at compile time, so it adds no runtime module
+// resolution and cannot break unrelated routes.
+import type {
+  ExperimentalHistoryRecord,
+  PeriodicFeature,
 } from '../src/experimental/periodicLogisticAlgorithm.js';
-import { CPL3_CONFIGS, runCpl3WalkForward } from '../src/experimental/cpl3LossStreakBreaker.js';
+import type { Cpl3Row } from '../src/experimental/cpl3LossStreakBreaker.js';
+
+// The Test 9 algorithm modules are loaded LAZILY, inside the Test 9 handlers.
+//
+// Why: a static top-level import makes the whole api/index.ts module fail to
+// evaluate if that single import cannot be resolved. In Vercel's Node runtime
+// that threw ERR_MODULE_NOT_FOUND at module load and took down EVERY route in
+// this file — including /api/real/history and /api/real/t7-signals, which have
+// nothing to do with Test 9. A dynamic import inside the handler confines any
+// Test 9 resolution failure to the Test 9 endpoints alone, so history and
+// t7-signals keep their existing behaviour regardless.
+//
+// Note the `.js` specifiers: Vercel transpiles each TypeScript file separately
+// and then runs real Node ESM, which does not do extensionless resolution.
+type Test9AlgorithmModule = typeof import('../src/experimental/periodicLogisticAlgorithm.js');
+type Test9Cpl3Module = typeof import('../src/experimental/cpl3LossStreakBreaker.js');
+
+let test9ModulesPromise: Promise<{ algorithm: Test9AlgorithmModule; cpl3: Test9Cpl3Module }> | null = null;
+
+function loadTest9Modules() {
+  test9ModulesPromise ??= Promise.all([
+    import('../src/experimental/periodicLogisticAlgorithm.js'),
+    import('../src/experimental/cpl3LossStreakBreaker.js'),
+  ]).then(([algorithm, cpl3]) => ({ algorithm, cpl3 }));
+  return test9ModulesPromise;
+}
 
 const app = express();
 
@@ -775,7 +798,7 @@ app.get('/api/real/current', async (_req, res) => {
 });
 
 // GET /api/real/status (Check Supabase configuration and sync status)
-app.get('/api/real/status', (req, res) => {
+app.get('/api/real/status', (_req, res) => {
   const client = getSupabaseClient();
   res.json({
     supabaseConfigured: !!client,
@@ -1256,7 +1279,8 @@ app.all('/api/real/reset', handleResetEndpoint);
 // ─── Experimental Test 9: CPL-1 → frozen CPL-3 ────────────────────────────────
 // This API is deliberately separate from Tests 2, 3, 6, and 7. It stores
 // exact feature values and settlements in wingo_t9_periodic_predictions.
-async function readExperimentalHistory(): Promise<ExperimentalHistoryRecord[]> {
+async function readExperimentalHistory(algorithm: Test9AlgorithmModule): Promise<ExperimentalHistoryRecord[]> {
+  const { compareIssueNumbers } = algorithm;
   const { records, error } = await readFromSupabase('all');
   if (error) throw new Error(error);
   return records
@@ -1275,7 +1299,13 @@ function targetFromRequest(req: express.Request): string {
   return (bodyPeriod || queryPeriod).trim();
 }
 
-async function buildTest9Prediction(periodId: string, history: ExperimentalHistoryRecord[]) {
+async function buildTest9Prediction(
+  periodId: string,
+  history: ExperimentalHistoryRecord[],
+  algorithm: Test9AlgorithmModule,
+  cpl3Module: Test9Cpl3Module,
+) {
+  const { compareIssueNumbers, evaluateWalkForward, predictExperimentalPeriod, sizeOfNumber } = algorithm;
   const priorHistory = history.filter((record) => compareIssueNumbers(record.issueNumber, periodId) < 0);
   const storedTarget = history.find((record) => record.issueNumber === periodId);
   const target: ExperimentalHistoryRecord = storedTarget || {
@@ -1293,9 +1323,9 @@ async function buildTest9Prediction(periodId: string, history: ExperimentalHisto
     actualSize: sizeOfNumber(target.winningNumber),
     outcome: cpl1.prediction === null ? 'NO_SIGNAL' : cpl1.prediction === sizeOfNumber(target.winningNumber) ? 'WIN' : 'LOSS',
   } as (typeof cpl1Rows)[number];
-  const cpl3Config = CPL3_CONFIGS.find((config) => config.name === 'context-8-cap-3')!;
-  const cpl3Rows = runCpl3WalkForward([...cpl1Rows, cpl1TargetRow], cpl3Config);
-  const cpl3 = cpl3Rows.at(-1);
+  const cpl3Config = cpl3Module.CPL3_CONFIGS.find((config) => config.name === 'context-8-cap-3')!;
+  const cpl3Rows = cpl3Module.runCpl3WalkForward([...cpl1Rows, cpl1TargetRow], cpl3Config);
+  const cpl3: Cpl3Row | undefined = cpl3Rows.at(-1);
   if (!cpl3) throw new Error('CPL-3 did not produce a Test 9 prediction.');
   return { target, cpl1, cpl3, cpl3Config };
 }
@@ -1308,6 +1338,7 @@ app.post('/api/real/experimental-t9/predict', async (req, res) => {
   if (!client) return res.status(503).json({ success: false, error: 'Supabase is not configured' });
 
   try {
+    const { algorithm, cpl3: cpl3Module } = await loadTest9Modules();
     const { data: existingPrediction, error: existingError } = await client
       .from('wingo_t9_periodic_predictions')
       .select('*')
@@ -1319,8 +1350,8 @@ app.post('/api/real/experimental-t9/predict', async (req, res) => {
       return res.json({ success: true, prediction: existingPrediction, stored: existingPrediction, reused: true });
     }
 
-    const history = await readExperimentalHistory();
-    const { target, cpl1, cpl3, cpl3Config } = await buildTest9Prediction(periodId, history);
+    const history = await readExperimentalHistory(algorithm);
+    const { target, cpl1, cpl3, cpl3Config } = await buildTest9Prediction(periodId, history, algorithm, cpl3Module);
     const featureNames = cpl1.features.map((feature: PeriodicFeature) => feature.name);
     const featureValues = cpl1.features.map((feature: PeriodicFeature) => feature.value);
     const finalPrediction = cpl3.prediction;
@@ -1379,7 +1410,14 @@ app.post('/api/real/experimental-t9/settle', async (req, res) => {
   const client = getSupabaseClient();
   if (!client) return res.status(503).json({ success: false, error: 'Supabase is not configured' });
 
-  const actualSize = sizeOfNumber(actualNumber);
+  let actualSize;
+  try {
+    const { algorithm } = await loadTest9Modules();
+    actualSize = algorithm.sizeOfNumber(actualNumber);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return res.status(503).json({ success: false, error: `Test 9 is unavailable: ${message}` });
+  }
   const { data: prediction, error: predictionError } = await client
     .from('wingo_t9_periodic_predictions')
     .select('prediction')

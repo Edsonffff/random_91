@@ -33,7 +33,7 @@ import {
   predictExperimentalPeriod,
   sizeOfNumber,
   type ExperimentalHistoryRecord,
-} from '../../experimental/periodicLogisticAlgorithm';
+} from '../../experimental/periodicLogisticAlgorithm.js';
 import { CPL3_CONFIGS, runCpl3WalkForward, type Cpl3Row } from '../../experimental/cpl3LossStreakBreaker';
 
 interface RoundEntry {

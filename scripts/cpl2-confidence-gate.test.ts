@@ -8,7 +8,7 @@ import {
   measureCpl2,
   selectCpl2Threshold,
 } from '../src/experimental/cpl2ConfidenceGate';
-import type { WalkForwardRow } from '../src/experimental/periodicLogisticAlgorithm';
+import type { WalkForwardRow } from '../src/experimental/periodicLogisticAlgorithm.js';
 import {
   cpl3Metrics,
   CPL3_CONFIGS,

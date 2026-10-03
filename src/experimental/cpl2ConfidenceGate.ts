@@ -5,8 +5,13 @@
  * CPL-1 probability into BIG, SMALL, or NO_SIGNAL and measures loss streaks.
  */
 
-import type { ExperimentalSize, WalkForwardRow } from './periodicLogisticAlgorithm';
-import { compareIssueNumbers, dateFromIssue, positionFromIssue } from './periodicLogisticAlgorithm';
+// `.js` specifiers are required: these modules are consumed both by Vite (which
+// resolves extensionless specifiers) and by the Vercel Node runtime, which
+// transpiles each file separately and then runs real Node ESM. Node ESM does not
+// perform extensionless resolution, so an extensionless specifier here breaks
+// module loading for every API route.
+import type { ExperimentalSize, WalkForwardRow } from './periodicLogisticAlgorithm.js';
+import { compareIssueNumbers, dateFromIssue, positionFromIssue } from './periodicLogisticAlgorithm.js';
 
 export const CPL2_THRESHOLDS = [0.52, 0.54, 0.56, 0.58, 0.60] as const;
 export const CPL2_MINIMUM_COVERAGE = 0.8;

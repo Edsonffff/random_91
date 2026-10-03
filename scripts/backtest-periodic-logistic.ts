@@ -7,7 +7,7 @@ import {
   scheduledStartFromIssue,
   type ExperimentalHistoryRecord,
   type WalkForwardRow,
-} from '../src/experimental/periodicLogisticAlgorithm';
+} from '../src/experimental/periodicLogisticAlgorithm.js';
 import {
   calculateLossStreakMetrics,
   compareLossObjectives,
