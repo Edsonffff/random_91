@@ -1325,7 +1325,10 @@ async function buildTest9Prediction(
   } as (typeof cpl1Rows)[number];
   const cpl3Config = cpl3Module.CPL3_CONFIGS.find((config) => config.name === 'context-8-cap-3')!;
   const cpl3Rows = cpl3Module.runCpl3WalkForward([...cpl1Rows, cpl1TargetRow], cpl3Config);
-  const cpl3: Cpl3Row | undefined = cpl3Rows.at(-1);
+  // Length-based indexing instead of Array.prototype.at(-1): `.at` requires
+  // lib ES2022+, but Vercel typechecks the api/ function graph with an older
+  // default lib. Behaviour is identical (empty array -> undefined).
+  const cpl3: Cpl3Row | undefined = cpl3Rows[cpl3Rows.length - 1];
   if (!cpl3) throw new Error('CPL-3 did not produce a Test 9 prediction.');
   return { target, cpl1, cpl3, cpl3Config };
 }

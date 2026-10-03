@@ -186,10 +186,13 @@ export function predictExperimentalPeriod(
 ): ExperimentalPrediction {
   const features = buildPeriodicFeatures(target.issueNumber);
   const training = eligibleTrainingRows(target, history);
-  const trainedThrough = training
+  // Length-based indexing instead of Array.prototype.at(-1): `.at` requires
+  // lib ES2022+, but Vercel typechecks the api/ function graph with an older
+  // default lib. Behaviour is identical (empty array -> undefined -> null).
+  const sortedTrainingPeriods = training
     .map((row) => row.record.issueNumber)
-    .sort(compareIssueNumbers)
-    .at(-1) ?? null;
+    .sort(compareIssueNumbers);
+  const trainedThrough = sortedTrainingPeriods[sortedTrainingPeriods.length - 1] ?? null;
 
   if (features.length !== FEATURE_NAMES.length) {
     return {
