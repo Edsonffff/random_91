@@ -8,7 +8,10 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "server": "tsx server/mockServer.ts"
+    "server": "tsx server/mockServer.ts",
+    "backtest:t9": "tsx scripts/backtest-periodic-logistic.ts",
+    "backtest:t9:multi": "tsx scripts/backtest-cpl3-multi-window.ts",
+    "test:t9": "tsx --test scripts/cpl2-confidence-gate.test.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.117.2",

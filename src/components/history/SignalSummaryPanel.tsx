@@ -1,15 +1,15 @@
 /**
- * SignalSummaryPanel — All-8-Tests Vote Summary
+ * SignalSummaryPanel — Active Test Vote Summary
  *
- * Shows BIG/SMALL signals from every test, counts votes, and shows the majority.
- * No majority is declared on a 4–4 tie.
+ * Shows BIG/SMALL signals from the active tests, counts votes, and shows the majority.
+ * No majority is declared on a tie.
  */
 
 import React from 'react';
 
 type BigSmall = 'Big' | 'Small';
 
-interface SignalEntry {
+export interface SignalEntry {
   testNum: number;
   label: string;
   prediction: BigSmall | null;

@@ -1,5 +1,5 @@
 /**
- * AdditionalSignalsPanel — Tests 5, 6, 7, 8  (corrected implementation)
+ * AdditionalSignalsPanel — Tests 6 and 7
  *
  * ROOT CAUSE OF PREVIOUS BUG
  * ──────────────────────────
@@ -12,14 +12,7 @@
  * draw timestamp.  All 100+ rounds in a session therefore showed:
  *   10:00:50, 10:00:50, 10:00:50 …
  *
- * FIX
- * ───
- * Test 5  — Uses the ISO completedAt timestamp from RealGameRecord
- *            (unique per round).  If completedAt is not present or
- *            every round shares the same HH:MM:SS value (non-unique),
- *            Test 5 is marked UNAVAILABLE.
- *
- * Tests 6–8 — Use the last 7 characters of the period string parsed as
+ * Tests 6–7 — Use the last 7 characters of the period string parsed as
  *             an integer.  This gives the sequential round number that
  *             increments with every round:
  *               20260928100050486 → last7 = "0050486" → 50486
@@ -38,11 +31,11 @@ export type BigSmall = 'Big' | 'Small';
 
 export interface TimeTestDetail {
   period: string;
-  /** For Test 5: HH parsed from completedAt */
+  /** Reserved display time field for shared detail-table compatibility. */
   hour: number;
-  /** For Test 5: MM parsed from completedAt; for Tests 6-7: 0 (unused) */
+  /** Unused by Tests 6-7. */
   minute: number;
-  /** For Test 5: SS parsed from completedAt; for Tests 6-7: 0 (unused) */
+  /** Unused by Tests 6-7. */
   second: number;
   predictionNumber: number | null;
   predictedSize: BigSmall | null;
@@ -69,13 +62,11 @@ export interface TimeTestResult {
 }
 
 
-// ─── Input type (extended from RoundEntry to carry completedAt) ───────────────
+// ─── Input type ───────────────────────────────────────────────────────────────
 
 export interface RoundEntryForTests {
   period: string;
   number: number;
-  /** ISO timestamp from RealGameRecord.completedAt — present only for realLive source */
-  completedAt?: string;
 }
 
 // ─── Pure helpers ─────────────────────────────────────────────────────────────
@@ -83,23 +74,6 @@ export interface RoundEntryForTests {
 function toBigSmall(n: number): BigSmall {
   return n >= 5 ? 'Big' : 'Small';
 }
-
-/**
- * Extract the sequential round number from a period string.
- * Uses the last 7 characters to avoid IEEE 754 precision loss on 17-digit ints.
- * For short period strings (≤7 chars), uses the full string.
- *
- * Examples:
- *   "20260928100050486" → parseInt("0050486", 10) = 50486
- *   "20260928100050487" → parseInt("0050487", 10) = 50487
- *   "0051268"           → parseInt("0051268", 10) = 51268
- */
-function roundNumberFromPeriod(period: string): number | null {
-  const tail = period.length > 7 ? period.slice(-7) : period;
-  const n = parseInt(tail, 10);
-  return isNaN(n) ? null : n;
-}
-
 
 function streakStats(details: TimeTestDetail[]) {
   if (details.length === 0) {
@@ -131,76 +105,6 @@ function sortedAscending(dataset: RoundEntryForTests[]): RoundEntryForTests[] {
 }
 
 
-
-// ─── Test 5 — Digit Mix Formula ───────────────────────────────────────────────
-// R = roundNumber (last 7 digits of period string)
-// P = previous round's actual numeric result (anti-leakage: sorted[i-1])
-//
-// digitSum  = sum of individual digits of R
-// firstDigit = first digit of R (i.e. Math.floor(R / 10^(digits-1)))
-// lastDigit  = R % 10
-//
-// predictionNumber = (digitSum*3 + P*2 + firstDigit + lastDigit) % 10
-// 0–4 → SMALL, 5–9 → BIG
-
-function digitSumOf(n: number): number {
-  let s = 0;
-  let x = Math.abs(n);
-  if (x === 0) return 0;
-  while (x > 0) { s += x % 10; x = Math.floor(x / 10); }
-  return s;
-}
-
-function firstDigitOf(n: number): number {
-  let x = Math.abs(n);
-  while (x >= 10) x = Math.floor(x / 10);
-  return x;
-}
-
-export function computeTest5(dataset: RoundEntryForTests[]): TimeTestResult {
-  const sorted = sortedAscending(dataset);
-  let hits = 0;
-  const details: TimeTestDetail[] = [];
-
-  for (let i = 1; i < sorted.length; i++) {
-    const item = sorted[i];
-    const prev = sorted[i - 1];
-    const roundNum = roundNumberFromPeriod(item.period);
-    if (roundNum === null) continue;
-
-    const dSum = digitSumOf(roundNum);
-    const fDigit = firstDigitOf(roundNum);
-    const lDigit = roundNum % 10;
-    const P = prev.number;
-
-    const predNum = (dSum * 3 + P * 2 + fDigit + lDigit) % 10;
-    const predictedSize = toBigSmall(predNum);
-    const actualSize = toBigSmall(item.number);
-    const isHit = predictedSize === actualSize;
-    if (isHit) hits++;
-
-    details.push({
-      period: item.period,
-      hour: 0,
-      minute: 0,
-      second: 0,
-      predictionNumber: predNum,
-      predictedSize,
-      actual: item.number,
-      actualSize,
-      isHit,
-      extra: { roundNumber: roundNum, digitSum: dSum, firstDigit: fDigit, lastDigit: lDigit, prevResult: P },
-    });
-  }
-
-  const total = details.length;
-  const accuracy = total > 0 ? Math.round((hits / total) * 100) : 0;
-  return {
-    hits, total, accuracy, details,
-    ...streakStats(details),
-    latestPrediction: details.length > 0 ? details[details.length - 1].predictedSize : null,
-  };
-}
 
 /** Compute simple moving average over last `n` states (Big=1, Small=0). 
  *  Only uses sorted[0..i-1] — never includes current round. */
@@ -582,21 +486,19 @@ export interface T7DebugInfo {
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export interface AdditionalSignalsPanelProps {
-  test5: TimeTestResult;
   test6: TimeTestResult & { smaValues: { sma5: number | null; sma10: number | null; sma20: number | null } };
   test7: TimeTestResult;
   t7DebugInfo?: T7DebugInfo | null;
 }
 
 export const AdditionalSignalsPanel: React.FC<AdditionalSignalsPanelProps> = ({
-  test5,
   test6,
   test7,
   t7DebugInfo,
 }) => {
   const [showDetails, setShowDetails] = useState(false);
 
-  const ACCENT_COLORS = ['#35B978', '#60A5FA', '#F59E0B'];
+   const ACCENT_COLORS = ['#60A5FA', '#F59E0B'];
 
   return (
     <div className="space-y-3">
@@ -609,9 +511,8 @@ export const AdditionalSignalsPanel: React.FC<AdditionalSignalsPanelProps> = ({
           <span className="w-14 text-right">Latest</span>
           <span className="w-12 text-right">Acc%</span>
         </div>
-        <SignalRow testNum={5} label="Digit Mix" formula="(dSum×3+P×2+first+last)%10 → B/S" result={test5} accentColor={ACCENT_COLORS[0]} />
-        <SignalRow testNum={6} label="SMA-10" formula="avg(prev 10 states)>0.5→BIG, <0.5→SML" result={test6} accentColor={ACCENT_COLORS[1]} />
-        <SignalRow testNum={7} label="WingoAI Signal" formula="External API signal: BIG→Big · SMALL→Small" result={test7} accentColor={ACCENT_COLORS[2]} />
+        <SignalRow testNum={6} label="SMA-10" formula="avg(prev 10 states)>0.5→BIG, <0.5→SML" result={test6} accentColor={ACCENT_COLORS[0]} />
+        <SignalRow testNum={7} label="WingoAI Signal" formula="External API signal: BIG→Big · SMALL→Small" result={test7} accentColor={ACCENT_COLORS[1]} />
       </div>
 
       {/* ── Toggle details ────────────────────────────────────────────────── */}
@@ -625,31 +526,6 @@ export const AdditionalSignalsPanel: React.FC<AdditionalSignalsPanelProps> = ({
       {/* ── Detailed sub-panels ───────────────────────────────────────────── */}
       {showDetails && (
         <div className="space-y-4">
-
-          {/* Test 5 */}
-          <CollapsibleCard id="test5_detail" variant="subcard"
-            title={<span className="font-mono text-xs font-bold text-[#35B978]">Test 5 — Digit Mix Formula</span>}
-            subtitle={`${test5.total} predictions · ${test5.accuracy}% accuracy · Cur Hit: ${test5.currentHitStreak} · Cur Miss: ${test5.currentMissStreak}`}
-          >
-            <div className="space-y-3">
-              {/* Formula reference box */}
-              <div className="p-3 rounded-lg bg-[#071A14] border border-[#1E3A2B] text-[11px] font-mono text-[#8D9B95] space-y-0.5">
-                <span className="text-[#35B978] font-bold block">Formula</span>
-                <span>R = round ID (last 7 digits of period)</span>
-                <span className="block">predNum = (digitSum(R)×3 + P×2 + firstDigit(R) + lastDigit(R)) % 10</span>
-                <span className="block text-[#8D9B95]">P = previous round's actual result · 0–4→SMALL · 5–9→BIG</span>
-              </div>
-              <StreakMini result={test5} />
-              <DetailTable result={test5}
-                extraHeaders={['Round #', 'Digit Sum', 'Prev']}
-                extraCells={(row) => [
-                  row.extra?.roundNumber ?? '—',
-                  row.extra?.digitSum ?? '—',
-                  row.extra?.prevResult ?? '—',
-                ]}
-              />
-            </div>
-          </CollapsibleCard>
 
           <CollapsibleCard id="test6_detail" variant="subcard"
             title={<span className="font-mono text-xs font-bold text-[#60A5FA]">Test 6 — Simple Moving Average (SMA-10)</span>}
@@ -813,7 +689,7 @@ export const AdditionalSignalsPanel: React.FC<AdditionalSignalsPanelProps> = ({
 
       {/* Disclaimer */}
       <p className="text-[10px] text-[#8D9B95] font-sans">
-        ⚠ Test 5 uses the actual draw timestamp from the server (if available and unique per round). Test 7 uses the external prediction signal. All predictions are generated before the actual result is known. Past accuracy does not imply future predictability.
+        ⚠ Test 7 uses the external prediction signal. All predictions are generated before the actual result is known. Past accuracy does not imply future predictability.
       </p>
     </div>
   );

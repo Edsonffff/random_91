@@ -1,6 +1,15 @@
 import express from 'express';
 import cors from 'cors';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import {
+  compareIssueNumbers,
+  evaluateWalkForward,
+  predictExperimentalPeriod,
+  sizeOfNumber,
+  type ExperimentalHistoryRecord,
+  type PeriodicFeature,
+} from '../src/experimental/periodicLogisticAlgorithm.js';
+import { CPL3_CONFIGS, runCpl3WalkForward } from '../src/experimental/cpl3LossStreakBreaker.js';
 
 const app = express();
 
@@ -1243,6 +1252,174 @@ const handleResetEndpoint = async (_req: express.Request, res: express.Response)
 
 app.post(['/api/real/reset', '/api/reset', '/real/reset', '/reset'], handleResetEndpoint);
 app.all('/api/real/reset', handleResetEndpoint);
+
+// ─── Experimental Test 9: CPL-1 → frozen CPL-3 ────────────────────────────────
+// This API is deliberately separate from Tests 2, 3, 6, and 7. It stores
+// exact feature values and settlements in wingo_t9_periodic_predictions.
+async function readExperimentalHistory(): Promise<ExperimentalHistoryRecord[]> {
+  const { records, error } = await readFromSupabase('all');
+  if (error) throw new Error(error);
+  return records
+    .map((record) => ({
+      issueNumber: record.issueNumber,
+      winningNumber: record.winningNumber,
+      sourceTime: record.completedAt,
+      createdAt: record.completedAt,
+    }))
+    .sort((a, b) => compareIssueNumbers(a.issueNumber, b.issueNumber));
+}
+
+function targetFromRequest(req: express.Request): string {
+  const bodyPeriod = typeof req.body?.periodId === 'string' ? req.body.periodId : '';
+  const queryPeriod = typeof req.query.periodId === 'string' ? req.query.periodId : '';
+  return (bodyPeriod || queryPeriod).trim();
+}
+
+async function buildTest9Prediction(periodId: string, history: ExperimentalHistoryRecord[]) {
+  const priorHistory = history.filter((record) => compareIssueNumbers(record.issueNumber, periodId) < 0);
+  const storedTarget = history.find((record) => record.issueNumber === periodId);
+  const target: ExperimentalHistoryRecord = storedTarget || {
+    issueNumber: periodId,
+    winningNumber: 0,
+    sourceTime: null,
+    createdAt: null,
+  };
+  const cpl1 = predictExperimentalPeriod(target, priorHistory);
+  const cpl1Rows = evaluateWalkForward(priorHistory);
+  const cpl1TargetRow = {
+    ...cpl1,
+    date: periodId.slice(0, 8),
+    actualNumber: target.winningNumber,
+    actualSize: sizeOfNumber(target.winningNumber),
+    outcome: cpl1.prediction === null ? 'NO_SIGNAL' : cpl1.prediction === sizeOfNumber(target.winningNumber) ? 'WIN' : 'LOSS',
+  } as (typeof cpl1Rows)[number];
+  const cpl3Config = CPL3_CONFIGS.find((config) => config.name === 'context-8-cap-3')!;
+  const cpl3Rows = runCpl3WalkForward([...cpl1Rows, cpl1TargetRow], cpl3Config);
+  const cpl3 = cpl3Rows.at(-1);
+  if (!cpl3) throw new Error('CPL-3 did not produce a Test 9 prediction.');
+  return { target, cpl1, cpl3, cpl3Config };
+}
+
+app.post('/api/real/experimental-t9/predict', async (req, res) => {
+  const periodId = targetFromRequest(req);
+  if (!periodId) return res.status(400).json({ success: false, error: 'periodId is required' });
+
+  const client = getSupabaseClient();
+  if (!client) return res.status(503).json({ success: false, error: 'Supabase is not configured' });
+
+  try {
+    const { data: existingPrediction, error: existingError } = await client
+      .from('wingo_t9_periodic_predictions')
+      .select('*')
+      .eq('game_code', 'WinGo_30S')
+      .eq('period_id', periodId)
+      .maybeSingle();
+    if (existingError) return res.status(500).json({ success: false, error: existingError.message });
+    if (existingPrediction) {
+      return res.json({ success: true, prediction: existingPrediction, stored: existingPrediction, reused: true });
+    }
+
+    const history = await readExperimentalHistory();
+    const { target, cpl1, cpl3, cpl3Config } = await buildTest9Prediction(periodId, history);
+    const featureNames = cpl1.features.map((feature: PeriodicFeature) => feature.name);
+    const featureValues = cpl1.features.map((feature: PeriodicFeature) => feature.value);
+    const finalPrediction = cpl3.prediction;
+    const probabilityBig = cpl1.probabilityBig;
+    const probabilitySmall = probabilityBig === null ? null : 1 - probabilityBig;
+    const { data, error } = await client
+      .from('wingo_t9_periodic_predictions')
+      .upsert({
+        game_code: 'WinGo_30S',
+        period_id: periodId,
+        algorithm_version: 'CPL-3',
+        prediction: finalPrediction,
+        probability_big: probabilityBig,
+        cpl1_prediction: cpl1.prediction,
+        cpl1_probability_big: probabilityBig,
+        cpl1_probability_small: probabilitySmall,
+        cpl3_config: cpl3Config.name,
+        previous_loss_streak: cpl3.priorLossStreak,
+        cpl3_prediction: finalPrediction,
+        feature_names: featureNames,
+        feature_values: featureValues,
+        training_count: cpl1.trainingCount,
+        trained_through_period: cpl1.trainedThroughPeriod,
+        outcome: finalPrediction === null ? 'NO_SIGNAL' : null,
+      }, { onConflict: 'game_code,period_id' })
+      .select()
+      .single();
+    if (error) return res.status(500).json({ success: false, error: error.message });
+    return res.json({
+      success: true,
+      prediction: {
+        periodId,
+        cpl1Prediction: cpl1.prediction,
+        cpl1ProbabilityBig: probabilityBig,
+        cpl1ProbabilitySmall: probabilitySmall,
+        cpl3Config: cpl3Config.name,
+        previousLossStreak: cpl3.priorLossStreak,
+        cpl3Prediction: finalPrediction,
+        predictionTimestamp: data?.predicted_at ?? null,
+        actualNumber: data?.actual_number ?? (target.sourceTime ? target.winningNumber : null),
+      },
+      stored: data,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return res.status(500).json({ success: false, error: message });
+  }
+});
+
+app.post('/api/real/experimental-t9/settle', async (req, res) => {
+  const periodId = targetFromRequest(req);
+  const actualNumber = Number(req.body?.actualNumber);
+  if (!periodId || !Number.isInteger(actualNumber) || actualNumber < 0 || actualNumber > 9) {
+    return res.status(400).json({ success: false, error: 'periodId and integer actualNumber (0-9) are required' });
+  }
+  const client = getSupabaseClient();
+  if (!client) return res.status(503).json({ success: false, error: 'Supabase is not configured' });
+
+  const actualSize = sizeOfNumber(actualNumber);
+  const { data: prediction, error: predictionError } = await client
+    .from('wingo_t9_periodic_predictions')
+    .select('prediction')
+    .eq('game_code', 'WinGo_30S')
+    .eq('period_id', periodId)
+    .maybeSingle();
+  if (predictionError) return res.status(500).json({ success: false, error: predictionError.message });
+  if (!prediction) return res.status(404).json({ success: false, error: 'Test 9 prediction was not found for this period' });
+
+  const outcome = prediction.prediction === null ? 'NO_SIGNAL' : prediction.prediction === actualSize ? 'WIN' : 'LOSS';
+  const { data, error } = await client
+    .from('wingo_t9_periodic_predictions')
+    .update({
+      actual_number: actualNumber,
+      actual_size: actualSize,
+      outcome,
+      settled_at: new Date().toISOString(),
+    })
+    .eq('game_code', 'WinGo_30S')
+    .eq('period_id', periodId)
+    .select()
+    .single();
+  if (error) return res.status(500).json({ success: false, error: error.message });
+  return res.json({ success: true, result: data });
+});
+
+app.get('/api/real/experimental-t9/predictions', async (req, res) => {
+  const client = getSupabaseClient();
+  if (!client) return res.status(503).json({ success: false, error: 'Supabase is not configured' });
+  const parsedLimit = Number(req.query.limit);
+  const limit = Number.isInteger(parsedLimit) && parsedLimit > 0 ? Math.min(parsedLimit, 5000) : 500;
+  const { data, error } = await client
+    .from('wingo_t9_periodic_predictions')
+    .select('*')
+    .eq('game_code', 'WinGo_30S')
+    .order('period_id', { ascending: false })
+    .limit(limit);
+  if (error) return res.status(500).json({ success: false, error: error.message });
+  return res.json({ success: true, count: data?.length ?? 0, predictions: data ?? [] });
+});
 
 // GET /api/real/debug-supabase (Diagnostic endpoint for testing Supabase connectivity and schema)
 app.get('/api/real/debug-supabase', async (_req, res) => {

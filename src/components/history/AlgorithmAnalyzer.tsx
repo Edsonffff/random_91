@@ -22,18 +22,23 @@ import type { Test4InputRow, ActiveInputRow } from '../../hooks/useAdaptiveLearn
 import { AdaptiveLearningPanel } from './AdaptiveLearningPanel';
 import {
   AdditionalSignalsPanel,
-  computeTest5,
   computeTest6,
   computeTest7,
 } from './AdditionalSignalsPanel';
 import type { WingoAIT7Signal, T7DebugInfo } from './AdditionalSignalsPanel';
-import { SignalSummaryPanel } from './SignalSummaryPanel';
+import { SignalSummaryPanel, type SignalEntry } from './SignalSummaryPanel';
+import { ExperimentalTest9Panel } from './ExperimentalTest9Panel';
+import {
+  evaluateWalkForward,
+  predictExperimentalPeriod,
+  sizeOfNumber,
+  type ExperimentalHistoryRecord,
+} from '../../experimental/periodicLogisticAlgorithm';
+import { CPL3_CONFIGS, runCpl3WalkForward, type Cpl3Row } from '../../experimental/cpl3LossStreakBreaker';
 
 interface RoundEntry {
   period: string;
   number: number;
-  /** ISO timestamp from RealGameRecord.completedAt — only present for realLive source */
-  completedAt?: string;
 }
 
 interface StreakDistribution {
@@ -738,7 +743,6 @@ export const AlgorithmAnalyzer: React.FC = () => {
       return realHistory.map((r) => ({
         period: r.periodNumber,
         number: r.winningNumber,
-        completedAt: r.completedAt, // carry actual draw timestamp for Test 5
       }));
     }
     if (dataSource === 'sample3') {
@@ -1041,9 +1045,42 @@ export const AlgorithmAnalyzer: React.FC = () => {
   // Declared BEFORE test4Inputs so their .details arrays are available
   // when building the join maps below.
 
-  const test5 = useMemo(() => computeTest5(activeDataset), [activeDataset]);
   const test6 = useMemo(() => computeTest6(activeDataset), [activeDataset]);
   const test7 = useMemo(() => computeTest7(activeDataset, t7SignalsMap), [activeDataset, t7SignalsMap]);
+
+  // Test 9: isolated CPL-1 → frozen CPL-3 pipeline. It does not alter Tests 2,
+  // 3, 6, or 7; Test 9 is the isolated CPL-3 experiment.
+  const test9History = useMemo((): ExperimentalHistoryRecord[] => realHistory.map((record) => ({
+    issueNumber: record.periodNumber,
+    winningNumber: record.winningNumber,
+    sourceTime: record.completedAt,
+    createdAt: record.completedAt,
+  })), [realHistory]);
+  const test9Cpl1Rows = useMemo(() => evaluateWalkForward(test9History), [test9History]);
+  const test9Rows = useMemo(() => {
+    const config = CPL3_CONFIGS.find((item) => item.name === 'context-8-cap-3')!;
+    return runCpl3WalkForward(test9Cpl1Rows, config);
+  }, [test9Cpl1Rows]);
+  const test9ActiveRow = useMemo((): Cpl3Row | null => {
+    const activePeriod = realSchedule?.currentIssue?.trim();
+    if (!activePeriod) return null;
+    const previousHistory = test9History.filter((record) => compareIssuesAsc(record.issueNumber, activePeriod) < 0);
+    const cpl1Prediction = predictExperimentalPeriod({
+      issueNumber: activePeriod,
+      winningNumber: 0,
+      sourceTime: null,
+      createdAt: null,
+    }, previousHistory);
+    const targetRow = {
+      ...cpl1Prediction,
+      date: activePeriod.slice(0, 8),
+      actualNumber: 0,
+      actualSize: sizeOfNumber(0),
+      outcome: cpl1Prediction.prediction === null ? 'NO_SIGNAL' : cpl1Prediction.prediction === sizeOfNumber(0) ? 'WIN' : 'LOSS',
+    } as (typeof test9Cpl1Rows)[number];
+    const config = CPL3_CONFIGS.find((item) => item.name === 'context-8-cap-3')!;
+    return runCpl3WalkForward([...test9Cpl1Rows, targetRow], config).at(-1) ?? null;
+  }, [realSchedule?.currentIssue, test9History, test9Cpl1Rows]);
 
   // ==========================================
   // ADAPTIVE LEARNING MAIN DECISION ENGINE
@@ -1053,7 +1090,7 @@ export const AlgorithmAnalyzer: React.FC = () => {
   // Test 2 (Markov) has no prediction until it accumulates ≥ MIN samples, which
   // never happens inside a short (e.g. 10-round) live window — so it must not be
   // allowed to block every row. Missing signals are excluded from that round's
-  // vote inside the hook (same rule already used for T3/T5–T7).
+  // vote inside the hook (same rule already used for the remaining signals).
   const adaptiveInputs = useMemo((): Test4InputRow[] => {
     if (activeDataset.length === 0) return [];
 
@@ -1067,9 +1104,9 @@ export const AlgorithmAnalyzer: React.FC = () => {
       if (!d.noSignal && d.predictedSize) t3Map.set(d.period, d.predictedSize);
     }
 
-    const t5Map = new Map<string, 'Big' | 'Small'>();
-    for (const d of test5.details) {
-      if (d.predictedSize) t5Map.set(d.period, d.predictedSize);
+    const t9Map = new Map<string, 'Big' | 'Small'>();
+    for (const d of test9Rows) {
+      if (!d.noSignal && d.prediction) t9Map.set(d.periodId, d.prediction === 'BIG' ? 'Big' : 'Small');
     }
 
     const t6Map = new Map<string, 'Big' | 'Small'>();
@@ -1093,9 +1130,9 @@ export const AlgorithmAnalyzer: React.FC = () => {
         period,
         t2pred: t2Map.get(period) ?? null,
         t3pred: t3Map.get(period) ?? null,
-        t5pred: t5Map.get(period),
         t6pred: t6Map.get(period),
         t7pred: t7Map.get(period),
+        t9pred: t9Map.get(period),
         actual,
       });
     }
@@ -1103,9 +1140,9 @@ export const AlgorithmAnalyzer: React.FC = () => {
   }, [
     testLinearRecurrence.details,
     test3.details,
-    test5.details,
     test6.details,
     test7.details,
+    test9Rows,
     activeDataset,
   ]);
 
@@ -1118,17 +1155,17 @@ export const AlgorithmAnalyzer: React.FC = () => {
       period: activePeriodId,
       t2pred: testLinearRecurrence.latestPrediction,
       t3pred: test3.latestPrediction,
-      t5pred: test5.latestPrediction,
       t6pred: test6.latestPrediction,
       t7pred: test7.latestPrediction,
+      t9pred: test9ActiveRow?.prediction === 'BIG' ? 'Big' : test9ActiveRow?.prediction === 'SMALL' ? 'Small' : null,
     };
   }, [
     activePeriodId,
     testLinearRecurrence.latestPrediction,
     test3.latestPrediction,
-    test5.latestPrediction,
     test6.latestPrediction,
     test7.latestPrediction,
+    test9ActiveRow?.prediction,
   ]);
 
   const adaptiveLearning = useAdaptiveLearning(adaptiveInputs, adaptiveActiveInput);
@@ -1187,17 +1224,17 @@ export const AlgorithmAnalyzer: React.FC = () => {
   }, [testLinearRecurrence.details, test6.details, adaptiveInputs]);
 
   // ==========================================
-  // INPUT SIGNALS SUMMARY (Tests 2, 3, 5, 6, 7)
+  // INPUT SIGNALS SUMMARY (Tests 2, 3, 6, 7, 9)
   // ==========================================
-  const signalSummaryData = useMemo(() => {
+  const signalSummaryData = useMemo((): SignalEntry[] => {
     return [
       { testNum: 2, label: 'Markov Chain', prediction: testLinearRecurrence.latestPrediction },
       { testNum: 3, label: 'Previous 2 Pattern', prediction: test3.latestPrediction },
-      { testNum: 5, label: 'Digit Mix', prediction: test5.latestPrediction },
       { testNum: 6, label: 'SMA-10', prediction: test6.latestPrediction },
       { testNum: 7, label: 'WingoAI Signal', prediction: test7.latestPrediction },
+      { testNum: 9, label: 'CPL-3 Loss-Streak Breaker', prediction: test9ActiveRow?.prediction === 'BIG' ? 'Big' : test9ActiveRow?.prediction === 'SMALL' ? 'Small' : null },
     ];
-  }, [testLinearRecurrence.latestPrediction, test3.latestPrediction, test5.latestPrediction, test6.latestPrediction, test7.latestPrediction]);
+  }, [testLinearRecurrence.latestPrediction, test3.latestPrediction, test6.latestPrediction, test7.latestPrediction, test9ActiveRow?.prediction]);
 
   const handleFullReset = async () => {
     setIsResetting(true);
@@ -1351,7 +1388,7 @@ export const AlgorithmAnalyzer: React.FC = () => {
         }
         headerRight={
           <span className="text-xs text-[#8D9B95] font-mono">
-            Online Adaptive Ensemble of Supporting Tests (1, 2, 3, 5, 6, 7, 8)
+             Online Adaptive Ensemble of Supporting Tests (2, 3, 6, 7, 9)
           </span>
         }
         defaultExpanded={true}
@@ -1503,7 +1540,7 @@ export const AlgorithmAnalyzer: React.FC = () => {
         }
         headerRight={
           <span className="text-xs text-[#8D9B95]">
-            Tests 2, 3, 5, 6, 7 — independent input signals feeding into Adaptive Learning
+             Tests 2, 3, 6, 7, 9 — independent input signals feeding into Adaptive Learning
           </span>
         }
       >
@@ -1539,7 +1576,7 @@ export const AlgorithmAnalyzer: React.FC = () => {
                 : 'bg-[#06130F] text-[#35B978] hover:text-[#F5F5F5] border border-[#35B978]/40'
             }`}
           >
-            ⏱ Tests 5–7: Additional Signals (incl. WingoAI)
+             ⏱ Tests 6–7: Additional Signals (incl. WingoAI)
           </button>
         </div>
 
@@ -1800,7 +1837,7 @@ export const AlgorithmAnalyzer: React.FC = () => {
           </div>
         )}
 
-        {/* Tests 5–8: Time-Based & External Additional Signals */}
+        {/* Tests 6–7: Time-Based & External Additional Signals */}
         {activeTestTab === 'additional' && (
           <CollapsibleCard
             id="tests5to8_additional"
@@ -1808,17 +1845,16 @@ export const AlgorithmAnalyzer: React.FC = () => {
             title={
               <div className="flex items-center gap-2">
                 <span className="px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-[#35B978]/15 text-[#35B978] border border-[#35B978]/30">
-                  TESTS 5–8
+                  TESTS 6–7
                 </span>
                 <span className="font-mono text-xs font-bold text-[#F5F5F5]">
-                  Additional & External Signals (Digit Mix, SMA-10, WingoAI, Streak)
+                  Additional & External Signals (SMA-10, WingoAI)
                 </span>
               </div>
             }
-            subtitle="Digit mix (Test 5), moving average (Test 6), and external prediction signal (Test 7)"
+            subtitle="Moving average (Test 6) and external prediction signal (Test 7)"
           >
             <AdditionalSignalsPanel
-              test5={test5}
               test6={test6}
               test7={test7}
   
@@ -1827,11 +1863,21 @@ export const AlgorithmAnalyzer: React.FC = () => {
           </CollapsibleCard>
         )}
 
+        <CollapsibleCard
+          id="test9_cpl3_experimental"
+          variant="subcard"
+          title={<span className="font-mono text-xs font-bold text-[#A78BFA]">Test 9 — CPL-3 Loss-Streak Breaker</span>}
+          subtitle="Frozen context-8-cap-3 configuration; isolated from Tests 2, 3, 6, and 7"
+          defaultExpanded={true}
+        >
+          <ExperimentalTest9Panel rows={test9Rows} activeRow={test9ActiveRow} />
+        </CollapsibleCard>
+
         {/* Input Signals Summary — always visible inside Category 2 */}
         <CollapsibleCard
           id="signal_summary_inputs"
           variant="subcard"
-          title={<span className="font-mono text-xs font-bold text-[#F5F5F5]">📊 Input Signals Vote Summary (Tests 1, 2, 3, 5, 6, 7, 8)</span>}
+          title={<span className="font-mono text-xs font-bold text-[#F5F5F5]">📊 Input Signals Vote Summary (Tests 2, 3, 6, 7, 9)</span>}
           subtitle="Latest prediction from each supporting test — input signals feeding into Adaptive Learning"
           defaultExpanded={true}
         >

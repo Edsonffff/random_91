@@ -1,7 +1,7 @@
 /**
- * AdaptiveLearningPanel — Main Decision Engine (7-signal weighted ensemble)
+ * AdaptiveLearningPanel — Main Decision Engine (active-signal weighted ensemble)
  *
- * Inputs:  Tests 1, 2, 3, 5, 6, 7, 8
+ * Inputs:  Tests 2, 3, 6, 7, 9
  * Learner: Adaptive Learning Multi-Signal Decision Engine
  */
 
@@ -18,14 +18,14 @@ interface Props {
   activeSchedule?: RealGameSchedule | null;
 }
 
-// ─── Accent colours per signal index [T2,T3,T5,T6,T7] ─────────────────────
+// ─── Accent colours per signal index [T2,T3,T6,T7,T9] ─────────────────────
 // Indexed against SIGNAL_LABELS, so the order here must match it exactly.
 const SIGNAL_COLORS = [
   '#60A5FA', // T2 blue
   '#35B978', // T3 green
-  '#A78BFA', // T5 violet
   '#F59E0B', // T6 orange
   '#34D399', // T7 teal (external prediction)
+  '#A78BFA', // T9 violet (CPL-3)
 ];
 
 // ─── Small sub-components ────────────────────────────────────────────────────
@@ -421,7 +421,7 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data, activeSchedule })
               ))}
             </div>
             <p className="text-[10px] text-[#8D9B95] font-sans">
-              Weights update after every settled round and always sum to 100%. Missing signals (e.g. T5–T7 for early rounds) are temporarily excluded per round.
+               Weights update after every settled round and always sum to 100%. Missing signals are temporarily excluded per round.
             </p>
           </div>
 
@@ -485,9 +485,9 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data, activeSchedule })
                 <th className="py-2.5 px-3">Period</th>
                 <th className="py-2.5 px-2 text-center">T2</th>
                 <th className="py-2.5 px-2 text-center">T3</th>
-                <th className="py-2.5 px-2 text-center">T5</th>
                 <th className="py-2.5 px-2 text-center">T6</th>
                 <th className="py-2.5 px-2 text-center">T7</th>
+                <th className="py-2.5 px-2 text-center">T9</th>
                 <th className="py-2.5 px-3 text-center text-[#35B978] font-bold">DECISION</th>
                 <th className="py-2.5 px-2 text-center">Actual</th>
                 <th className="py-2.5 px-3 text-right">Outcome</th>
@@ -499,9 +499,9 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data, activeSchedule })
                   <td className="py-1.5 px-3 text-gray-300">{row.period.slice(-7)}</td>
                   <SigCell pred={row.t2pred} />
                   <SigCell pred={row.t3pred} />
-                  <SigCell pred={row.t5pred} />
                   <SigCell pred={row.t6pred} />
                   <SigCell pred={row.t7pred} />
+                  <SigCell pred={row.t9pred} />
                   <td className={`py-1.5 px-3 font-bold text-center ${row.adaptiveDecision === 'Big' ? 'text-[#E7B93F]' : 'text-[#60A5FA]'}`}>
                     {row.adaptiveDecision.toUpperCase()}
                   </td>

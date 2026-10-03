@@ -1,12 +1,12 @@
 /**
  * useAdaptiveLearning — Adaptive Learning Main Decision Engine
  *
- * Learns from all five input signals: Tests 2, 3, 5, 6, 7.
+ * Learns from the active input signals: Tests 2, 3, 6, 7, 9.
  * Generates the MAIN ADAPTIVE DECISION (BIG / SMALL).
  *
  * Key design decisions
  * ────────────────────
- * • 5 weights [w2,w3,w5,w6,w7], always ≥ MIN_WEIGHT, always sum to 1.0.
+ * • 5 weights [w2,w3,w6,w7,w9], always ≥ MIN_WEIGHT, always sum to 1.0.
  * • Missing signal for a round → that weight is excluded from the
  *   vote and remaining weights are normalised for that round only.
  * • Anti-leakage: prediction for round i uses weights from rounds 0…i-1.
@@ -27,10 +27,10 @@ const INITIAL_WEIGHT = 1 / N_SIGNALS;
 const MIN_WEIGHT = 0.01;
 const STORAGE_KEY = 'wingo_adaptive_model_v6';
 const LEGACY_STORAGE_KEY = 'wingo_test4_model_v4';
-/** v5 stored 7 weights ordered [T1,T2,T3,T5,T6,T7,T8]; T1 and T8 are gone. */
+/** v5 stored the retired seven-slot signal layout; retired slots are not reused. */
 const PREV_SIGNAL_STORAGE_KEY = 'wingo_adaptive_model_v5';
-/** Indices into a v5 7-slot weight vector that survive, in new order. */
-const PREV_SIGNAL_INDICES = [1, 2, 3, 4, 5];
+/** Preserve T2/T3/T6/T7 weights; the new T9 slot starts at its equal weight. */
+const PREV_SIGNAL_INDICES = [1, 2, 4, 5];
 /** Active-period predictions persisted by exact period ID (audit / settlement record). */
 const ACTIVE_PREDICTION_KEY = 'wingo_adaptive_next_v1';
 const ACTIVE_PREDICTION_MAX = 500;
@@ -42,9 +42,9 @@ export type BigSmall = 'Big' | 'Small';
 export interface SignalPredictions {
   t2pred?: BigSmall | null; // optional — Markov needs ≥ MIN samples and is absent in short windows
   t3pred?: BigSmall | null;
-  t5pred?: BigSmall | null; // optional — may not exist for early rounds
   t6pred?: BigSmall | null;
   t7pred?: BigSmall | null;
+  t9pred?: BigSmall | null;
 }
 
 export interface AdaptiveInputRow extends SignalPredictions {
@@ -74,9 +74,9 @@ export interface AdaptiveHistoryRow {
   period: string;
   t2pred: BigSmall | null;
   t3pred: BigSmall | null;
-  t5pred: BigSmall | null;
   t6pred: BigSmall | null;
   t7pred: BigSmall | null;
+  t9pred: BigSmall | null;
   adaptiveDecision: BigSmall; // main decision generated BEFORE seeing actual
   t4pred: BigSmall; // backwards compatibility alias for adaptiveDecision
   actual: BigSmall;
@@ -143,7 +143,7 @@ export type Test4Result = AdaptiveResult;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-const SIGNAL_LABELS = ['Test 2', 'Test 3', 'Test 5', 'Test 6', 'Test 7'];
+const SIGNAL_LABELS = ['Test 2', 'Test 3', 'Test 6', 'Test 7', 'Test 9'];
 
 function normaliseWeights(ws: number[]): number[] {
   const sum = ws.reduce((a, b) => a + b, 0);
@@ -171,8 +171,7 @@ function loadModel(): ModelState {
     const parsed = JSON.parse(raw) as Partial<ModelState>;
     let rawWeights: number[] = Array.isArray(parsed.weights) ? parsed.weights : [];
     if (remapFromPrev) {
-      // Drop the retired Test 1 (slot 0) and Test 8 (slot 6) weights instead of
-      // shifting survivors, so each remaining signal keeps its own learned weight.
+        // Preserve surviving signal weights while introducing the Test 9 slot.
       rawWeights = PREV_SIGNAL_INDICES.map((i) => rawWeights[i]).filter((w) => typeof w === 'number');
     }
     if (rawWeights.length === 0) rawWeights = freshWeights();
@@ -257,15 +256,15 @@ function rollingWindow(history: Test4HistoryRow[], n: number) {
 
 /**
  * Extract the 5 optional predictions from a row as an array.
- * Index matches SIGNAL_LABELS: [t2,t3,t5,t6,t7]
+ * Index matches SIGNAL_LABELS: [t2,t3,t6,t7,t9]
  */
 function rowPredictions(row: SignalPredictions): Array<BigSmall | null> {
   return [
     row.t2pred ?? null,
     row.t3pred ?? null,
-    row.t5pred ?? null,
     row.t6pred ?? null,
     row.t7pred ?? null,
+    row.t9pred ?? null,
   ];
 }
 
@@ -361,9 +360,9 @@ export function useAdaptiveLearning(inputs: Test4InputRow[], activeInput?: Activ
         period: row.period,
         t2pred: row.t2pred ?? null,
         t3pred: row.t3pred ?? null,
-        t5pred: row.t5pred ?? null,
         t6pred: row.t6pred ?? null,
         t7pred: row.t7pred ?? null,
+        t9pred: row.t9pred ?? null,
         adaptiveDecision: t4pred,
         t4pred,
         actual: row.actual,
@@ -429,7 +428,7 @@ export function useAdaptiveLearning(inputs: Test4InputRow[], activeInput?: Activ
     let lastSignalAgreement: SignalAgreement = { bigVotes: 0, smallVotes: 0, total: 0, majority: null };
     if (history.length > 0) {
       const last = history[history.length - 1];
-      const preds = [last.t2pred, last.t3pred, last.t5pred, last.t6pred, last.t7pred];
+      const preds = [last.t2pred, last.t3pred, last.t6pred, last.t7pred, last.t9pred];
       const available = preds.filter((p): p is BigSmall => p !== null);
       const bv = available.filter((p) => p === 'Big').length;
       const sv = available.filter((p) => p === 'Small').length;
