@@ -1170,58 +1170,24 @@ export const AlgorithmAnalyzer: React.FC = () => {
 
   const adaptiveLearning = useAdaptiveLearning(adaptiveInputs, adaptiveActiveInput);
 
-  // ── TEMPORARY diagnostics: verify Adaptive Learning is connected to the live feed ──
+  // Per-update diagnostics summary. This intentionally logs a CONSTANT amount of
+  // output per update (never one line per history row): the previous loops
+  // emitted ~3 x history.length console.log calls on every poll, which grew to
+  // thousands of synchronous log calls per update as history passed 2,400 rows.
   useEffect(() => {
-    const liveCount = realHistory.length;
-    let latestSettled = '';
-    for (const r of realHistory) {
-      const p = String(r.periodNumber || '').trim();
-      if (p && (!latestSettled || compareIssuesAsc(latestSettled, p) < 0)) latestSettled = p;
-    }
-    const activePeriod = realSchedule?.currentIssue || '';
-    const evaluationPeriod = latestSettled;
     const activePred = adaptiveLearning.activePrediction;
-    const predictionPeriod = activePred?.period || activePeriod || latestSettled;
-    console.log(`[Adaptive] live_history_count=${liveCount}`);
-    console.log(`[Adaptive] latest_settled_period=${latestSettled}`);
-    console.log(`[Adaptive] active_period=${activePeriod}`);
-    console.log(`[Adaptive] available_test_inputs=${adaptiveInputs.length}`);
-    console.log(`[Adaptive] prediction_period=${predictionPeriod}`);
-    console.log(`[Adaptive] evaluation_period=${evaluationPeriod}`);
     console.log(
-      `[Adaptive] active_prediction=${activePred ? `${activePred.decision} (BIG ${activePred.probBig.toFixed(1)}% / SMALL ${activePred.probSmall.toFixed(1)}%, ${activePred.signalsAvailable} signals)` : 'n/a'}`
+      `[Adaptive] live_history_count=${realHistory.length} available_test_inputs=${adaptiveInputs.length} active_period=${realSchedule?.currentIssue || 'none'} prediction=${activePred ? `${activePred.decision} (BIG ${activePred.probBig.toFixed(1)}% / SMALL ${activePred.probSmall.toFixed(1)}%, ${activePred.signalsAvailable} signals)` : 'n/a'}`
     );
-    if (activePred) {
-      console.log(`[Adaptive Next] active_period=${activePred.period}`);
-      console.log(`[Adaptive Next] prediction=${activePred.decision}`);
-      console.log(`[Adaptive Next] big_weight=${activePred.probBig.toFixed(1)}`);
-      console.log(`[Adaptive Next] small_weight=${activePred.probSmall.toFixed(1)}`);
-      console.log(`[Adaptive Next] signals_voting=${activePred.signalsAvailable}`);
-    } else {
-      console.log(`[Adaptive Next] active_period=${activePeriod || 'none'} prediction=n/a`);
-    }
   }, [
-    realHistory,
-    realSchedule,
-    adaptiveInputs,
+    realHistory.length,
+    realSchedule?.currentIssue,
+    adaptiveInputs.length,
     adaptiveLearning.activePrediction?.period,
     adaptiveLearning.activePrediction?.decision,
     adaptiveLearning.activePrediction?.signalsAvailable,
     adaptiveLearning.totalPredictions,
   ]);
-
-  // ── TEMPORARY diagnostics: why T2/T6 do or don't reach Adaptive Learning ──
-  useEffect(() => {
-    for (const d of testLinearRecurrence.details) {
-      console.log(`[T2] period=${d.period} signal=${d.insufficient ? '—' : d.predictedSize}`);
-    }
-    for (const d of test6.details) {
-      console.log(`[T6] period=${d.period} signal=${d.noSignal || !d.predictedSize ? '—' : d.predictedSize}`);
-    }
-    for (const row of adaptiveInputs) {
-      console.log(`[Adaptive] period=${row.period} T2=${row.t2pred ?? '—'} T6=${row.t6pred ?? '—'}`);
-    }
-  }, [testLinearRecurrence.details, test6.details, adaptiveInputs]);
 
   // ==========================================
   // INPUT SIGNALS SUMMARY (Tests 2, 3, 6, 7, 9)

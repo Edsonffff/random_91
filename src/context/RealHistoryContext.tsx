@@ -100,6 +100,72 @@ export function mergeAndDeduplicate(existing: RealGameRecord[], incoming: RealGa
   return Array.from(map.values()).sort((a, b) => compareIssuesDesc(a.issueNumber, b.issueNumber));
 }
 
+/**
+ * Shallow content equality for the polled history payload.
+ *
+ * The 5s poll returns the FULL history every tick, but on most ticks it is byte
+ * identical to what is already in state. Comparing first lets us skip the state
+ * update entirely, so no consumer memo/effect/derived calculation re-runs for an
+ * unchanged payload. Only the fields the UI renders are compared.
+ */
+export function realHistoryContentEquals(a: RealGameRecord[], b: RealGameRecord[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i];
+    const y = b[i];
+    if (
+      x.issueNumber !== y.issueNumber ||
+      x.winningNumber !== y.winningNumber ||
+      x.size !== y.size ||
+      x.premium !== y.premium ||
+      x.sum !== y.sum
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Build the next history array for a poll response.
+ *
+ * - Unchanged payload -> returns the SAME array reference (no state update, so
+ *   downstream memos keep their identity and nothing recomputes).
+ * - Growing tail (normal case) -> appends only the new records and reuses the
+ *   already-sorted prefix instead of re-sorting the entire 2,400+ record array.
+ * - Anything else (edits/backfill) -> falls back to the full dedupe + sort.
+ */
+export function nextRealHistory(
+  current: RealGameRecord[],
+  incoming: RealGameRecord[]
+): { records: RealGameRecord[]; changed: boolean } {
+  const sorted = sortRealHistoryDescending(incoming);
+  if (realHistoryContentEquals(current, sorted)) {
+    return { records: current, changed: false };
+  }
+
+  const currentTop = current.length > 0 ? String(current[0].issueNumber).trim() : null;
+  if (currentTop && sorted.length > current.length) {
+    let appendStart = -1;
+    for (let i = 0; i < sorted.length; i++) {
+      if (String(sorted[i].issueNumber).trim() === currentTop) {
+        appendStart = i;
+        break;
+      }
+    }
+    // The existing newest record is still the newest record: everything before
+    // it is new. Keep the sorted prefix as-is and only sort the new head.
+    if (appendStart > 0) {
+      const added = sorted.slice(0, appendStart);
+      added.sort((a, b) => compareIssuesDesc(a.issueNumber, b.issueNumber));
+      return { records: [...added, ...current], changed: true };
+    }
+  }
+
+  return { records: mergeAndDeduplicate(current, incoming), changed: true };
+}
+
 export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [realHistory, setRealHistory] = useState<RealGameRecord[]>(() => {
     try {
@@ -223,7 +289,12 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
         const supabaseData = await realHistoryApiService.fetchRealHistoryFromSupabase('all');
 
         if (supabaseData.results && supabaseData.results.length > 0) {
-          const sorted = sortRealHistoryDescending(supabaseData.results);
+          // Incremental update: the poll always returns the full history, so we
+          // reconcile against what we already hold. When the payload is
+          // unchanged we return the same reference and skip the state write
+          // entirely, so nothing downstream recomputes for an identical tick.
+          const { records: nextHistory, changed } = nextRealHistory(realHistoryRef.current, supabaseData.results);
+          const sorted = nextHistory;
           for (const r of sorted) {
             syncedIssueNumbersRef.current.add(String(r.issueNumber).trim());
           }
@@ -231,7 +302,10 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
           const latest = sorted[0]?.issueNumber || null;
           setLastSyncedIssue(latest);
           setTotalSupabaseRows(supabaseData.totalAvailable || sorted.length);
-          setRealHistory(sorted);
+          if (changed) {
+            realHistoryRef.current = nextHistory;
+            setRealHistory(nextHistory);
+          }
           setPagination({
             pageNo: 1,
             totalPage: 1,

@@ -27,6 +27,9 @@ import { compareIssuesAsc } from '../../context/RealHistoryContext';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
+/** Rows rendered by default in the expanded detail tables. */
+const DETAIL_ROWS_VISIBLE = 200;
+
 export type BigSmall = 'Big' | 'Small';
 
 export interface TimeTestDetail {
@@ -374,6 +377,13 @@ interface DetailTableProps {
 }
 
 function DetailTable({ result, showTime = false, extraHeaders, extraCells }: DetailTableProps) {
+  // These tables live inside default-expanded cards, so they previously mounted
+  // one <tr> per evaluated round (thousands at 2,400+ history). Render the most
+  // recent slice by default; the full detail array is unchanged and one click
+  // away, so no calculation or result is altered.
+  const [showAll, setShowAll] = useState(false);
+  const rowsDesc = result.details;
+  const visibleRows = showAll ? rowsDesc : rowsDesc.slice(-DETAIL_ROWS_VISIBLE);
   return (
     <div className="overflow-x-auto rounded-lg border border-[#1E3A2B]/60">
       <table className="w-full text-left text-xs font-mono">
@@ -388,7 +398,7 @@ function DetailTable({ result, showTime = false, extraHeaders, extraCells }: Det
           </tr>
         </thead>
         <tbody className="divide-y divide-[#1E3A2B]/40">
-          {[...result.details].reverse().map((row, i) => (
+          {[...visibleRows].reverse().map((row, i) => (
             <tr key={i} className="hover:bg-[#06130F]/80">
               <td className="py-1.5 px-3 text-gray-300">{row.period.slice(-7)}</td>
               {showTime && (
@@ -447,6 +457,20 @@ function DetailTable({ result, showTime = false, extraHeaders, extraCells }: Det
           )}
         </tbody>
       </table>
+      {result.details.length > DETAIL_ROWS_VISIBLE && (
+        <div className="flex items-center justify-between gap-2 px-3 py-2 border-t border-[#1E3A2B]/60 bg-[#06130F] text-[10px] font-mono text-[#8D9B95]">
+          <span>
+            Showing {visibleRows.length} of {result.details.length} rounds
+          </span>
+          <button
+            type="button"
+            onClick={() => setShowAll((prev) => !prev)}
+            className="px-2 py-0.5 rounded bg-[#020806] hover:bg-[#1E3A2B] border border-[#1E3A2B] text-[#35B978] font-bold transition-colors cursor-pointer"
+          >
+            {showAll ? 'Show latest only' : 'Show all'}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

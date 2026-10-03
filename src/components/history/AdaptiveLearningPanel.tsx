@@ -12,6 +12,9 @@ import { SIGNAL_LABELS } from '../../hooks/useAdaptiveLearning';
 import type { RealGameSchedule } from '../../types/result';
 import { CollapsibleCard } from '../common/CollapsibleCard';
 
+/** Rows rendered by default in the expanded decision-history table. */
+const VISIBLE_HISTORY_ROWS = 200;
+
 interface Props {
   data: AdaptiveResult;
   /** Live feed schedule — used only for the active-round countdown if available. */
@@ -112,6 +115,11 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data, activeSchedule })
 
   const lastRow: AdaptiveHistoryRow | null = history.length > 0 ? history[history.length - 1] : null;
   const historyDesc = useMemo(() => [...history].reverse(), [history]);
+  // This table is expanded by default, so it previously mounted one <tr> per
+  // evaluated round — thousands of rows on every 5s update. Render only the most
+  // recent slice by default; the full set stays in state and is one click away.
+  const [showAllHistory, setShowAllHistory] = useState(false);
+  const visibleHistory = showAllHistory ? historyDesc : historyDesc.slice(0, VISIBLE_HISTORY_ROWS);
 
   const handleReset = () => { resetLearning(false); setConfirmReset(false); };
 
@@ -477,6 +485,17 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data, activeSchedule })
         variant="subcard"
         title={<span className="font-mono text-xs font-bold text-[#F5F5F5]">Adaptive Decision History Table</span>}
         subtitle={`${totalPredictions} evaluated rounds — final decision generated BEFORE actual was known`}
+        headerRight={
+          historyDesc.length > VISIBLE_HISTORY_ROWS ? (
+            <button
+              type="button"
+              onClick={() => setShowAllHistory((prev) => !prev)}
+              className="px-2.5 py-1 rounded-lg bg-[#06130F] hover:bg-[#1E3A2B] border border-[#1E3A2B] text-[10px] font-mono font-bold text-[#35B978] transition-colors cursor-pointer"
+            >
+              {showAllHistory ? `Show latest ${VISIBLE_HISTORY_ROWS}` : `Show all ${historyDesc.length}`}
+            </button>
+          ) : null
+        }
       >
         <div className="overflow-x-auto rounded-lg border border-[#1E3A2B]/60">
           <table className="w-full text-left text-xs font-mono">
@@ -494,7 +513,7 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data, activeSchedule })
               </tr>
             </thead>
             <tbody className="divide-y divide-[#1E3A2B]/40">
-              {historyDesc.map((row, i) => (
+              {visibleHistory.map((row, i) => (
                 <tr key={i} className="hover:bg-[#06130F]/80">
                   <td className="py-1.5 px-3 text-gray-300">{row.period.slice(-7)}</td>
                   <SigCell pred={row.t2pred} />
@@ -521,7 +540,7 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data, activeSchedule })
                   </td>
                 </tr>
               ))}
-              {historyDesc.length === 0 && (
+              {visibleHistory.length === 0 && (
                 <tr>
                   <td colSpan={11} className="py-6 text-center text-[#8D9B95]">
                     No learning history yet. Data will appear once rounds are available.
