@@ -166,6 +166,21 @@ export function nextRealHistory(
   return { records: mergeAndDeduplicate(current, incoming), changed: true };
 }
 
+/**
+ * Last settled round implied by an in-progress upstream issue (currentIssue - 1).
+ * Only used as a last-resort watchdog probe when the server cannot report a
+ * persisted latestIssue yet; returns '' when the value is absent or malformed.
+ */
+function settledIssueFromCurrent(currentIssue: string | undefined): string {
+  try {
+    const raw = String(currentIssue || '').trim();
+    if (!raw) return '';
+    return (BigInt(raw) - 1n).toString();
+  } catch {
+    return '';
+  }
+}
+
 export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [realHistory, setRealHistory] = useState<RealGameRecord[]>(() => {
     try {
@@ -551,13 +566,49 @@ export const RealHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
   }, [autoRefresh, refreshRealResults]);
 
   // Requirement 3: Auto-refresh interval (polling every 5 seconds for new completed draws)
+  //
+  // Cheap watchdog: instead of downloading the full ~2,800-record history on
+  // every tick, ask GET /api/real/current for the newest settled issue and
+  // compare it with the newest issue already held in state.
+  //   - latestIssue unchanged / empty -> return before any state write: no
+  //     history download and no React update for that tick;
+  //   - latestIssue newer than ours   -> pull the full history once; the
+  //     existing nextRealHistory() reconcile appends only what is new;
+  //   - /api/real/current fails       -> swallow the error, clear nothing and
+  //     retry on the next tick (isPollingOrSyncingRef still prevents overlap).
   useEffect(() => {
     if (!autoRefresh) return;
-    const interval = setInterval(() => {
-      refreshRealResults(false);
+    let inFlight = false;
+    const interval = setInterval(async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const current = await realHistoryApiService.fetchRealCurrent();
+        const known = String(realHistoryRef.current[0]?.issueNumber || '').trim();
+        // Prefer the persisted latest issue; fall back to the upstream
+        // settled/current issues while the server cannot report it yet.
+        const probe =
+          String(current.latestIssue || '').trim() ||
+          String(current.previousIssue || '').trim() ||
+          settledIssueFromCurrent(current.currentIssue);
+        // Empty probe (cold start): touch nothing, retry on the next tick.
+        if (!probe) return;
+        // Download only when the server provably holds a newer settled draw.
+        // `known` ahead of the probe (locally imported rows) never re-fetches.
+        if (!known || compareIssuesDesc(known, probe) > 0) {
+          await refreshRealResults(false);
+        }
+      } catch {
+        // Transient failure: no state cleared, no error surfaced; next tick retries.
+      } finally {
+        inFlight = false;
+      }
     }, 5000);
 
-    return () => clearInterval(interval);
+    return () => {
+      inFlight = true;
+      clearInterval(interval);
+    };
   }, [autoRefresh, refreshRealResults]);
 
   // Local second-by-second countdown decrement for schedule

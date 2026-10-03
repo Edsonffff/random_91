@@ -270,6 +270,23 @@ export async function fetchRealScheduleFallback(): Promise<RealGameSchedule> {
   return (await response.json()) as RealGameSchedule;
 }
 
+/**
+ * Cheap GET /api/real/current probe: returns the current round schedule plus
+ * `latestIssue` -- the newest settled draw persisted by the collector. The
+ * dashboard polls this every 5 seconds and only downloads the full history
+ * when `latestIssue` moves past the newest issue it already holds.
+ */
+export async function fetchRealCurrent(): Promise<RealGameSchedule & { latestIssue?: string }> {
+  const endpointUrl = `${BASE_URL}/current`;
+  const response = await fetch(endpointUrl);
+
+  if (!response.ok) {
+    throw new Error(`Server current HTTP ${response.status}`);
+  }
+
+  return (await response.json()) as RealGameSchedule & { latestIssue?: string };
+}
+
 export interface SupabaseSyncResponse {
   success: boolean;
   upsertedCount: number;
@@ -359,6 +376,7 @@ export const realHistoryApiService = {
   fetchOfficialScheduleFromBrowser,
   fetchRealHistoryFallback,
   fetchRealScheduleFallback,
+  fetchRealCurrent,
   syncRealHistoryToSupabase,
   debugSupabaseBackend,
   fetchRealHistoryFromSupabase,

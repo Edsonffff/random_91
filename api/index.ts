@@ -714,8 +714,40 @@ async function readFromSupabase(
   return { records, totalCount: totalCount || records.length, error: null };
 }
 
+/**
+ * Newest settled draw persisted in public.real_wingo_30s_history.
+ * Used by GET /api/real/current so the dashboard's 5s watchdog can detect new
+ * records with one single-row read instead of downloading the full history.
+ * Never throws; falls back to the in-memory accumulated cache.
+ */
+async function readLatestPersistedIssue(): Promise<string> {
+  try {
+    const supabaseClient = getSupabaseClient();
+    if (supabaseClient) {
+      const { data, error } = await supabaseClient
+        .from('real_wingo_30s_history')
+        .select('issue_number')
+        .order('issue_number', { ascending: false })
+        .limit(1);
+      if (!error && data && data.length > 0) {
+        const issue = String(data[0].issue_number || '').trim();
+        if (issue) return issue;
+      }
+    }
+  } catch {
+    // Supabase unavailable: fall through to the in-memory cache below.
+  }
+  const cached = accumulatedRealHistory[0];
+  return cached ? String(cached.issueNumber).trim() : '';
+}
+
 // GET /api/real/current (Fallback status / schedule)
 app.get('/api/real/current', async (_req, res) => {
+  // Started in parallel with the upstream schedule fetch below: one tiny
+  // single-row Supabase read replaces the full ~2,800-row history payload
+  // that the browser used to download every 5 seconds.
+  const persistedLatestIssuePromise = readLatestPersistedIssue();
+
   const UPSTREAM_BASE_URL = (process.env.UPSTREAM_WINGO_BASE_URL || 'https://draw.ar-lottery01.com/WinGo').replace(/\/$/, '');
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 4000);
@@ -755,6 +787,7 @@ app.get('/api/real/current', async (_req, res) => {
         remainingSeconds,
         previousIssue: data.previous?.issueNumber || '',
         nextIssue: data.next?.issueNumber || '',
+        latestIssue: await persistedLatestIssuePromise,
         source: 'CURRENT ISSUE',
         lastUpdated: new Date().toISOString(),
       });
@@ -791,6 +824,7 @@ app.get('/api/real/current', async (_req, res) => {
     remainingSeconds: 25,
     previousIssue: prevIssue,
     nextIssue,
+    latestIssue: await persistedLatestIssuePromise,
     source: 'CURRENT ISSUE',
     lastUpdated: new Date().toISOString(),
     statusNote: 'Fallback schedule (browser direct fetch is primary)',
