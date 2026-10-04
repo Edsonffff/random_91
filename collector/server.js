@@ -1,6 +1,7 @@
 import http from 'http';
 import { createClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
+import { startAdaptiveWorker } from './adaptive-learning-worker.js';
 
 // Load local environment variables if present
 dotenv.config();
@@ -24,6 +25,9 @@ const T7_API_TOKEN = process.env.BDGTHARU_API_TOKEN || '';
 // separate: a slow upstream simply makes a cycle overrun, it does not stack.
 const T7_REQUEST_TIMEOUT_MS = 15000;
 const OFFICIAL_WINGO_HISTORY_URL = 'https://draw.ar-lottery01.com/WinGo/WinGo_30S/GetHistoryIssuePage.json';
+
+let adaptiveWorker;
+let adaptiveCurrent = { success: false, status: 'initializing' };
 
 function getTimestamp() {
   return new Date().toISOString();
@@ -485,11 +489,13 @@ let timeType = 'iso';
 process.on('SIGINT', () => {
   log('Received SIGINT. Shutting down gracefully...');
   running = false;
+  adaptiveWorker?.terminate();
 });
 
 process.on('SIGTERM', () => {
   log('Received SIGTERM. Shutting down gracefully...');
   running = false;
+  adaptiveWorker?.terminate();
 });
 
 // ─── STEP 1: START HTTP HEALTH SERVER IMMEDIATELY (Render Requirement) ────────
@@ -571,6 +577,15 @@ const healthServer = http.createServer((req, res) => {
         timing: timingData,
       })
     );
+  }
+
+  // Lightweight snapshot; computation and Supabase access run in the worker.
+  if (req.method === 'GET' && urlPath === '/api/adaptive-learning/current') {
+    res.writeHead(adaptiveCurrent.success ? 200 : 503, {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-store',
+    });
+    return res.end(JSON.stringify(adaptiveCurrent));
   }
 
   // GET /health, /api/health, /, /ping — fast, non-blocking 200 OK
@@ -692,6 +707,19 @@ async function startCollector() {
 
   isDbConnected = true;
   log(`Connecting to Supabase at: ${process.env.SUPABASE_URL.replace(/https?:\/\//, '').split('.')[0]}...`);
+
+  try {
+    adaptiveWorker = startAdaptiveWorker({
+      url: process.env.SUPABASE_URL,
+      key: process.env.SUPABASE_SERVICE_ROLE_KEY,
+      onState: (body) => { adaptiveCurrent = body; },
+      log,
+      logError,
+    });
+  } catch (error) {
+    adaptiveCurrent = { success: false, status: 'error', error: 'Adaptive worker could not start.' };
+    logError(`[Adaptive] worker startup failed: ${error.message}`);
+  }
 
   // Query current Supabase periods strictly from the CURRENT database
   const { totalRows, newestPeriod } = await loadExistingPeriods(supabaseClient);
@@ -849,4 +877,3 @@ async function startCollector() {
 
   log('WinGo 30S Collector stopped.');
 }
-
