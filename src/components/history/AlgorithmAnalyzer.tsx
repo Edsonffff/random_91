@@ -22,7 +22,6 @@ import type { Test4InputRow, ActiveInputRow } from '../../hooks/useAdaptiveLearn
 import { AdaptiveLearningPanel } from './AdaptiveLearningPanel';
 import {
   AdditionalSignalsPanel,
-  computeTest6,
   computeTest7,
 } from './AdditionalSignalsPanel';
 import type { WingoAIT7Signal, T7DebugInfo } from './AdditionalSignalsPanel';
@@ -585,7 +584,7 @@ export const AlgorithmAnalyzer: React.FC = () => {
   const { results, loadBigMumbaiSample } = useResults();
   const { realHistory, realSchedule, resetAllSystemData } = useRealHistory();
   const [dataSource, setDataSource] = useState<'realLive' | 'sample3' | 'sample2' | 'sample1' | 'live'>('realLive');
-  const [activeTestTab, setActiveTestTab] = useState<'linearDelta' | 'alternation' | 'additional'>('linearDelta');
+  const [activeTestTab, setActiveTestTab] = useState<'alternation' | 'additional'>('alternation');
   const [expandedSources, setExpandedSources] = useState<Record<string, boolean>>({});
   const showAllSequence = Boolean(expandedSources[dataSource]);
 
@@ -813,100 +812,6 @@ export const AlgorithmAnalyzer: React.FC = () => {
   // ==========================================
   // 2. TESTED FORMULAS (Mathematical Evaluations)
   // ==========================================
-  // Test B: Markov Chain Transition Model
-  // P(next | prev) = N(prev→next) / Σ N(prev→*)
-  // Anti-leakage: matrix built from rounds 0..i-1; prediction made before actual of round i is seen.
-  // Minimum samples (MIN_MARKOV) required per previous-state before a prediction is generated.
-  const testLinearRecurrence = useMemo(() => {
-    const MIN_MARKOV = 5;
-    const toBigSmall = (n: number): 'Big' | 'Small' => (n >= 5 ? 'Big' : 'Small');
-
-    // Sort ascending so we can process chronologically
-    const sorted = [...activeDataset].sort(
-      (a, b) => compareIssuesAsc(a.period, b.period)
-    );
-
-    // 2×2 matrix: matrix[prev][cur] = transition count
-    const matrix: Record<'Big' | 'Small', Record<'Big' | 'Small', number>> = {
-      Big:   { Big: 0, Small: 0 },
-      Small: { Big: 0, Small: 0 },
-    };
-
-    let hits = 0;
-    const details: Array<{
-      period: string;
-      previousState: 'Big' | 'Small';
-      pBig: number;
-      pSmall: number;
-      samplesUsed: number;
-      predictedSize: 'Big' | 'Small';
-      actual: number;
-      actualSize: 'Big' | 'Small';
-      isHit: boolean;
-      insufficient: boolean;
-    }> = [];
-
-    for (let i = 1; i < sorted.length; i++) {
-      const prevState = toBigSmall(sorted[i - 1].number);
-      const item = sorted[i];
-      const actualSize = toBigSmall(item.number);
-
-      // Count transitions from prevState using matrix BEFORE updating
-      const samplesUsed = matrix[prevState]['Big'] + matrix[prevState]['Small'];
-      const insufficient = samplesUsed < MIN_MARKOV;
-      let predictedSize: 'Big' | 'Small' = 'Big';
-      let pBig = 0;
-      let pSmall = 0;
-      let isHit = false;
-
-      if (!insufficient) {
-        pBig   = matrix[prevState]['Big']   / samplesUsed;
-        pSmall = matrix[prevState]['Small'] / samplesUsed;
-        predictedSize = pBig >= pSmall ? 'Big' : 'Small';
-        isHit = predictedSize === actualSize;
-        if (isHit) hits++;
-      }
-
-      details.push({
-        period: item.period,
-        previousState: prevState,
-        pBig,
-        pSmall,
-        samplesUsed,
-        predictedSize,
-        actual: item.number,
-        actualSize,
-        isHit,
-        insufficient,
-      });
-
-      // Update matrix AFTER generating prediction (anti-leakage)
-      matrix[prevState][actualSize]++;
-    }
-
-    const total = details.filter((d) => !d.insufficient).length;
-    const accuracy = total > 0 ? Math.round((hits / total) * 100) : 0;
-
-    // Compute current state for dashboard display
-    const lastItem = sorted.length > 0 ? sorted[sorted.length - 1] : null;
-    const currentState = lastItem ? toBigSmall(lastItem.number) : null;
-    let currentPBig: number | null = null;
-    let currentPSmall: number | null = null;
-    if (currentState) {
-      const tot = matrix[currentState]['Big'] + matrix[currentState]['Small'];
-      if (tot >= MIN_MARKOV) {
-        currentPBig   = matrix[currentState]['Big']   / tot;
-        currentPSmall = matrix[currentState]['Small'] / tot;
-      }
-    }
-
-    // Latest prediction: last non-insufficient detail
-    const validDetails = details.filter((d) => !d.insufficient);
-    const latestPrediction = validDetails.length > 0 ? validDetails[validDetails.length - 1].predictedSize : null;
-
-    return { hits, total, accuracy, details, latestPrediction, currentState, currentPBig, currentPSmall };
-  }, [activeDataset]);
-
   // Test 3: Previous 2 Results Pattern (WingoBot Reference Chart)
   const test3 = useMemo((): Test3Result => {
     const roundByPeriod = new Map<string, RoundEntry>();
@@ -1023,14 +928,6 @@ export const AlgorithmAnalyzer: React.FC = () => {
     };
   }, [activeDataset]);
 
-  const streakStatsLinearRecurrence = useMemo(() => {
-    return calculateStreakStats(
-      testLinearRecurrence.details
-        .filter((d) => !d.insufficient)
-        .map((d) => (d.isHit ? 'H' : 'M'))
-    );
-  }, [testLinearRecurrence.details]);
-
   const streakStatsTest3 = useMemo(() => {
     return calculateStreakStats(
       test3.details
@@ -1045,11 +942,10 @@ export const AlgorithmAnalyzer: React.FC = () => {
   // Declared BEFORE test4Inputs so their .details arrays are available
   // when building the join maps below.
 
-  const test6 = useMemo(() => computeTest6(activeDataset), [activeDataset]);
   const test7 = useMemo(() => computeTest7(activeDataset, t7SignalsMap), [activeDataset, t7SignalsMap]);
 
-  // Test 9: isolated CPL-1 → frozen CPL-3 pipeline. It does not alter Tests 2,
-  // 3, 6, or 7; Test 9 is the isolated CPL-3 experiment.
+  // Test 9: isolated CPL-1 → frozen CPL-3 pipeline. It does not alter Tests 3 or
+  // 7; Test 9 is the isolated CPL-3 experiment.
   const test9History = useMemo((): ExperimentalHistoryRecord[] => realHistory.map((record) => ({
     issueNumber: record.periodNumber,
     winningNumber: record.winningNumber,
@@ -1087,17 +983,11 @@ export const AlgorithmAnalyzer: React.FC = () => {
   // ==========================================
   // Build aligned input rows for Adaptive Learning.
   // Every period with a known actual is a row; all signals are optional.
-  // Test 2 (Markov) has no prediction until it accumulates ≥ MIN samples, which
-  // never happens inside a short (e.g. 10-round) live window — so it must not be
-  // allowed to block every row. Missing signals are excluded from that round's
-  // vote inside the hook (same rule already used for the remaining signals).
+  // Only Tests 3, 7, and 9 feed Adaptive Learning. Missing signals are
+  // excluded from that round's vote inside the hook (same rule already used
+  // for the remaining signals).
   const adaptiveInputs = useMemo((): Test4InputRow[] => {
     if (activeDataset.length === 0) return [];
-
-    const t2Map = new Map<string, 'Big' | 'Small'>();
-    for (const d of testLinearRecurrence.details) {
-      if (!d.insufficient) t2Map.set(d.period, d.predictedSize);
-    }
 
     const t3Map = new Map<string, 'Big' | 'Small'>();
     for (const d of test3.details) {
@@ -1107,11 +997,6 @@ export const AlgorithmAnalyzer: React.FC = () => {
     const t9Map = new Map<string, 'Big' | 'Small'>();
     for (const d of test9Rows) {
       if (!d.noSignal && d.prediction) t9Map.set(d.periodId, d.prediction === 'BIG' ? 'Big' : 'Small');
-    }
-
-    const t6Map = new Map<string, 'Big' | 'Small'>();
-    for (const d of test6.details) {
-      if (!d.noSignal && d.predictedSize) t6Map.set(d.period, d.predictedSize);
     }
 
     const t7Map = new Map<string, 'Big' | 'Small'>();
@@ -1128,9 +1013,7 @@ export const AlgorithmAnalyzer: React.FC = () => {
     for (const [period, actual] of actualMap) {
       rows.push({
         period,
-        t2pred: t2Map.get(period) ?? null,
         t3pred: t3Map.get(period) ?? null,
-        t6pred: t6Map.get(period),
         t7pred: t7Map.get(period),
         t9pred: t9Map.get(period),
         actual,
@@ -1138,9 +1021,7 @@ export const AlgorithmAnalyzer: React.FC = () => {
     }
     return rows;
   }, [
-    testLinearRecurrence.details,
     test3.details,
-    test6.details,
     test7.details,
     test9Rows,
     activeDataset,
@@ -1153,17 +1034,13 @@ export const AlgorithmAnalyzer: React.FC = () => {
     if (!activePeriodId) return null;
     return {
       period: activePeriodId,
-      t2pred: testLinearRecurrence.latestPrediction,
       t3pred: test3.latestPrediction,
-      t6pred: test6.latestPrediction,
       t7pred: test7.latestPrediction,
       t9pred: test9ActiveRow?.prediction === 'BIG' ? 'Big' : test9ActiveRow?.prediction === 'SMALL' ? 'Small' : null,
     };
   }, [
     activePeriodId,
-    testLinearRecurrence.latestPrediction,
     test3.latestPrediction,
-    test6.latestPrediction,
     test7.latestPrediction,
     test9ActiveRow?.prediction,
   ]);
@@ -1190,17 +1067,15 @@ export const AlgorithmAnalyzer: React.FC = () => {
   ]);
 
   // ==========================================
-  // INPUT SIGNALS SUMMARY (Tests 2, 3, 6, 7, 9)
+  // INPUT SIGNALS SUMMARY (Tests 3, 7, 9)
   // ==========================================
   const signalSummaryData = useMemo((): SignalEntry[] => {
     return [
-      { testNum: 2, label: 'Markov Chain', prediction: testLinearRecurrence.latestPrediction },
       { testNum: 3, label: 'Previous 2 Pattern', prediction: test3.latestPrediction },
-      { testNum: 6, label: 'SMA-10', prediction: test6.latestPrediction },
       { testNum: 7, label: 'WingoAI Signal', prediction: test7.latestPrediction },
       { testNum: 9, label: 'CPL-3 Loss-Streak Breaker', prediction: test9ActiveRow?.prediction === 'BIG' ? 'Big' : test9ActiveRow?.prediction === 'SMALL' ? 'Small' : null },
     ];
-  }, [testLinearRecurrence.latestPrediction, test3.latestPrediction, test6.latestPrediction, test7.latestPrediction, test9ActiveRow?.prediction]);
+  }, [test3.latestPrediction, test7.latestPrediction, test9ActiveRow?.prediction]);
 
   const handleFullReset = async () => {
     setIsResetting(true);
@@ -1506,23 +1381,12 @@ export const AlgorithmAnalyzer: React.FC = () => {
         }
         headerRight={
           <span className="text-xs text-[#8D9B95]">
-             Tests 2, 3, 6, 7, 9 — independent input signals feeding into Adaptive Learning
+             Tests 3, 7, 9 — independent input signals feeding into Adaptive Learning
           </span>
         }
       >
         {/* Sub tabs for formula tests */}
         <div className="flex flex-wrap items-center gap-2 text-xs">
-          <button
-            onClick={() => setActiveTestTab('linearDelta')}
-            className={`px-3 py-1.5 rounded-lg font-medium transition-colors cursor-pointer ${
-              activeTestTab === 'linearDelta'
-                ? 'bg-[#E7B93F] text-[#020806] font-bold shadow'
-                : 'bg-[#06130F] text-[#8D9B95] hover:text-[#F5F5F5] border border-[#1E3A2B]'
-            }`}
-          >
-            Test 2: Markov Chain
-          </button>
-
           <button
             onClick={() => setActiveTestTab('alternation')}
             className={`px-3 py-1.5 rounded-lg font-medium transition-colors cursor-pointer ${
@@ -1542,134 +1406,9 @@ export const AlgorithmAnalyzer: React.FC = () => {
                 : 'bg-[#06130F] text-[#35B978] hover:text-[#F5F5F5] border border-[#35B978]/40'
             }`}
           >
-             ⏱ Tests 6–7: Additional Signals (incl. WingoAI)
+             ⏱ Test 7: External WingoAI Signal
           </button>
         </div>
-
-        {/* Test 2 Table & Hit Rate */}
-        {activeTestTab === 'linearDelta' && (
-          <div className="space-y-4">
-            {/* Info bar */}
-            <div className="flex flex-wrap items-center justify-between gap-4 p-4 rounded-xl bg-[#06130F] border border-[#1E3A2B]">
-              <div>
-                <span className="font-mono font-bold text-xs text-[#F5F5F5]">
-                  Markov Chain Transition Model
-                </span>
-                <p className="text-[11px] text-[#8D9B95] mt-0.5">
-                  P(next | prev) computed from historical transition counts only. Processed chronologically — no future data used. Min 5 samples required per state before prediction starts.
-                </p>
-              </div>
-              <div className="flex items-center gap-4 text-xs font-mono">
-                <div>
-                  <span className="text-[#8D9B95] block text-[10px]">BIG/SMALL HIT RATE:</span>
-                  <span className={`text-base font-bold ${testLinearRecurrence.accuracy >= 50 ? 'text-[#35B978]' : 'text-[#F04444]'}`}>
-                    {testLinearRecurrence.accuracy}% ({testLinearRecurrence.hits} / {testLinearRecurrence.total})
-                  </span>
-                </div>
-                <div>
-                  <span className="text-[#8D9B95] block text-[10px]">RANDOM BASELINE:</span>
-                  <span className="text-base font-bold text-[#8D9B95]">50.0%</span>
-                </div>
-              </div>
-            </div>
-
-            {/* Current Markov state */}
-            {testLinearRecurrence.currentState && (
-              <div className="p-4 rounded-xl bg-[#06130F] border border-[#1E3A2B] space-y-2">
-                <span className="text-[10px] font-mono uppercase font-bold text-[#8D9B95] tracking-wider block">Current Markov State</span>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs font-mono">
-                  <div className="p-2.5 rounded-lg bg-[#020806] border border-[#1E3A2B]/60 text-center">
-                    <span className="text-[10px] text-[#8D9B95] block">Current State</span>
-                    <span className={`text-base font-bold ${testLinearRecurrence.currentState === 'Big' ? 'text-[#E7B93F]' : 'text-[#60A5FA]'}`}>
-                      {testLinearRecurrence.currentState.toUpperCase()}
-                    </span>
-                  </div>
-                  <div className="p-2.5 rounded-lg bg-[#020806] border border-[#1E3A2B]/60 text-center">
-                    <span className="text-[10px] text-[#8D9B95] block">P(BIG | curr)</span>
-                    <span className="text-base font-bold text-[#E7B93F]">
-                      {testLinearRecurrence.currentPBig !== null ? `${Math.round(testLinearRecurrence.currentPBig * 1000) / 10}%` : '—'}
-                    </span>
-                  </div>
-                  <div className="p-2.5 rounded-lg bg-[#020806] border border-[#1E3A2B]/60 text-center">
-                    <span className="text-[10px] text-[#8D9B95] block">P(SMALL | curr)</span>
-                    <span className="text-base font-bold text-[#60A5FA]">
-                      {testLinearRecurrence.currentPSmall !== null ? `${Math.round(testLinearRecurrence.currentPSmall * 1000) / 10}%` : '—'}
-                    </span>
-                  </div>
-                  <div className="p-2.5 rounded-lg bg-[#020806] border border-[#1E3A2B]/60 text-center">
-                    <span className="text-[10px] text-[#8D9B95] block">Next Prediction</span>
-                    <span className={`text-base font-bold ${testLinearRecurrence.latestPrediction === 'Big' ? 'text-[#E7B93F]' : 'text-[#60A5FA]'}`}>
-                      {testLinearRecurrence.latestPrediction?.toUpperCase() ?? '—'}
-                    </span>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            <StreakAnalysisPanel
-              stats={streakStatsLinearRecurrence}
-              title="Markov Chain Transition"
-              id="streak_test2"
-            />
-
-            <CollapsibleCard
-              id="test2_predictions_table"
-              variant="subcard"
-              title={<span className="font-mono text-xs font-bold text-[#F5F5F5]">Markov Transition History (Test 2)</span>}
-              subtitle="Chronological predictions — transition probabilities built from prior rounds only"
-            >
-              <div className="overflow-x-auto rounded-lg border border-[#1E3A2B]/60">
-                <table className="w-full text-left text-xs font-mono">
-                  <thead className="bg-[#06130F] text-[#8D9B95] uppercase text-[10px]">
-                    <tr>
-                      <th className="py-2.5 px-3">Period</th>
-                      <th className="py-2.5 px-3">Prev</th>
-                      <th className="py-2.5 px-3">P(BIG)</th>
-                      <th className="py-2.5 px-3">P(SML)</th>
-                      <th className="py-2.5 px-3">N</th>
-                      <th className="py-2.5 px-3">Pred</th>
-                      <th className="py-2.5 px-3">Actual</th>
-                      <th className="py-2.5 px-3 text-right">Result</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-[#1E3A2B]/40">
-                    {[...testLinearRecurrence.details].reverse().map((row, i) => (
-                      <tr key={i} className={`hover:bg-[#06130F]/80 ${row.insufficient ? 'opacity-40' : ''}`}>
-                        <td className="py-1.5 px-3 text-gray-300">{row.period.slice(-7)}</td>
-                        <td className={`py-1.5 px-3 font-medium ${row.previousState === 'Big' ? 'text-[#E7B93F]' : 'text-[#60A5FA]'}`}>
-                          {row.previousState === 'Big' ? 'B' : 'S'}
-                        </td>
-                        <td className="py-1.5 px-3 text-[#E7B93F]">{row.insufficient ? '—' : `${Math.round(row.pBig * 1000) / 10}%`}</td>
-                        <td className="py-1.5 px-3 text-[#60A5FA]">{row.insufficient ? '—' : `${Math.round(row.pSmall * 1000) / 10}%`}</td>
-                        <td className="py-1.5 px-3 text-gray-400">{row.samplesUsed}</td>
-                        <td className={`py-1.5 px-3 font-medium ${row.insufficient ? 'text-[#8D9B95]' : row.predictedSize === 'Big' ? 'text-[#E7B93F]' : 'text-[#60A5FA]'}`}>
-                          {row.insufficient ? '—' : (row.predictedSize === 'Big' ? 'BIG' : 'SML')}
-                        </td>
-                        <td className={`py-1.5 px-3 font-bold ${row.actualSize === 'Big' ? 'text-[#E7B93F]' : 'text-[#60A5FA]'}`}>
-                          {row.actualSize === 'Big' ? 'BIG' : 'SML'}
-                        </td>
-                        <td className="py-1.5 px-3 text-right">
-                          {row.insufficient ? (
-                            <span className="text-[#8D9B95] text-[10px]">INSUFF.</span>
-                          ) : row.isHit ? (
-                            <span className="inline-flex items-center gap-1 text-[#35B978] font-bold">
-                              <CheckCircle2 className="w-3 h-3" /> Hit
-                            </span>
-                          ) : (
-                            <span className="inline-flex items-center gap-1 text-[#F04444]">
-                              <XCircle className="w-3 h-3" /> Miss
-                            </span>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              <p className="text-[10px] text-[#8D9B95] font-sans mt-1.5">INSUFF. = fewer than 5 transitions observed from prior state — prediction excluded from accuracy and Adaptive Learning.</p>
-            </CollapsibleCard>
-          </div>
-        )}
 
         {/* Test 3 Table & Hit Rate */}
         {activeTestTab === 'alternation' && (
@@ -1803,7 +1542,7 @@ export const AlgorithmAnalyzer: React.FC = () => {
           </div>
         )}
 
-        {/* Tests 6–7: Time-Based & External Additional Signals */}
+        {/* Test 7: External Additional Signal */}
         {activeTestTab === 'additional' && (
           <CollapsibleCard
             id="tests5to8_additional"
@@ -1811,19 +1550,18 @@ export const AlgorithmAnalyzer: React.FC = () => {
             title={
               <div className="flex items-center gap-2">
                 <span className="px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-[#35B978]/15 text-[#35B978] border border-[#35B978]/30">
-                  TESTS 6–7
+                  TEST 7
                 </span>
                 <span className="font-mono text-xs font-bold text-[#F5F5F5]">
-                  Additional & External Signals (SMA-10, WingoAI)
+                  External Signal (WingoAI)
                 </span>
               </div>
             }
-            subtitle="Moving average (Test 6) and external prediction signal (Test 7)"
+            subtitle="External prediction signal (Test 7) — WingoAI"
           >
             <AdditionalSignalsPanel
-              test6={test6}
               test7={test7}
-  
+
               t7DebugInfo={t7DebugInfo}
             />
           </CollapsibleCard>
@@ -1833,7 +1571,7 @@ export const AlgorithmAnalyzer: React.FC = () => {
           id="test9_cpl3_experimental"
           variant="subcard"
           title={<span className="font-mono text-xs font-bold text-[#A78BFA]">Test 9 — CPL-3 Loss-Streak Breaker</span>}
-          subtitle="Frozen context-8-cap-3 configuration; isolated from Tests 2, 3, 6, and 7"
+          subtitle="Frozen context-8-cap-3 configuration; isolated from Tests 3 and 7"
           defaultExpanded={true}
         >
           <ExperimentalTest9Panel rows={test9Rows} activeRow={test9ActiveRow} />
@@ -1843,7 +1581,7 @@ export const AlgorithmAnalyzer: React.FC = () => {
         <CollapsibleCard
           id="signal_summary_inputs"
           variant="subcard"
-          title={<span className="font-mono text-xs font-bold text-[#F5F5F5]">📊 Input Signals Vote Summary (Tests 2, 3, 6, 7, 9)</span>}
+          title={<span className="font-mono text-xs font-bold text-[#F5F5F5]">📊 Input Signals Vote Summary (Tests 3, 7, 9)</span>}
           subtitle="Latest prediction from each supporting test — input signals feeding into Adaptive Learning"
           defaultExpanded={true}
         >

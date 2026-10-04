@@ -21,12 +21,10 @@ interface Props {
   activeSchedule?: RealGameSchedule | null;
 }
 
-// ─── Accent colours per signal index [T2,T3,T6,T7,T9] ─────────────────────
+// ─── Accent colours per signal index [T3,T7,T9] ─────────────────────
 // Indexed against SIGNAL_LABELS, so the order here must match it exactly.
 const SIGNAL_COLORS = [
-  '#60A5FA', // T2 blue
   '#35B978', // T3 green
-  '#F59E0B', // T6 orange
   '#34D399', // T7 teal (external prediction)
   '#A78BFA', // T9 violet (CPL-3)
 ];
@@ -502,9 +500,7 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data, activeSchedule })
             <thead className="bg-[#06130F] text-[#8D9B95] uppercase text-[10px]">
               <tr>
                 <th className="py-2.5 px-3">Period</th>
-                <th className="py-2.5 px-2 text-center">T2</th>
                 <th className="py-2.5 px-2 text-center">T3</th>
-                <th className="py-2.5 px-2 text-center">T6</th>
                 <th className="py-2.5 px-2 text-center">T7</th>
                 <th className="py-2.5 px-2 text-center">T9</th>
                 <th className="py-2.5 px-3 text-center text-[#35B978] font-bold">DECISION</th>
@@ -516,9 +512,7 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data, activeSchedule })
               {visibleHistory.map((row, i) => (
                 <tr key={i} className="hover:bg-[#06130F]/80">
                   <td className="py-1.5 px-3 text-gray-300">{row.period.slice(-7)}</td>
-                  <SigCell pred={row.t2pred} />
                   <SigCell pred={row.t3pred} />
-                  <SigCell pred={row.t6pred} />
                   <SigCell pred={row.t7pred} />
                   <SigCell pred={row.t9pred} />
                   <td className={`py-1.5 px-3 font-bold text-center ${row.adaptiveDecision === 'Big' ? 'text-[#E7B93F]' : 'text-[#60A5FA]'}`}>

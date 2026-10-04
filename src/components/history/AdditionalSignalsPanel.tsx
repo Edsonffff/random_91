@@ -1,5 +1,5 @@
 /**
- * AdditionalSignalsPanel — Tests 6 and 7
+ * AdditionalSignalsPanel — Test 7
  *
  * ROOT CAUSE OF PREVIOUS BUG
  * ──────────────────────────
@@ -12,12 +12,11 @@
  * draw timestamp.  All 100+ rounds in a session therefore showed:
  *   10:00:50, 10:00:50, 10:00:50 …
  *
- * Tests 6–7 — Use the last 7 characters of the period string parsed as
- *             an integer.  This gives the sequential round number that
- *             increments with every round:
- *               20260928100050486 → last7 = "0050486" → 50486
- *               20260928100050487 → last7 = "0050487" → 50487
- *             Produces unique, monotonically-increasing round IDs.
+ * Test 7 — Uses the last 7 characters of the period string parsed as
+ *          an integer for exact period matching:
+ *            20260928100050486 → last7 = "0050486" → 50486
+ *            20260928100050487 → last7 = "0050487" → 50487
+ *          Produces unique, monotonically-increasing round IDs.
  */
 
 import React, { useState } from 'react';
@@ -36,9 +35,9 @@ export interface TimeTestDetail {
   period: string;
   /** Reserved display time field for shared detail-table compatibility. */
   hour: number;
-  /** Unused by Tests 6-7. */
+  /** Reserved display field for shared detail-table compatibility. */
   minute: number;
-  /** Unused by Tests 6-7. */
+  /** Reserved display field for shared detail-table compatibility. */
   second: number;
   predictionNumber: number | null;
   predictedSize: BigSmall | null;
@@ -109,76 +108,6 @@ function sortedAscending(dataset: RoundEntryForTests[]): RoundEntryForTests[] {
 
 
 
-/** Compute simple moving average over last `n` states (Big=1, Small=0). 
- *  Only uses sorted[0..i-1] — never includes current round. */
-function smaWindow(sorted: RoundEntryForTests[], i: number, n: number): number | null {
-  if (i < n) return null;
-  let sum = 0;
-  for (let k = i - n; k < i; k++) sum += sorted[k].number >= 5 ? 1 : 0;
-  return sum / n;
-}
-
-// ─── Test 6 — Simple Moving Average (SMA-10 official) ────────────────────────
-// Encode: Big=1, Small=0
-// SMA = avg(prev N states)  — never includes current round (anti-leakage)
-// Official signal: SMA-10.  SMA=0.5 or unavailable → NO SIGNAL (excluded from accuracy)
-
-export function computeTest6(
-  dataset: RoundEntryForTests[]
-): TimeTestResult & { smaValues: { sma5: number | null; sma10: number | null; sma20: number | null } } {
-  const sorted = sortedAscending(dataset);
-  let hits = 0;
-  let total = 0;
-  const details: TimeTestDetail[] = [];
-  let finalSmaValues = { sma5: null as number | null, sma10: null as number | null, sma20: null as number | null };
-
-  for (let i = 1; i < sorted.length; i++) {
-    const item = sorted[i];
-    const sma5Val  = smaWindow(sorted, i, 5);
-    const sma10Val = smaWindow(sorted, i, 10);
-    const sma20Val = smaWindow(sorted, i, 20);
-    finalSmaValues = { sma5: sma5Val, sma10: sma10Val, sma20: sma20Val };
-
-    const actualSize: BigSmall = toBigSmall(item.number);
-    const noSignal = sma10Val === null || sma10Val === 0.5;
-    let predictedSize: BigSmall = 'Big';
-    let predNum = 0;
-    let isHit = false;
-
-    if (!noSignal && sma10Val !== null) {
-      predictedSize = sma10Val > 0.5 ? 'Big' : 'Small';
-      predNum = Math.round(sma10Val * 10);
-      isHit = predictedSize === actualSize;
-      hits++;
-      total++;
-    }
-
-    details.push({
-      period: item.period,
-      hour: 0, minute: 0, second: 0,
-      predictionNumber: predNum,
-      predictedSize,
-      actual: item.number,
-      actualSize,
-      isHit,
-      noSignal,
-      extra: {
-        sma5:  sma5Val  !== null ? Math.round(sma5Val  * 1000) / 10 : -1,
-        sma10: sma10Val !== null ? Math.round(sma10Val * 1000) / 10 : -1,
-        sma20: sma20Val !== null ? Math.round(sma20Val * 1000) / 10 : -1,
-      },
-    });
-  }
-
-  const accuracy = total > 0 ? Math.round((hits / total) * 100) : 0;
-  const validDetails = details.filter((d) => !d.noSignal);
-  return {
-    hits, total, accuracy, details,
-    ...streakStats(validDetails),
-    latestPrediction: validDetails.length > 0 ? validDetails[validDetails.length - 1].predictedSize : null,
-    smaValues: finalSmaValues,
-  };
-}
 
 // ─── Test 7 — External Prediction Source ─────────────────────────────────────
 // Source: https://bdgtharu.com/api.php  (server-side only)
@@ -510,19 +439,17 @@ export interface T7DebugInfo {
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export interface AdditionalSignalsPanelProps {
-  test6: TimeTestResult & { smaValues: { sma5: number | null; sma10: number | null; sma20: number | null } };
   test7: TimeTestResult;
   t7DebugInfo?: T7DebugInfo | null;
 }
 
 export const AdditionalSignalsPanel: React.FC<AdditionalSignalsPanelProps> = ({
-  test6,
   test7,
   t7DebugInfo,
 }) => {
   const [showDetails, setShowDetails] = useState(false);
 
-   const ACCENT_COLORS = ['#60A5FA', '#F59E0B'];
+   const ACCENT_COLORS = ['#60A5FA'];
 
   return (
     <div className="space-y-3">
@@ -535,8 +462,7 @@ export const AdditionalSignalsPanel: React.FC<AdditionalSignalsPanelProps> = ({
           <span className="w-14 text-right">Latest</span>
           <span className="w-12 text-right">Acc%</span>
         </div>
-        <SignalRow testNum={6} label="SMA-10" formula="avg(prev 10 states)>0.5→BIG, <0.5→SML" result={test6} accentColor={ACCENT_COLORS[0]} />
-        <SignalRow testNum={7} label="WingoAI Signal" formula="External API signal: BIG→Big · SMALL→Small" result={test7} accentColor={ACCENT_COLORS[1]} />
+        <SignalRow testNum={7} label="WingoAI Signal" formula="External API signal: BIG→Big · SMALL→Small" result={test7} accentColor={ACCENT_COLORS[0]} />
       </div>
 
       {/* ── Toggle details ────────────────────────────────────────────────── */}
@@ -551,50 +477,6 @@ export const AdditionalSignalsPanel: React.FC<AdditionalSignalsPanelProps> = ({
       {showDetails && (
         <div className="space-y-4">
 
-          <CollapsibleCard id="test6_detail" variant="subcard"
-            title={<span className="font-mono text-xs font-bold text-[#60A5FA]">Test 6 — Simple Moving Average (SMA-10)</span>}
-            subtitle={`${test6.total} predictions · ${test6.accuracy}% accuracy · Cur Hit: ${test6.currentHitStreak} · Cur Miss: ${test6.currentMissStreak}`}
-          >
-            <div className="space-y-3">
-              {/* SMA Window Analysis */}
-              <div className="p-3 rounded-lg bg-[#071A14] border border-[#1E3A2B] space-y-2">
-                <span className="text-[10px] font-mono uppercase font-bold text-[#8D9B95] tracking-wider block">SMA Window Analysis (latest round)</span>
-                <div className="grid grid-cols-3 gap-2 text-xs font-mono">
-                  {(([
-                    { label: 'SMA-5',     val: test6.smaValues?.sma5  ?? null },
-                    { label: 'SMA-10 ✓',  val: test6.smaValues?.sma10 ?? null },
-                    { label: 'SMA-20',    val: test6.smaValues?.sma20 ?? null },
-                  ] as { label: string; val: number | null }[]) ).map(({ label, val }) => {
-                    const pct = val !== null ? Math.round(val * 1000) / 10 : null;
-                    const noSig = pct === null || pct === 50;
-                    return (
-                      <div key={label} className="p-2.5 rounded-lg bg-[#020806] border border-[#1E3A2B]/60 text-center">
-                        <span className="text-[10px] text-[#8D9B95] block">{label}</span>
-                        <span className={`text-sm font-bold ${noSig ? 'text-[#8D9B95]' : (pct ?? 0) > 50 ? 'text-[#E7B93F]' : 'text-[#60A5FA]'}`}>
-                          {pct !== null ? `${pct}%` : '—'}
-                        </span>
-                        <span className="text-[9px] text-[#8D9B95] block">
-                          {noSig ? 'NO SIGNAL' : (pct ?? 0) > 50 ? 'BIG' : 'SMALL'}
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
-                <p className="text-[10px] text-[#8D9B95] font-sans">Official signal: SMA-10. When SMA-10 = 50% the round is marked NO SIGNAL and excluded from accuracy and Adaptive Learning.</p>
-              </div>
-              <StreakMini result={test6} />
-              <DetailTable result={test6}
-                extraHeaders={['SMA-5', 'SMA-10', 'SMA-20']}
-                extraCells={(row) => [
-                  row.extra?.sma5  !== undefined && Number(row.extra.sma5)  !== -1 ? `${row.extra.sma5}%`  : '—',
-                  row.extra?.sma10 !== undefined && Number(row.extra.sma10) !== -1 ? `${row.extra.sma10}%` : '—',
-                  row.extra?.sma20 !== undefined && Number(row.extra.sma20) !== -1 ? `${row.extra.sma20}%` : '—',
-                ]}
-              />
-            </div>
-          </CollapsibleCard>
-
-          {/* Test 7 */}
           <CollapsibleCard id="test7_detail" variant="subcard"
             title={<span className="font-mono text-xs font-bold text-[#F59E0B]">Test 7 — WingoAI Signal</span>}
             subtitle={test7.unavailable
