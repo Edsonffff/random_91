@@ -1,22 +1,16 @@
 /**
  * AdaptiveLearningPanel — Main Decision Engine (active-signal weighted ensemble)
  *
- * Inputs:  Tests 2, 3, 6, 7, 9
- * Learner: Adaptive Learning Multi-Signal Decision Engine
+ * Inputs: Tests 3, 7, 9 — computed by the phone-side engine.
  */
 
-import React, { useState, useMemo } from 'react';
-import { CheckCircle2, XCircle, Brain, RotateCcw, TrendingUp, ShieldCheck } from 'lucide-react';
-import type { AdaptiveResult, AdaptiveHistoryRow } from '../../hooks/useAdaptiveLearning';
-import { SIGNAL_LABELS } from '../../hooks/useAdaptiveLearning';
+import React from 'react';
+import { CheckCircle2, XCircle, Brain, TrendingUp, ShieldCheck } from 'lucide-react';
+import { useServerAdaptiveLearning } from '../../hooks/useServerAdaptiveLearning';
 import type { RealGameSchedule } from '../../types/result';
 import { CollapsibleCard } from '../common/CollapsibleCard';
 
-/** Rows rendered by default in the expanded decision-history table. */
-const VISIBLE_HISTORY_ROWS = 200;
-
 interface Props {
-  data: AdaptiveResult;
   /** Live feed schedule — used only for the active-round countdown if available. */
   activeSchedule?: RealGameSchedule | null;
 }
@@ -87,12 +81,23 @@ function SigCell({ pred }: { pred: 'Big' | 'Small' | null }) {
 
 // ─── Main component ───────────────────────────────────────────────────────────
 
-export const AdaptiveLearningPanel: React.FC<Props> = ({ data, activeSchedule }) => {
-  const [confirmReset, setConfirmReset] = useState(false);
+export const AdaptiveLearningPanel: React.FC<Props> = ({ activeSchedule }) => {
+  const { data, status, stale, error } = useServerAdaptiveLearning();
+
+  if (!data) {
+    return (
+      <div role="status" aria-live="polite" className="p-5 rounded-xl bg-[#06130F] border border-[#1E3A2B] text-sm text-[#8D9B95]">
+        {status === 'loading' ? 'Loading Adaptive Learning from the phone server…' : error}
+        {status === 'error' && <p className="mt-2 text-xs">Retrying automatically every 5 seconds.</p>}
+      </div>
+    );
+  }
 
   const {
-    history,
+    finalDecision,
     activePrediction,
+    signals,
+    signalLabels: SIGNAL_LABELS,
     totalPredictions,
     totalHits,
     totalMisses,
@@ -108,24 +113,26 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data, activeSchedule })
     last100,
     last250,
     lastSignalAgreement,
-    resetLearning,
   } = data;
 
-  const lastRow: AdaptiveHistoryRow | null = history.length > 0 ? history[history.length - 1] : null;
-  const historyDesc = useMemo(() => [...history].reverse(), [history]);
-  // This table is expanded by default, so it previously mounted one <tr> per
-  // evaluated round — thousands of rows on every 5s update. Render only the most
-  // recent slice by default; the full set stays in state and is one click away.
-  const [showAllHistory, setShowAllHistory] = useState(false);
-  const visibleHistory = showAllHistory ? historyDesc : historyDesc.slice(0, VISIBLE_HISTORY_ROWS);
-
-  const handleReset = () => { resetLearning(false); setConfirmReset(false); };
+  const lastRow = data.latestEvaluation;
+  const visibleHistory = lastRow ? [lastRow] : [];
+  const currentDecision = activePrediction?.decision ?? finalDecision;
+  const currentPeriod = activePrediction?.period ?? lastRow?.period;
+  const currentVote = activePrediction ?? lastRow;
+  const live = status === 'ready';
 
   const diff = accuracyPct - 50;
   const diffStr = diff >= 0 ? `+${diff.toFixed(1)}pp` : `${diff.toFixed(1)}pp`;
 
   return (
     <div className="space-y-5">
+      <div role="status" aria-live="polite" className={`p-3 rounded-xl border text-xs font-mono ${live ? 'border-[#1E3A2B] text-[#8D9B95]' : 'border-[#E7B93F]/50 text-[#E7B93F]'}`}>
+        {error ? `${error} Showing the last known server snapshot; retrying automatically.`
+          : stale ? 'Server checkpoint is stale or its clock is out of sync. Showing the last known snapshot.'
+          : 'Live phone-side Adaptive Learning · refreshes approximately every 5 seconds'}
+        <span className="block mt-1">Checkpoint: {new Date(data.checkpointAt).toLocaleString()}{stale && error ? ' · STALE' : ''}</span>
+      </div>
 
       {/* ── Prominent Decision Hero Box ──────────────────────────────────── */}
       <div className="p-5 sm:p-6 rounded-2xl bg-gradient-to-br from-[#0B2117] via-[#06140F] to-[#020806] border-2 border-[#35B978]/40 shadow-2xl relative overflow-hidden">
@@ -155,17 +162,17 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data, activeSchedule })
             {/* Left: Huge Final Decision */}
             <div className="p-4 rounded-xl bg-[#020806]/80 border border-[#1E3A2B] text-center space-y-1">
               <span className="text-[11px] font-mono font-bold text-[#8D9B95] tracking-widest uppercase block">
-                FINAL DECISION
+                {live ? 'CURRENT DECISION' : 'LAST KNOWN DECISION'}
               </span>
-              {lastRow ? (
+              {currentDecision ? (
                 <div className="py-2">
                   <span className={`text-4xl sm:text-5xl font-black font-mono tracking-tight drop-shadow-md ${
-                    lastRow.adaptiveDecision === 'Big' ? 'text-[#E7B93F]' : 'text-[#60A5FA]'
+                    currentDecision === 'Big' ? 'text-[#E7B93F]' : 'text-[#60A5FA]'
                   }`}>
-                    {lastRow.adaptiveDecision.toUpperCase()}
+                    {currentDecision.toUpperCase()}
                   </span>
                   <span className="text-xs font-mono text-[#8D9B95] block mt-1">
-                    Period {lastRow.period.slice(-7)} · Decision before result
+                    Period {currentPeriod?.slice(-7) ?? '—'} · {activePrediction ? 'Decision before result' : 'Latest evaluated decision'}
                   </span>
                 </div>
               ) : (
@@ -174,7 +181,7 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data, activeSchedule })
                 </div>
               )}
 
-              {lastRow && (
+              {!activePrediction && lastRow && (
                 <div className="pt-1">
                   {lastRow.isHit ? (
                     <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#35B978]/20 text-[#35B978] border border-[#35B978]/40 font-mono text-xs font-bold">
@@ -196,21 +203,21 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data, activeSchedule })
                   Weighted Vote Distribution
                 </span>
                 <span className="text-[10px] font-mono text-[#35B978]">
-                  {lastRow
-                    ? `${lastRow.signalsAvailable} of ${SIGNAL_LABELS.length} signals voting`
+                  {currentVote
+                    ? `${currentVote.signalsAvailable} of ${SIGNAL_LABELS.length} signals voting`
                     : `${SIGNAL_LABELS.length} signals configured`}
                 </span>
               </div>
 
-              {lastRow ? (
+              {currentVote ? (
                 <div className="space-y-2 font-mono">
                   <div className="flex items-center justify-between text-xs">
-                    <span className="font-bold text-[#E7B93F]">BIG: {lastRow.probBig.toFixed(1)}%</span>
-                    <span className="font-bold text-[#60A5FA]">SMALL: {lastRow.probSmall.toFixed(1)}%</span>
+                    <span className="font-bold text-[#E7B93F]">BIG: {currentVote.probBig.toFixed(1)}%</span>
+                    <span className="font-bold text-[#60A5FA]">SMALL: {currentVote.probSmall.toFixed(1)}%</span>
                   </div>
                   <div className="h-3 rounded-full bg-[#071A14] border border-[#1E3A2B] overflow-hidden flex">
-                    <div className="h-full bg-[#E7B93F] transition-all duration-500" style={{ width: `${lastRow.probBig}%` }} />
-                    <div className="h-full bg-[#60A5FA] transition-all duration-500" style={{ width: `${lastRow.probSmall}%` }} />
+                    <div className="h-full bg-[#E7B93F] transition-all duration-500" style={{ width: `${currentVote.probBig}%` }} />
+                    <div className="h-full bg-[#60A5FA] transition-all duration-500" style={{ width: `${currentVote.probSmall}%` }} />
                   </div>
                   <div className="flex justify-between text-[10px] text-[#8D9B95] pt-0.5">
                     <span>Weights normalized to 100%</span>
@@ -262,7 +269,7 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data, activeSchedule })
             </span>
           </div>
           <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[#E7B93F]/15 text-[#E7B93F] border border-[#E7B93F]/30 uppercase font-bold">
-            Status: Decision before result
+            Status: {live ? 'Decision before result' : 'Last known snapshot'}
           </span>
         </div>
 
@@ -288,7 +295,7 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data, activeSchedule })
               <span className="text-[#8D9B95]">
                 Actual: <span className="text-[#8D9B95] font-bold">PENDING</span>
               </span>
-              {activeSchedule && (
+              {live && activeSchedule?.currentIssue === activePrediction.period && (
                 <span className="text-[#35B978] font-bold">
                   Next round in {Math.max(0, activeSchedule.remainingSeconds)}s
                 </span>
@@ -297,7 +304,14 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data, activeSchedule })
           </div>
         ) : (
           <div className="py-4 text-center text-[#8D9B95] font-mono text-xs">
-            Awaiting the active period from the live feed…
+            Awaiting an active prediction from the phone server…
+          </div>
+        )}
+        {signals && (
+          <div className="grid grid-cols-3 gap-2 font-mono">
+            {[signals.t3pred, signals.t7pred, signals.t9pred].map((prediction, index) => (
+              <StatBox key={SIGNAL_LABELS[index]} label={SIGNAL_LABELS[index]} value={prediction?.toUpperCase() ?? 'NO SIGNAL'} />
+            ))}
           </div>
         )}
       </div>
@@ -358,7 +372,7 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data, activeSchedule })
 
           {totalPredictions === 0 && (
             <div className="p-3 rounded-lg bg-[#020806] border border-[#1E3A2B]/60 text-center text-[#8D9B95] text-xs font-mono">
-              No rounds available yet. Switch to Real Live Feed and wait for data.
+              No evaluated rounds reported by the phone server yet.
             </div>
           )}
 
@@ -420,7 +434,7 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data, activeSchedule })
                 <WeightBar
                   key={label}
                   label={label}
-                  value={weights[i] ?? INITIAL_WEIGHT_DISPLAY}
+                  value={weights[i]}
                   color={SIGNAL_COLORS[i]}
                   isDominant={i === dominantSignalIndex}
                 />
@@ -440,7 +454,7 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data, activeSchedule })
               <div className="p-2 rounded bg-[#020806] border border-[#1E3A2B]/60">
                 <span className="text-[10px] text-[#8D9B95] block">Adaptive Engine</span>
                 <span className={`text-base font-bold ${accuracyPct >= 50 ? 'text-[#35B978]' : 'text-[#F04444]'}`}>
-                  {accuracyPct}.0%
+                  {accuracyPct.toFixed(1)}%
                 </span>
               </div>
               <div className="p-2 rounded bg-[#020806] border border-[#1E3A2B]/60">
@@ -482,18 +496,7 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data, activeSchedule })
         id="adaptive_history_table"
         variant="subcard"
         title={<span className="font-mono text-xs font-bold text-[#F5F5F5]">Adaptive Decision History Table</span>}
-        subtitle={`${totalPredictions} evaluated rounds — final decision generated BEFORE actual was known`}
-        headerRight={
-          historyDesc.length > VISIBLE_HISTORY_ROWS ? (
-            <button
-              type="button"
-              onClick={() => setShowAllHistory((prev) => !prev)}
-              className="px-2.5 py-1 rounded-lg bg-[#06130F] hover:bg-[#1E3A2B] border border-[#1E3A2B] text-[10px] font-mono font-bold text-[#35B978] transition-colors cursor-pointer"
-            >
-              {showAllHistory ? `Show latest ${VISIBLE_HISTORY_ROWS}` : `Show all ${historyDesc.length}`}
-            </button>
-          ) : null
-        }
+        subtitle={`Latest evaluation from ${totalPredictions} evaluated rounds — full history stays on the server`}
       >
         <div className="overflow-x-auto rounded-lg border border-[#1E3A2B]/60">
           <table className="w-full text-left text-xs font-mono">
@@ -536,7 +539,7 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data, activeSchedule })
               ))}
               {visibleHistory.length === 0 && (
                 <tr>
-                  <td colSpan={11} className="py-6 text-center text-[#8D9B95]">
+                  <td colSpan={7} className="py-6 text-center text-[#8D9B95]">
                     No learning history yet. Data will appear once rounds are available.
                   </td>
                 </tr>
@@ -549,32 +552,8 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data, activeSchedule })
         </p>
       </CollapsibleCard>
 
-      {/* ── Reset Model State ────────────────────────────────────────────── */}
-      <div className="flex items-center justify-between p-3.5 rounded-xl bg-[#06130F] border border-[#1E3A2B]">
-        <div>
-          <span className="text-xs font-mono font-bold text-[#F5F5F5]">Reset Learned Weights</span>
-          <p className="text-[11px] text-[#8D9B95] mt-0.5">
-            Restores equal initial weights (1/{SIGNAL_LABELS.length} each) and clears online weight adaptation.
-          </p>
-        </div>
-        {!confirmReset ? (
-          <button
-            onClick={() => setConfirmReset(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#E7B93F]/10 hover:bg-[#E7B93F]/20 text-[#E7B93F] border border-[#E7B93F]/30 font-mono text-xs font-bold transition-all cursor-pointer"
-          >
-            <RotateCcw className="w-3.5 h-3.5" /> Reset Weights
-          </button>
-        ) : (
-          <div className="flex items-center gap-2">
-            <span className="text-[11px] text-[#E7B93F] font-mono">Reset weights to equal?</span>
-            <button onClick={handleReset} className="px-3 py-1.5 rounded-lg bg-[#E7B93F] text-[#020806] font-mono text-xs font-bold cursor-pointer hover:bg-[#c99f30] transition-colors">
-              Yes, Reset
-            </button>
-            <button onClick={() => setConfirmReset(false)} className="px-3 py-1.5 rounded-lg bg-[#1E3A2B] text-[#8D9B95] font-mono text-xs cursor-pointer hover:text-[#F5F5F5] transition-colors">
-              Cancel
-            </button>
-          </div>
-        )}
+      <div className="p-3.5 rounded-xl bg-[#06130F] border border-[#1E3A2B] text-xs text-[#8D9B95]">
+        Learned weights and model resets are managed on the phone server.
       </div>
 
       {/* Disclaimer */}
@@ -588,7 +567,3 @@ export const AdaptiveLearningPanel: React.FC<Props> = ({ data, activeSchedule })
     </div>
   );
 };
-
-// Fallback display constant (never referenced by logic). Derived from the
-// signal list so it stays correct when the number of signals changes.
-const INITIAL_WEIGHT_DISPLAY = 1 / SIGNAL_LABELS.length;

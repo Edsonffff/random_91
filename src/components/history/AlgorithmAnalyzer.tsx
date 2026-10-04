@@ -17,8 +17,6 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 import { CollapsibleCard } from '../common/CollapsibleCard';
-import { useAdaptiveLearning } from '../../hooks/useAdaptiveLearning';
-import type { Test4InputRow, ActiveInputRow } from '../../hooks/useAdaptiveLearning';
 import { AdaptiveLearningPanel } from './AdaptiveLearningPanel';
 import {
   AdditionalSignalsPanel,
@@ -939,8 +937,6 @@ export const AlgorithmAnalyzer: React.FC = () => {
   // ==========================================
   // 5–8. TIME-BASED / ROUND-ID SIGNAL TESTS
   // ==========================================
-  // Declared BEFORE test4Inputs so their .details arrays are available
-  // when building the join maps below.
 
   const test7 = useMemo(() => computeTest7(activeDataset, t7SignalsMap), [activeDataset, t7SignalsMap]);
 
@@ -979,94 +975,6 @@ export const AlgorithmAnalyzer: React.FC = () => {
   }, [realSchedule?.currentIssue, test9History, test9Cpl1Rows]);
 
   // ==========================================
-  // ADAPTIVE LEARNING MAIN DECISION ENGINE
-  // ==========================================
-  // Build aligned input rows for Adaptive Learning.
-  // Every period with a known actual is a row; all signals are optional.
-  // Only Tests 3, 7, and 9 feed Adaptive Learning. Missing signals are
-  // excluded from that round's vote inside the hook (same rule already used
-  // for the remaining signals).
-  const adaptiveInputs = useMemo((): Test4InputRow[] => {
-    if (activeDataset.length === 0) return [];
-
-    const t3Map = new Map<string, 'Big' | 'Small'>();
-    for (const d of test3.details) {
-      if (!d.noSignal && d.predictedSize) t3Map.set(d.period, d.predictedSize);
-    }
-
-    const t9Map = new Map<string, 'Big' | 'Small'>();
-    for (const d of test9Rows) {
-      if (!d.noSignal && d.prediction) t9Map.set(d.periodId, d.prediction === 'BIG' ? 'Big' : 'Small');
-    }
-
-    const t7Map = new Map<string, 'Big' | 'Small'>();
-    for (const d of test7.details) {
-      if (!d.noSignal && d.predictedSize) t7Map.set(d.period, d.predictedSize);
-    }
-
-    const actualMap = new Map<string, 'Big' | 'Small'>();
-    for (const item of activeDataset) {
-      actualMap.set(item.period, item.number >= 5 ? 'Big' : 'Small');
-    }
-
-    const rows: Test4InputRow[] = [];
-    for (const [period, actual] of actualMap) {
-      rows.push({
-        period,
-        t3pred: t3Map.get(period) ?? null,
-        t7pred: t7Map.get(period),
-        t9pred: t9Map.get(period),
-        actual,
-      });
-    }
-    return rows;
-  }, [
-    test3.details,
-    test7.details,
-    test9Rows,
-    activeDataset,
-  ]);
-
-  // Active (unsettled) round inputs: predictions from the SAME tests that feed
-  // the settled rows, keyed by the active issue id. No extra fetch/polling.
-  const activePeriodId = realSchedule?.currentIssue || '';
-  const adaptiveActiveInput = useMemo((): ActiveInputRow | null => {
-    if (!activePeriodId) return null;
-    return {
-      period: activePeriodId,
-      t3pred: test3.latestPrediction,
-      t7pred: test7.latestPrediction,
-      t9pred: test9ActiveRow?.prediction === 'BIG' ? 'Big' : test9ActiveRow?.prediction === 'SMALL' ? 'Small' : null,
-    };
-  }, [
-    activePeriodId,
-    test3.latestPrediction,
-    test7.latestPrediction,
-    test9ActiveRow?.prediction,
-  ]);
-
-  const adaptiveLearning = useAdaptiveLearning(adaptiveInputs, adaptiveActiveInput);
-
-  // Per-update diagnostics summary. This intentionally logs a CONSTANT amount of
-  // output per update (never one line per history row): the previous loops
-  // emitted ~3 x history.length console.log calls on every poll, which grew to
-  // thousands of synchronous log calls per update as history passed 2,400 rows.
-  useEffect(() => {
-    const activePred = adaptiveLearning.activePrediction;
-    console.log(
-      `[Adaptive] live_history_count=${realHistory.length} available_test_inputs=${adaptiveInputs.length} active_period=${realSchedule?.currentIssue || 'none'} prediction=${activePred ? `${activePred.decision} (BIG ${activePred.probBig.toFixed(1)}% / SMALL ${activePred.probSmall.toFixed(1)}%, ${activePred.signalsAvailable} signals)` : 'n/a'}`
-    );
-  }, [
-    realHistory.length,
-    realSchedule?.currentIssue,
-    adaptiveInputs.length,
-    adaptiveLearning.activePrediction?.period,
-    adaptiveLearning.activePrediction?.decision,
-    adaptiveLearning.activePrediction?.signalsAvailable,
-    adaptiveLearning.totalPredictions,
-  ]);
-
-  // ==========================================
   // INPUT SIGNALS SUMMARY (Tests 3, 7, 9)
   // ==========================================
   const signalSummaryData = useMemo((): SignalEntry[] => {
@@ -1087,9 +995,6 @@ export const AlgorithmAnalyzer: React.FC = () => {
         setIsResetting(false);
         return;
       }
-
-      // 1. Reset adaptive learning model state with full clean slate (streaks = 0, weights = initial)
-      adaptiveLearning.resetLearning(true);
 
       // 2. Clear WingoAI signals map
       setT7SignalsMap(new Map());
@@ -1204,7 +1109,7 @@ export const AlgorithmAnalyzer: React.FC = () => {
           <button
             onClick={() => setShowResetModal(true)}
             className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-[#F04444]/15 hover:bg-[#F04444]/25 text-[#F04444] border border-[#F04444]/40 font-mono text-xs font-black transition-all cursor-pointer shadow"
-            title="Full reset of collected history, predictions, hit/miss records, and adaptive learning state"
+            title="Reset collected history and local caches; phone-side Adaptive Learning is managed on the server"
           >
             <Trash2 className="w-3.5 h-3.5" />
             RESET ALL DATA
@@ -1229,12 +1134,12 @@ export const AlgorithmAnalyzer: React.FC = () => {
         }
         headerRight={
           <span className="text-xs text-[#8D9B95] font-mono">
-             Online Adaptive Ensemble of Supporting Tests (2, 3, 6, 7, 9)
+             Phone-side Adaptive Ensemble (Tests 3, 7, 9)
           </span>
         }
         defaultExpanded={true}
       >
-        <AdaptiveLearningPanel data={adaptiveLearning} activeSchedule={realSchedule} />
+        <AdaptiveLearningPanel activeSchedule={realSchedule} />
       </CollapsibleCard>
 
       {/* ======================================================== */}
@@ -1797,7 +1702,7 @@ export const AlgorithmAnalyzer: React.FC = () => {
               </h3>
             </div>
             <p className="text-xs font-mono text-[#F5F5F5] leading-relaxed">
-              This will permanently delete the collected history, predictions, hit/miss records, WingoAI signal history, and adaptive learning state.
+              This will permanently delete the collected history, predictions, hit/miss records, WingoAI signal history, and local caches. Phone-side Adaptive Learning state is managed separately on the server.
             </p>
             <p className="text-xs font-mono text-[#F04444] font-bold">
               This cannot be undone.
