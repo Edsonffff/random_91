@@ -17,9 +17,8 @@ const HOST = '0.0.0.0';
 // This REPLACES the old WingoAI source (https://server.wingoaibot.com/signals/current).
 // The request is made HERE, server-side. The React frontend never contacts this
 // host — it only reads what this collector stores in Supabase.
-// Any credential lives ONLY in the environment and is never logged.
+// BDGTharu uses an unauthenticated GET request.
 const T7_API_BASE_URL = 'https://bdgtharu.com/api.php';
-const T7_API_TOKEN = process.env.BDGTHARU_API_TOKEN || '';
 
 // Timeout for a single T7 request. The polling cadence (5s) stays
 // separate: a slow upstream simply makes a cycle overrun, it does not stack.
@@ -303,11 +302,7 @@ async function fetchAndProcessT7Prediction(supabaseClient) {
     }, T7_REQUEST_TIMEOUT_MS);
 
     const headers = { Accept: 'application/json' };
-    if (T7_API_TOKEN) {
-      headers['Authorization'] = `Bearer ${T7_API_TOKEN}`;
-    }
 
-    // NOTE: never log `headers` — they may contain T7_API_TOKEN.
     let response;
     try {
       response = await fetch(requestUrl, { method: 'GET', headers, signal: controller.signal });
