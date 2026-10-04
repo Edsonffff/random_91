@@ -1,5 +1,5 @@
 import React from 'react';
-import { AlgorithmAnalyzer } from '../components/history/AlgorithmAnalyzer';
+import { AdaptiveLearningPanel } from '../components/history/AdaptiveLearningPanel';
 
 export const AdaptiveLearningPage: React.FC = () => {
   return (
@@ -10,13 +10,13 @@ export const AdaptiveLearningPage: React.FC = () => {
           Adaptive Learning
         </h1>
         <p className="text-sm text-[#8D9B95] mt-1">
-          Weighted multi-signal decision engine, live Adaptive Final Result, and evaluated-round history
-          driven by the existing Real Live Feed.
+          Weighted multi-signal decision engine, live Adaptive Final Result, and latest evaluation
+          from the phone-side Adaptive Learning server.
         </p>
       </div>
 
-      {/* Existing Adaptive Learning system (single engine/state — not a copy) */}
-      <AlgorithmAnalyzer />
+      {/* Mount the server-backed panel without the full-history analysis parent. */}
+      <AdaptiveLearningPanel />
     </div>
   );
 };

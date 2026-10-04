@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, Outlet } from 'react-router-dom';
 import { ToastProvider } from './context/ToastContext';
 import { ResultProvider } from './context/ResultContext';
 import { RealHistoryProvider } from './context/RealHistoryContext';
@@ -20,14 +20,20 @@ export function App() {
   return (
     <BrowserRouter>
       <ToastProvider>
-        <ResultProvider>
-          <RealHistoryProvider>
-            <Routes>
-            <Route element={<Shell />}>
+        <Routes>
+          <Route element={<Shell />}>
+            <Route path="/adaptive-learning" element={<AdaptiveLearningPage />} />
+            {/* History/simulator providers perform work on mount; only their pages need them. */}
+            <Route element={
+              <ResultProvider>
+                <RealHistoryProvider>
+                  <Outlet />
+                </RealHistoryProvider>
+              </ResultProvider>
+            }>
               <Route path="/" element={<Dashboard />} />
               <Route path="/simulator" element={<ResultSimulator />} />
               <Route path="/history" element={<GameHistory />} />
-              <Route path="/adaptive-learning" element={<AdaptiveLearningPage />} />
               <Route path="/game-client" element={<GameClientView />} />
               <Route path="/api-console" element={<ApiConsolePage />} />
               <Route path="/mock-api" element={<MockApiPage />} />
@@ -37,9 +43,8 @@ export function App() {
               <Route path="/settings" element={<SettingsPage />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Route>
-          </Routes>
-          </RealHistoryProvider>
-        </ResultProvider>
+          </Route>
+        </Routes>
       </ToastProvider>
     </BrowserRouter>
   );
