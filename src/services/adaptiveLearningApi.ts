@@ -1,7 +1,7 @@
 import type { ActiveInputRow, AdaptiveResult, AdaptiveHistoryRow, ActivePrediction } from '../hooks/useAdaptiveLearning';
 
 export const ADAPTIVE_LEARNING_URL = import.meta.env?.VITE_ADAPTIVE_LEARNING_URL?.trim()
-  || 'https://remedies-flush-departmental-prime.trycloudflare.com/api/adaptive-learning/current';
+  || 'https://adaptive.random9111.sbs/api/adaptive-learning/current';
 export const ADAPTIVE_STALE_AFTER_MS = 90_000;
 
 export interface AdaptiveSnapshot extends Omit<AdaptiveResult, 'history' | 'resetLearning'> {
