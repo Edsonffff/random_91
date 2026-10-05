@@ -19,8 +19,8 @@ history or T7 tables. Checkpoints are service-role-only.
 
 `build-adaptive-algorithms.mjs` uses TypeScript's parser to extract:
 
-- T3: the chart, conflicting-pair set, and complete `test3` memo calculation in
-  `src/components/history/AlgorithmAnalyzer.tsx`.
+- T3: `TEST3_SEQUENCE`, `test3Prediction`, and `computeTest3` in
+  `src/experimental/test3Sequence.ts`, also used by `AlgorithmAnalyzer`.
 - T7: `computeTest7` and its pure helpers in
   `src/components/history/AdditionalSignalsPanel.tsx`.
 - T9: `periodicLogisticAlgorithm.ts` and the original CPL-3 helpers/loop in
@@ -28,16 +28,21 @@ history or T7 tables. Checkpoints are service-role-only.
 - Adaptive: the vote helpers and verbatim chronological prediction/update loop
   in `src/hooks/useAdaptiveLearning.ts`.
 
-The generator also includes the original full browser replay and input-joining
-calculations as the independent full-replay reference for parity tests. It changes
+The generator also includes the full browser replay and pure input joins from
+`src/experimental/adaptiveSignalInputs.ts` as the full-replay reference for parity
+tests. These joins no longer depend on retired analyzer memos. It changes
 the lifetime of CPL-3 state, not its loop's decision/settlement statements. The
-adaptive update loop runs once for each new settled row. T3 uses the previous two
-completed results. CPL-1 fits the original model for each new target (120 iterations,
+adaptive update loop runs once for each new settled row. T3 uses the exact sequence
+`S B S B S S B S B B S B S S`, indexed by `predictionIndex % 14`. Every settled
+round, including the first, advances it once. Active predictions and duplicate
+settlements never advance it; dates and issue-number gaps never reset it.
+CPL-1 fits the original model for each new target (120 iterations,
 same features, regularization and eligible training rows); it does not recompute
 predictions for old targets during normal polling.
 
-Missing-chart T3 pairs, absent stored T7 signals, and CPL-1's minimum-history gate
-retain the browser's real no-signal outcomes. The browser's adaptive tie/no-vote
+T3 always has a prediction, starting at Small with zero settled rounds. Absent
+stored T7 signals and CPL-1's minimum-history gate retain their no-signal outcomes.
+The browser's adaptive tie/no-vote
 decision and initial equal weights are also preserved by the extracted source.
 Only T3, T7, and T9 vote.
 
@@ -50,7 +55,8 @@ The API's `source_time` is **not** substituted for those fields.
 
 Startup loads Supabase history and stored T7 signals, reconstructs once, and verifies
 the persisted checkpoint's source fingerprint, input digest, weights, counts, and
-current streaks at its exact period. It preserves all-time streak maxima and the
+current streaks, sequence index, and independent test maxima at its exact period.
+It preserves all-time streak maxima and the
 hook's first-prediction-per-period audit records (bounded to 500).
 
 After startup the worker fetches only history after its cursor and changed T7 rows
@@ -66,6 +72,13 @@ published only after persistence succeeds. A failed write is retried before any
 further inputs are admitted. A restart reconstructs the same deterministic state
 from durable source rows and verifies it against the checkpoint.
 
+The known previous pair-algorithm source fingerprint is explicitly migrated once:
+startup verifies checkpoint period/count coverage and reconstructs the new T3
+sequence, weights, and statistics from chronological durable history. Previous
+first-prediction audit records remain intact; obsolete active predictions are
+replaced. The new checkpoint is persisted before publishing a ready response.
+Unknown versions and corrupt new-version checkpoints still fail recovery.
+
 Existing history/T7 storage remains authoritative. A changed/backfilled T7 signal
 for an already-evaluated period, coverage-changing history reset/backfill, or a
 checkpoint mismatch stops the adaptive worker with an explicit error. Those events
@@ -80,10 +93,14 @@ incremental reader assumes those settled source records remain immutable.
 The response is an in-memory snapshot, never a replay or database query:
 
 - `activePrediction`: period, decision, probabilities, available-signal count, weights
-- `signals`: T3/T7/T9 predictions, T3/T9 no-signal reasons, CPL-1 probability/training count
+- `signals`: T3/T7/T9 predictions, T3 sequence position reason, T9 no-signal reason, CPL-1 probability/training count
 - `latestEvaluation`, `latestEvaluatedPeriod`, `finalDecision`
 - `weights`, `dominantSignalIndex`, prediction/hit/miss counts and integer accuracy
 - current and longest hit/miss streaks, `last20/50/100/250`, signal agreement
+- `test3MaxLoss`, `test7MaxLoss`, `test9MaxLoss`: independent longest consecutive
+  prediction misses. T3 spans sequence wraps/dates/gaps; T7 excludes missing
+  signals as before; T9 preserves CPL-3's gap/date/no-signal streak breaks.
+  None of these uses the ensemble's `longestMissStreak`.
 - `predictedAt`, `evaluatedAt`, `checkpointAt`, source `version`, `status`
 
 It contains no full history, raw training rows, credentials, or checkpoint audit map.
@@ -91,18 +108,27 @@ Before recovery and on errors it returns HTTP 503 with `success: false`; ready s
 returns HTTP 200. The independent official schedule request identifies the active
 issue. A schedule error is reported rather than inventing an active issue.
 
-The frontend is not connected yet. Its decision-history table and reset action will
-need an explicit contract when the frontend integration is designed.
+`AdaptiveLearningPage` shares one compact server subscription between
+`AdaptiveLearningPanel` and the bottom `MAX LOSS` section. That section displays
+only TEST 3, TEST 7 and TEST 9 maxima. The page performs no history requests or
+browser-side algorithm replay.
 
 ## Validation (repository root)
 
 ```sh
 node collector/build-adaptive-algorithms.mjs --check
-node --test collector/adaptive-learning.test.js
+npm run test:adaptive
+npm run build
+npx tsc --noEmit -p tsconfig.server.json
 node collector/validate-adaptive-learning.mjs --limit=300
 ```
 
-The final command reads existing Supabase data only. Set `--limit` to the desired
+`test:adaptive` includes deterministic replay/max-loss tests, frontend contract and
+compact polling tests, MAX LOSS rendering checks, and a real server/worker process
+restart test. The restart test uses local PostgREST/schedule fixtures, checks HTTP
+200 and durable checkpoint recovery, and contacts no live collector upstreams.
+
+The final command requires Supabase credentials and reads existing data only. Set `--limit` to the desired
 number of latest historical rows (a number larger than the dataset selects all).
 The engine and original browser calculations receive the **same** selected dataset
 and T7 map. Every row checks T3/T7/T9, CPL-1 probabilities, CPL-3 state-dependent
@@ -113,10 +139,11 @@ No floating-point tolerance is used. Any mismatch throws and stops validation.
 The unit fixture exercises missing signals, availability-time gates, date changes,
 sequence gaps, restart/checkpoint recovery, duplicate settlement, and real T9 votes.
 
-To regenerate after deliberately reviewing a browser algorithm change:
+The normal frontend build regenerates the shipped phone algorithms. To regenerate
+them separately after reviewing an algorithm source change:
 
 ```sh
-node collector/build-adaptive-algorithms.mjs
+npm run build:adaptive
 ```
 
 The source fingerprint prevents silently mixing checkpoints from different browser

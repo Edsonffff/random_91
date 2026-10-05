@@ -12,6 +12,9 @@ export interface AdaptiveSnapshot extends Omit<AdaptiveResult, 'history' | 'rese
   latestEvaluation: AdaptiveHistoryRow | null;
   status: 'ready';
   checkpointAt: string;
+  test3MaxLoss: number;
+  test7MaxLoss: number;
+  test9MaxLoss: number;
 }
 
 export interface AdaptiveApiState {
@@ -70,7 +73,7 @@ export function parseAdaptiveSnapshot(value: unknown): AdaptiveSnapshot {
     || !['t3pred', 't7pred', 't9pred'].every((key) => optionalSize((value.signals as Record<string, unknown>)[key])))) return malformed();
   if (value.activePrediction && (!object(value.signals) || value.signals.period !== (value.activePrediction as ActivePrediction).period)) return malformed();
 
-  const counts = ['totalPredictions', 'totalHits', 'totalMisses', 'currentHitStreak', 'currentMissStreak', 'longestHitStreak', 'longestMissStreak'];
+  const counts = ['totalPredictions', 'totalHits', 'totalMisses', 'currentHitStreak', 'currentMissStreak', 'longestHitStreak', 'longestMissStreak', 'test3MaxLoss', 'test7MaxLoss', 'test9MaxLoss'];
   if (!counts.every((key) => count(value[key])) || !numberIn(value.accuracyPct, 100)
     || (value.totalHits as number) + (value.totalMisses as number) !== value.totalPredictions) return malformed();
   for (const [key, max] of [['last20', 20], ['last50', 50], ['last100', 100], ['last250', 250]] as const) {
@@ -98,6 +101,7 @@ export function parseAdaptiveSnapshot(value: unknown): AdaptiveSnapshot {
     totalMisses: value.totalMisses as number, accuracyPct: value.accuracyPct,
     currentHitStreak: value.currentHitStreak as number, currentMissStreak: value.currentMissStreak as number,
     longestHitStreak: value.longestHitStreak as number, longestMissStreak: value.longestMissStreak as number,
+    test3MaxLoss: value.test3MaxLoss as number, test7MaxLoss: value.test7MaxLoss as number, test9MaxLoss: value.test9MaxLoss as number,
     last20: value.last20 as AdaptiveSnapshot['last20'], last50: value.last50 as AdaptiveSnapshot['last50'],
     last100: value.last100 as AdaptiveSnapshot['last100'], last250: value.last250 as AdaptiveSnapshot['last250'],
     lastSignalAgreement: agreement as unknown as AdaptiveSnapshot['lastSignalAgreement'],

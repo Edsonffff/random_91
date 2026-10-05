@@ -1,12 +1,14 @@
 import { createHash } from 'node:crypto';
 import {
-  SOURCE_FINGERPRINT, SIGNAL_LABELS, compareIssuesAsc, computeTest3, computeTest7,
+  SOURCE_FINGERPRINT, SIGNAL_LABELS, compareIssuesAsc, test3Prediction, computeTest7,
   predictExperimentalPeriod, sizeOfNumber, dateFromIssue, CPL3_CONFIGS,
   advanceCpl3, advanceAdaptive, freshWeights, computeVote, rowPredictions, rollingWindow,
 } from './adaptive-algorithms.generated.js';
 
 const CONFIG = CPL3_CONFIGS.find((config) => config.name === 'context-8-cap-3');
 const emptyCplState = () => ({ stats: [], previous: null, priorLossStreak: 0, previousActual: null });
+// Explicit one-time migration from the retired pair-mapping implementation.
+export const PREVIOUS_T3_FINGERPRINT = '4410623ba977e29313b5a8cfe696cbfd5c02f0e37e6e47d287f45ed7932395ea';
 
 export class InputRevisionError extends Error {}
 
@@ -26,6 +28,12 @@ export class AdaptiveLearningEngine {
     this.currentMissStreak = 0;
     this.longestHitStreak = 0;
     this.longestMissStreak = 0;
+    this.predictionIndex = 0;
+    this.test3MissStreak = 0;
+    this.test7MissStreak = 0;
+    this.test3MaxLoss = 0;
+    this.test7MaxLoss = 0;
+    this.test9MaxLoss = 0;
     this.lastProcessedPeriod = null;
     this.lastEvaluatedAt = null;
     this.activePrediction = null;
@@ -66,9 +74,8 @@ export class AdaptiveLearningEngine {
     if (!period || !Number.isInteger(record.winningNumber) || record.winningNumber < 0 || record.winningNumber > 9) {
       throw new Error('Invalid settled history record.');
     }
-    const rounds = [...this.records.slice(-2), record].map((row) => ({ period: row.issueNumber, number: row.winningNumber }));
-    const t3 = computeTest3(rounds).details.at(-1)?.predictedSize ?? null;
-    const t7 = computeTest7([rounds.at(-1)], this.t7Signals).details[0]?.predictedSize ?? null;
+    const t3 = test3Prediction(this.predictionIndex);
+    const t7 = computeTest7([{ period, number: record.winningNumber }], this.t7Signals).details[0]?.predictedSize ?? null;
     if (dateFromIssue(this.lastProcessedPeriod || '') !== dateFromIssue(period)) this.sameDateRecords = [];
     const cpl1 = predictExperimentalPeriod(record, this.sameDateRecords);
     const actualSize = sizeOfNumber(record.winningNumber);
@@ -87,6 +94,14 @@ export class AdaptiveLearningEngine {
     const evaluated = learned.history[0];
     this.weights = learned.weights;
     this.cplState = cpl.state;
+    this.predictionIndex++;
+    this.test3MissStreak = t3 === input.actual ? 0 : this.test3MissStreak + 1;
+    // T7's existing streak calculation excludes absent signals entirely.
+    if (t7 !== null) this.test7MissStreak = t7 === input.actual ? 0 : this.test7MissStreak + 1;
+    this.test3MaxLoss = Math.max(this.test3MaxLoss, this.test3MissStreak);
+    this.test7MaxLoss = Math.max(this.test7MaxLoss, this.test7MissStreak);
+    // CPL-3 already resets this at gaps, date changes and NO_SIGNAL rows.
+    this.test9MaxLoss = Math.max(this.test9MaxLoss, this.cplState.priorLossStreak);
     this.history.push(evaluated);
     this.records.push(record);
     this.sameDateRecords.push(record);
@@ -105,7 +120,7 @@ export class AdaptiveLearningEngine {
       this.log(`newly processed period=${period} T3=${t3} T7=${t7} T9=${input.t9pred}`);
       this.log(`settlement period=${period} decision=${evaluated.adaptiveDecision} actual=${input.actual} result=${evaluated.isHit ? 'HIT' : 'MISS'}`);
     }
-    return { evaluated, cpl1: cplRow, cpl3: t9Row };
+    return { evaluated, test3: { prediction: t3, sequencePosition: (this.predictionIndex - 1) % 14 + 1, outcome: t3 === input.actual ? 'HIT' : 'MISS' }, cpl1: cplRow, cpl3: t9Row };
   }
 
   predict(period) {
@@ -114,8 +129,7 @@ export class AdaptiveLearningEngine {
     }
     const key = `${period}:${this.lastProcessedPeriod}`;
     if (key === this.activeCacheKey) return false;
-    const rounds = this.records.slice(-2).map((row) => ({ period: row.issueNumber, number: row.winningNumber }));
-    const test3 = computeTest3(rounds);
+    const rounds = this.records.slice(-1).map((row) => ({ period: row.issueNumber, number: row.winningNumber }));
     const test7 = computeTest7(rounds.slice(-1), this.t7Signals);
     // AlgorithmAnalyzer receives realHistory newest-first for the active prediction.
     // Retain that floating-point training order, unlike its ascending historical replay.
@@ -128,7 +142,7 @@ export class AdaptiveLearningEngine {
     // advanceCpl3 clones state; scoring the browser's synthetic target never learns.
     const t9 = advanceCpl3([targetRow], this.cplState, CONFIG).rows[0];
     const input = {
-      period, t3pred: test3.latestPrediction, t7pred: test7.latestPrediction,
+      period, t3pred: test3Prediction(this.predictionIndex), t7pred: test7.latestPrediction,
       t9pred: t9.prediction === 'BIG' ? 'Big' : t9.prediction === 'SMALL' ? 'Small' : null,
     };
     const vote = computeVote(rowPredictions(input), this.weights);
@@ -137,7 +151,7 @@ export class AdaptiveLearningEngine {
       signalsAvailable: vote.available.length, weights: [...this.weights],
     };
     this.activeSignals = {
-      ...input, t3Reason: test3.latestReason, t9Reason: cpl1.reason ?? null,
+      ...input, t3Reason: `Repeating 14-round sequence · position ${this.predictionIndex % 14 + 1}/14`, t9Reason: cpl1.reason ?? null,
       t9ProbabilityBig: cpl1.probabilityBig, t9TrainingCount: cpl1.trainingCount,
     };
     this.predictedAt = this.clock();
@@ -164,6 +178,7 @@ export class AdaptiveLearningEngine {
       accuracyPct: this.history.length ? Math.round(this.totalHits / this.history.length * 100) : 0,
       currentHitStreak: this.currentHitStreak, currentMissStreak: this.currentMissStreak,
       longestHitStreak: this.longestHitStreak, longestMissStreak: this.longestMissStreak,
+      test3MaxLoss: this.test3MaxLoss, test7MaxLoss: this.test7MaxLoss, test9MaxLoss: this.test9MaxLoss,
       weights: [...this.weights], dominantSignalIndex: this.weights.indexOf(Math.max(...this.weights)),
       last20: rollingWindow(this.history, 20), last50: rollingWindow(this.history, 50),
       last100: rollingWindow(this.history, 100), last250: rollingWindow(this.history, 250),
@@ -176,6 +191,9 @@ export class AdaptiveLearningEngine {
     // do not duplicate thousands of rows in every checkpoint write.
     return {
       version: SOURCE_FINGERPRINT, period: this.lastProcessedPeriod, inputDigest: this.inputDigest,
+      predictionIndex: this.predictionIndex,
+      test3MissStreak: this.test3MissStreak, test7MissStreak: this.test7MissStreak,
+      test3MaxLoss: this.test3MaxLoss, test7MaxLoss: this.test7MaxLoss, test9MaxLoss: this.test9MaxLoss,
       weights: [...this.weights], totalPredictions: this.history.length, totalHits: this.totalHits,
       currentHitStreak: this.currentHitStreak, currentMissStreak: this.currentMissStreak,
       longestHitStreak: this.longestHitStreak, longestMissStreak: this.longestMissStreak,
@@ -186,8 +204,19 @@ export class AdaptiveLearningEngine {
   }
 
   verifyRecovery(checkpoint) {
+    if (checkpoint.version === PREVIOUS_T3_FINGERPRINT) {
+      // Weights/digest/ensemble maxima from the pair algorithm are obsolete.
+      // Keep the newly reconstructed sequence and model; verify durable coverage.
+      if (checkpoint.period !== this.lastProcessedPeriod || checkpoint.totalPredictions !== this.history.length) {
+        throw new InputRevisionError('Previous Test 3 checkpoint coverage differs from settled history.');
+      }
+      this.firstPredictions = new Map(checkpoint.firstPredictions ?? []);
+      this.lastEvaluatedAt = checkpoint.evaluatedAt;
+      this.log(`checkpoint migrated to 14-round Test 3 sequence position=${this.predictionIndex % 14 + 1}`);
+      return;
+    }
     if (checkpoint.version !== SOURCE_FINGERPRINT) throw new InputRevisionError('Checkpoint algorithm version differs from browser sources.');
-    for (const field of ['period', 'inputDigest', 'weights', 'totalPredictions', 'totalHits', 'currentHitStreak', 'currentMissStreak']) {
+    for (const field of ['period', 'inputDigest', 'weights', 'totalPredictions', 'totalHits', 'currentHitStreak', 'currentMissStreak', 'predictionIndex', 'test3MissStreak', 'test7MissStreak', 'test3MaxLoss', 'test7MaxLoss', 'test9MaxLoss']) {
       if (JSON.stringify(checkpoint[field]) !== JSON.stringify(this.checkpoint()[field])) {
         throw new InputRevisionError(`Checkpoint recovery mismatch: ${field} at ${checkpoint.period}.`);
       }

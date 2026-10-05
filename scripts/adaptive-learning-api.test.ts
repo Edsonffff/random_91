@@ -24,6 +24,7 @@ function snapshot(checkpoint = NOW) {
     },
     totalPredictions: 5225, totalHits: 2621, totalMisses: 2604, accuracyPct: 50,
     currentHitStreak: 2, currentMissStreak: 0, longestHitStreak: 10, longestMissStreak: 9,
+    test3MaxLoss: 13, test7MaxLoss: 7, test9MaxLoss: 4,
     weights: [0.76, 0.23, 0.01], dominantSignalIndex: 0,
     last20: { hits: 11, total: 20 }, last50: { hits: 24, total: 50 },
     last100: { hits: 45, total: 100 }, last250: { hits: 124, total: 250 },
@@ -55,6 +56,8 @@ test('rejects missing fields, unsafe numbers, wrong signal layouts and malformed
     { ...snapshot(), latestEvaluation: { ...snapshot().latestEvaluation, actual: 'invalid' } },
     { ...snapshot(), last20: { hits: 25, total: 20 } },
     { ...snapshot(), lastSignalAgreement: { bigVotes: 3, smallVotes: 2, total: 5, majority: 'Big' } },
+    { ...snapshot(), test3MaxLoss: -1 }, { ...snapshot(), test7MaxLoss: 2.5 },
+    { ...snapshot(), test9MaxLoss: Infinity },
   ];
   for (const input of invalid) assert.throws(() => parseAdaptiveSnapshot(input));
   for (const key of Object.keys(snapshot())) {

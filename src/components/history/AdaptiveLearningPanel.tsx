@@ -7,12 +7,15 @@
 import React from 'react';
 import { CheckCircle2, XCircle, Brain, TrendingUp, ShieldCheck } from 'lucide-react';
 import { useServerAdaptiveLearning } from '../../hooks/useServerAdaptiveLearning';
+import type { AdaptiveApiState } from '../../services/adaptiveLearningApi';
 import type { RealGameSchedule } from '../../types/result';
 import { CollapsibleCard } from '../common/CollapsibleCard';
 
 interface Props {
   /** Live feed schedule — used only for the active-round countdown if available. */
   activeSchedule?: RealGameSchedule | null;
+  /** Share the page's compact subscription with its MAX LOSS section. */
+  serverState?: AdaptiveApiState;
 }
 
 // ─── Accent colours per signal index [T3,T7,T9] ─────────────────────
@@ -81,8 +84,19 @@ function SigCell({ pred }: { pred: 'Big' | 'Small' | null }) {
 
 // ─── Main component ───────────────────────────────────────────────────────────
 
-export const AdaptiveLearningPanel: React.FC<Props> = ({ activeSchedule }) => {
-  const { data, status, stale, error } = useServerAdaptiveLearning();
+export const AdaptiveLearningPanel: React.FC<Props> = ({ serverState, ...props }) => {
+  return serverState
+    ? <AdaptiveLearningPanelContent {...props} serverState={serverState} />
+    : <ConnectedAdaptiveLearningPanel {...props} />;
+};
+
+const ConnectedAdaptiveLearningPanel: React.FC<Props> = (props) => {
+  const serverState = useServerAdaptiveLearning();
+  return <AdaptiveLearningPanelContent {...props} serverState={serverState} />;
+};
+
+const AdaptiveLearningPanelContent: React.FC<Props & { serverState: AdaptiveApiState }> = ({ activeSchedule, serverState }) => {
+  const { data, status, stale, error } = serverState;
 
   if (!data) {
     return (

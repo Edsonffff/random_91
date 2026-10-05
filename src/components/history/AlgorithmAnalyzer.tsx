@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { CollapsibleCard } from '../common/CollapsibleCard';
 import { AdaptiveLearningPanel } from './AdaptiveLearningPanel';
+import { computeTest3, TEST3_SEQUENCE } from '../../experimental/test3Sequence';
 import {
   AdditionalSignalsPanel,
   computeTest7,
@@ -510,74 +511,6 @@ const SAMPLE_3_SCREEN: RoundEntry[] = [
   { period: '20260928100050577', number: 6 },
 ];
 
-// ─── Test 3: WingoBot Previous-2-Results Reference Pattern ───────────────────
-export const WINGOBOT_T3_PATTERN_MAP: Record<string, 'Big' | 'Small'> = {
-  // Column 1 mappings
-  '2,4': 'Small',
-  '4,0': 'Big',
-  '0,2': 'Small',
-  '2,0': 'Big',
-  '0,9': 'Small',
-  '7,7': 'Big',
-  '8,6': 'Big',
-  '6,8': 'Small',
-  '6,4': 'Big',
-  '4,7': 'Small',
-  '7,3': 'Big',
-  '3,7': 'Small',
-  '2,9': 'Big',
-  '5,2': 'Small',
-  '5,0': 'Big',
-
-  // Column 2 mappings
-  '0,7': 'Small',
-  '7,8': 'Big',
-  '8,7': 'Small',
-  '7,0': 'Big',
-  '2,6': 'Big',
-  '4,8': 'Small',
-  '8,1': 'Big',
-  '4,5': 'Small',
-  '1,5': 'Big',
-  '6,7': 'Small',
-  '7,2': 'Big',
-  '9,4': 'Big',
-  '4,2': 'Big',
-  '3,3': 'Small',
-  '0,1': 'Big',
-  '1,8': 'Small',
-};
-
-export const WINGOBOT_T3_CONFLICTING_PAIRS = new Set(['0,0', '2,5']);
-
-export interface Test3Detail {
-  period: string;
-  prevPrevDigit: number;
-  prevDigit: number;
-  prevPrevSize: 'Big' | 'Small';
-  prevSize: 'Big' | 'Small';
-  pairString: string; // e.g. "2 → 5"
-  sizePattern: string; // e.g. "SMALL → BIG"
-  predictedSize: 'Big' | 'Small' | null;
-  actualSize: 'Big' | 'Small';
-  actualNumber: number;
-  isHit: boolean;
-  noSignal: boolean;
-  reason?: string;
-}
-
-export interface Test3Result {
-  hits: number;
-  total: number;
-  accuracy: number;
-  details: Test3Detail[];
-  latestPrediction: 'Big' | 'Small' | null;
-  latestPair: string | null;
-  latestPattern: string | null;
-  latestStatus: 'ACTIVE' | 'NO BET';
-  latestReason: string | null;
-}
-
 export const AlgorithmAnalyzer: React.FC = () => {
   const { results, loadBigMumbaiSample } = useResults();
   const { realHistory, realSchedule, resetAllSystemData } = useRealHistory();
@@ -810,126 +743,12 @@ export const AlgorithmAnalyzer: React.FC = () => {
   // ==========================================
   // 2. TESTED FORMULAS (Mathematical Evaluations)
   // ==========================================
-  // Test 3: Previous 2 Results Pattern (WingoBot Reference Chart)
-  const test3 = useMemo((): Test3Result => {
-    const roundByPeriod = new Map<string, RoundEntry>();
-    for (const item of activeDataset) {
-      if (item && item.period) {
-        roundByPeriod.set(String(item.period).trim(), item);
-      }
-    }
-
-    const sortedPeriods = Array.from(roundByPeriod.keys()).sort((a, b) => compareIssuesAsc(a, b));
-
-    let hits = 0;
-    let evaluatedTotal = 0;
-    const details: Test3Detail[] = [];
-
-    // Historical loop: evaluate each round i >= 2 using i-2 and i-1
-    for (let i = 2; i < sortedPeriods.length; i++) {
-      const prevPrevPeriod = sortedPeriods[i - 2];
-      const prevPeriod = sortedPeriods[i - 1];
-      const currentPeriod = sortedPeriods[i];
-
-      const prevPrevRound = roundByPeriod.get(prevPrevPeriod);
-      const prevRound = roundByPeriod.get(prevPeriod);
-      const currentRound = roundByPeriod.get(currentPeriod);
-      if (!prevPrevRound || !prevRound || !currentRound) continue;
-
-      const p1 = prevPrevRound.number;
-      const p2 = prevRound.number;
-      const key = `${p1},${p2}`;
-      const prevPrevSize = p1 >= 5 ? 'Big' : 'Small';
-      const prevSize = p2 >= 5 ? 'Big' : 'Small';
-      const pairString = `${p1} → ${p2}`;
-      const sizePattern = `${prevPrevSize.toUpperCase()} → ${prevSize.toUpperCase()}`;
-      const actualSize: 'Big' | 'Small' = currentRound.number >= 5 ? 'Big' : 'Small';
-
-      const isConflicting = WINGOBOT_T3_CONFLICTING_PAIRS.has(key);
-      const predictedSize = WINGOBOT_T3_PATTERN_MAP[key] ?? null;
-      const noSignal = predictedSize === null;
-      const reason = predictedSize
-        ? undefined
-        : isConflicting
-        ? 'Conflicting pair (0→0 / 2→5)'
-        : 'Pair not found in reference chart';
-
-      let isHit = false;
-      if (!noSignal && predictedSize !== null) {
-        isHit = predictedSize === actualSize;
-        if (isHit) hits++;
-        evaluatedTotal++;
-      }
-
-      details.push({
-        period: currentRound.period,
-        prevPrevDigit: p1,
-        prevDigit: p2,
-        prevPrevSize,
-        prevSize,
-        pairString,
-        sizePattern,
-        predictedSize,
-        actualSize,
-        actualNumber: currentRound.number,
-        isHit,
-        noSignal,
-        reason,
-      });
-    }
-
-    const accuracy = evaluatedTotal > 0 ? Math.round((hits / evaluatedTotal) * 100) : 0;
-
-    // Upcoming round prediction (using the 2 latest completed rounds)
-    let latestPrediction: 'Big' | 'Small' | null = null;
-    let latestPair: string | null = null;
-    let latestPattern: string | null = null;
-    let latestStatus: 'ACTIVE' | 'NO BET' = 'NO BET';
-    let latestReason: string | null = null;
-
-    if (sortedPeriods.length >= 2) {
-      const last1 = roundByPeriod.get(sortedPeriods[sortedPeriods.length - 2]);
-      const last2 = roundByPeriod.get(sortedPeriods[sortedPeriods.length - 1]);
-      if (last1 && last2) {
-        const p1 = last1.number;
-        const p2 = last2.number;
-        const key = `${p1},${p2}`;
-        const p1Size = p1 >= 5 ? 'Big' : 'Small';
-        const p2Size = p2 >= 5 ? 'Big' : 'Small';
-        latestPair = `${p1} → ${p2}`;
-        latestPattern = `${p1Size.toUpperCase()} → ${p2Size.toUpperCase()}`;
-        latestPrediction = WINGOBOT_T3_PATTERN_MAP[key] ?? null;
-        if (latestPrediction !== null) {
-          latestStatus = 'ACTIVE';
-          latestReason = null;
-        } else {
-          latestStatus = 'NO BET';
-          latestReason = WINGOBOT_T3_CONFLICTING_PAIRS.has(key)
-            ? 'Conflicting pair in reference chart (0→0 / 2→5)'
-            : 'Pair not found in reference chart';
-        }
-      }
-    } else {
-      latestReason = 'Insufficient history (< 2 rounds)';
-    }
-
-    return {
-      hits,
-      total: evaluatedTotal,
-      accuracy,
-      details,
-      latestPrediction,
-      latestPair,
-      latestPattern,
-      latestStatus,
-      latestReason,
-    };
-  }, [activeDataset]);
+  // Test 3: deterministic repeating sequence over chronological settled rounds.
+  const test3 = useMemo(() => computeTest3(activeDataset), [activeDataset]);
 
   const streakStatsTest3 = useMemo(() => {
     return calculateStreakStats(
       test3.details
-        .filter((d) => !d.noSignal && d.predictedSize !== null)
         .map((d) => (d.isHit ? 'H' : 'M'))
     );
   }, [test3.details]);
@@ -979,7 +798,7 @@ export const AlgorithmAnalyzer: React.FC = () => {
   // ==========================================
   const signalSummaryData = useMemo((): SignalEntry[] => {
     return [
-      { testNum: 3, label: 'Previous 2 Pattern', prediction: test3.latestPrediction },
+      { testNum: 3, label: '14-Round Sequence', prediction: test3.latestPrediction },
       { testNum: 7, label: 'WingoAI Signal', prediction: test7.latestPrediction },
       { testNum: 9, label: 'CPL-3 Loss-Streak Breaker', prediction: test9ActiveRow?.prediction === 'BIG' ? 'Big' : test9ActiveRow?.prediction === 'SMALL' ? 'Small' : null },
     ];
@@ -1300,7 +1119,7 @@ export const AlgorithmAnalyzer: React.FC = () => {
                 : 'bg-[#06130F] text-[#8D9B95] hover:text-[#F5F5F5] border border-[#1E3A2B]'
             }`}
           >
-            Test 3: Previous 2 Results Pattern
+             Test 3: 14-Round Sequence
           </button>
 
           <button
@@ -1322,33 +1141,29 @@ export const AlgorithmAnalyzer: React.FC = () => {
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#1E3A2B]/60 pb-2.5">
                 <div>
                   <span className="font-mono font-bold text-xs text-[#F5F5F5]">
-                    TEST 3: PREVIOUS 2 RESULTS PATTERN
+                    TEST 3: REPEATING 14-ROUND SEQUENCE
                   </span>
                   <p className="text-[11px] text-[#8D9B95] mt-0.5">
-                    Maps sequential drawn results (result[N-2] → result[N-1]) to the WingoBot reference chart. Missing/conflicting pairs return NO SIGNAL (NO BET).
+                    S B S B S S B S B B S B S S — advances once per settled round, then repeats.
                   </p>
                 </div>
-                <span className={`px-2.5 py-1 rounded-md text-xs font-mono font-bold border ${
-                  test3.latestStatus === 'ACTIVE'
-                    ? 'bg-[#35B978]/15 text-[#35B978] border-[#35B978]/40'
-                    : 'bg-[#8D9B95]/10 text-[#8D9B95] border-[#8D9B95]/30'
-                }`}>
+                <span className="px-2.5 py-1 rounded-md text-xs font-mono font-bold border bg-[#35B978]/15 text-[#35B978] border-[#35B978]/40">
                   STATUS: {test3.latestStatus}
                 </span>
               </div>
 
-              {/* Grid showing Previous, Pattern, Prediction, Status */}
+              {/* Sequence position, pattern, prediction and accuracy */}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs font-mono">
                 <div className="p-2.5 rounded-lg bg-[#020806] border border-[#1E3A2B]">
-                  <span className="text-[#8D9B95] block text-[10px] uppercase">Previous 2</span>
+                  <span className="text-[#8D9B95] block text-[10px] uppercase">Next Position</span>
                   <span className="text-sm font-bold text-[#F5F5F5]">
-                    {test3.latestPair ?? '—'}
+                    {test3.latestPosition} / 14
                   </span>
                 </div>
                 <div className="p-2.5 rounded-lg bg-[#020806] border border-[#1E3A2B]">
                   <span className="text-[#8D9B95] block text-[10px] uppercase">Pattern</span>
                   <span className="text-sm font-bold text-[#E7B93F]">
-                    {test3.latestPattern ?? '—'}
+                    {TEST3_SEQUENCE.map((size) => size[0]).join(' ')}
                   </span>
                 </div>
                 <div className="p-2.5 rounded-lg bg-[#020806] border border-[#1E3A2B]">
@@ -1356,11 +1171,9 @@ export const AlgorithmAnalyzer: React.FC = () => {
                   <span className={`text-sm font-bold ${
                     test3.latestPrediction === 'Big'
                       ? 'text-[#E7B93F]'
-                      : test3.latestPrediction === 'Small'
-                      ? 'text-[#60A5FA]'
-                      : 'text-[#8D9B95]'
+                      : 'text-[#60A5FA]'
                   }`}>
-                    {test3.latestPrediction ? test3.latestPrediction.toUpperCase() : 'NO SIGNAL'}
+                    {test3.latestPrediction.toUpperCase()}
                   </span>
                 </div>
                 <div className="p-2.5 rounded-lg bg-[#020806] border border-[#1E3A2B]">
@@ -1381,7 +1194,7 @@ export const AlgorithmAnalyzer: React.FC = () => {
             {/* Streak Analysis Panel */}
             <StreakAnalysisPanel
               stats={streakStatsTest3}
-              title="Previous 2 Results Pattern"
+              title="14-Round Sequence"
               id="streak_test3"
             />
 
@@ -1393,15 +1206,14 @@ export const AlgorithmAnalyzer: React.FC = () => {
                   Formula Evaluation Table (Test 3)
                 </span>
               }
-              subtitle="Sequential results N-2 → N-1 reference predictions and hit outcomes"
+              subtitle="Chronological sequence predictions and HIT/MISS outcomes"
             >
               <div className="overflow-x-auto rounded-lg border border-[#1E3A2B]/60">
                 <table className="w-full text-left text-xs font-mono">
                   <thead className="bg-[#06130F] text-[#8D9B95] uppercase text-[10px]">
                     <tr>
                       <th className="py-2.5 px-4">Period</th>
-                      <th className="py-2.5 px-4">Previous 2 (N-2 → N-1)</th>
-                      <th className="py-2.5 px-4">Pattern</th>
+                      <th className="py-2.5 px-4">Sequence Position</th>
                       <th className="py-2.5 px-4">Actual Result</th>
                       <th className="py-2.5 px-4">Test 3 Prediction</th>
                       <th className="py-2.5 px-4 text-right">Outcome</th>
@@ -1411,24 +1223,17 @@ export const AlgorithmAnalyzer: React.FC = () => {
                     {[...test3.details].reverse().map((row, i) => (
                       <tr key={i} className="hover:bg-[#06130F]/80">
                         <td className="py-2 px-4 text-gray-300">{row.period}</td>
-                        <td className="py-2 px-4 text-gray-400 font-bold">{row.pairString}</td>
-                        <td className="py-2 px-4 text-[#8D9B95]">{row.sizePattern}</td>
+                        <td className="py-2 px-4 text-gray-400 font-bold">{row.sequencePosition} / 14</td>
                         <td className="py-2 px-4 font-bold text-[#E7B93F]">
                           {row.actualNumber} ({row.actualSize.toUpperCase()})
                         </td>
                         <td className="py-2 px-4">
-                          {row.noSignal ? (
-                            <span className="text-[#8D9B95] italic">NO SIGNAL</span>
-                          ) : (
-                            <span className={`font-bold ${row.predictedSize === 'Big' ? 'text-[#E7B93F]' : 'text-[#60A5FA]'}`}>
-                              {row.predictedSize?.toUpperCase()}
-                            </span>
-                          )}
+                          <span className={`font-bold ${row.predictedSize === 'Big' ? 'text-[#E7B93F]' : 'text-[#60A5FA]'}`}>
+                            {row.predictedSize.toUpperCase()}
+                          </span>
                         </td>
                         <td className="py-2 px-4 text-right">
-                          {row.noSignal ? (
-                            <span className="text-[#8D9B95] text-[11px]">— (NO BET)</span>
-                          ) : row.isHit ? (
+                          {row.isHit ? (
                             <span className="inline-flex items-center gap-1 text-[#35B978] font-bold">
                               <CheckCircle2 className="w-3.5 h-3.5" /> Hit
                             </span>

@@ -1,7 +1,11 @@
 import React from 'react';
 import { AdaptiveLearningPanel } from '../components/history/AdaptiveLearningPanel';
+import { useServerAdaptiveLearning } from '../hooks/useServerAdaptiveLearning';
+import { AdaptiveMaxLoss } from '../components/history/AdaptiveMaxLoss';
 
 export const AdaptiveLearningPage: React.FC = () => {
+  const serverState = useServerAdaptiveLearning();
+  const { data } = serverState;
   return (
     <div className="space-y-6 animate-in fade-in duration-300">
       {/* Page Header */}
@@ -16,7 +20,9 @@ export const AdaptiveLearningPage: React.FC = () => {
       </div>
 
       {/* Mount the server-backed panel without the full-history analysis parent. */}
-      <AdaptiveLearningPanel />
+      <AdaptiveLearningPanel serverState={serverState} />
+
+      <AdaptiveMaxLoss data={data} />
     </div>
   );
 };

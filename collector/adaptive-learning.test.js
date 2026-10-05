@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { AdaptiveLearningEngine, InputRevisionError } from './adaptive-learning.js';
+import { AdaptiveLearningEngine, InputRevisionError, PREVIOUS_T3_FINGERPRINT } from './adaptive-learning.js';
 import { AdaptiveLearningStore, browserHistoryRecord } from './adaptive-learning-store.js';
 import { createClient } from '@supabase/supabase-js';
 import { validateDataset } from './validate-adaptive-learning.mjs';
-import { scheduledStartFromIssue } from './adaptive-algorithms.generated.js';
+import { scheduledStartFromIssue, computeTest3, TEST3_SEQUENCE } from './adaptive-algorithms.generated.js';
 
 function fixture() {
   const records = [];
@@ -23,27 +23,94 @@ function fixture() {
   return { records, signals };
 }
 
-test('exact browser parity: every settlement, active samples, gaps, date reset, timestamp gate and missing signals', () => {
+test('exact browser parity and independent T3/T7/T9 max loss: settlements, active samples, gaps, dates and missing signals', () => {
   const { records, signals } = fixture();
   const { report } = validateDataset(records, signals);
   for (const count of Object.values(report.signalsEvaluated)) assert.ok(count > 0, 'Fixture must exercise every actual signal');
+});
+
+test('Test 3 repeats the exact 14-round sequence from the first round; active polls and duplicates never advance it', () => {
+  const expected = ['Small', 'Big', 'Small', 'Big', 'Small', 'Small', 'Big', 'Small', 'Big', 'Big', 'Small', 'Big', 'Small', 'Small'];
+  assert.deepEqual(TEST3_SEQUENCE, expected);
+  const { records } = fixture();
+  const engine = new AdaptiveLearningEngine();
+  engine.predict(records[0].issueNumber);
+  assert.equal(engine.activeSignals.t3pred, 'Small');
+  const rounds = records.slice(0, 43).map((record, i) => ({ ...record, winningNumber: expected[i % 14] === 'Big' ? 7 : 2 }));
+  for (const [i, record] of rounds.entries()) {
+    assert.equal(engine.predict(record.issueNumber), false);
+    const step = engine.settle(record);
+    assert.equal(step.evaluated.t3pred, expected[i % 14]);
+    assert.equal(step.test3.outcome, 'HIT');
+    assert.equal(engine.settle(record), false);
+    assert.equal(engine.predictionIndex, i + 1);
+    engine.predict(records[i + 1].issueNumber);
+    assert.equal(engine.activeSignals.t3pred, expected[(i + 1) % 14]);
+  }
+  assert.equal(engine.current().test3MaxLoss, 0);
+  const replay = computeTest3(rounds.slice().reverse().map((r) => ({ period: r.issueNumber, number: r.winningNumber })));
+  assert.equal(replay.total, 43);
+  assert.deepEqual(replay.details.map((row) => row.predictedSize), rounds.map((_, i) => expected[i % 14]));
+  assert.equal(replay.latestPrediction, expected[43 % 14]);
+});
+
+test('Test 3 max loss counts consecutive misses across the wrap, skips no rounds, and is independent of ensemble and T7', () => {
+  const { records } = fixture();
+  const engine = new AdaptiveLearningEngine();
+  const outcomes = 'HMHHMMMMMMHMMHHMMMMH';
+  const rounds = records.slice(0, outcomes.length).map((record, i) => {
+    const predicted = TEST3_SEQUENCE[i % 14];
+    const actual = outcomes[i] === 'H' ? predicted : predicted === 'Big' ? 'Small' : 'Big';
+    return { ...record, winningNumber: actual === 'Big' ? 7 : 2 };
+  });
+  // Perfect T7 explicitly separates its maximum from Test 3 and the ensemble.
+  engine.setSignals(rounds.map((r) => ({ period_id: r.issueNumber, signal: r.winningNumber >= 5 ? 'BIG' : 'SMALL' })));
+  for (const record of rounds) engine.settle(record);
+  assert.equal(engine.current().test3MaxLoss, 6);
+  assert.equal(engine.current().test7MaxLoss, 0);
+  assert.notEqual(engine.current().test3MaxLoss, engine.current().longestMissStreak);
+  assert.equal(computeTest3(rounds.map((r) => ({ period: r.issueNumber, number: r.winningNumber }))).longestMissStreak, 6);
+  // A second run spanning positions 14 -> 1 must remain one miss streak.
+  const allMiss = new AdaptiveLearningEngine();
+  for (const [i, record] of records.slice(0, 29).entries()) {
+    allMiss.settle({ ...record, winningNumber: TEST3_SEQUENCE[i % 14] === 'Big' ? 2 : 7 });
+  }
+  assert.equal(allMiss.current().test3MaxLoss, 29);
+});
+
+test('old pair-algorithm checkpoints migrate once from durable history; unknown versions and changed coverage fail', () => {
+  const { records } = fixture();
+  const engine = new AdaptiveLearningEngine();
+  for (const record of records.slice(0, 17)) engine.settle(record);
+  const before = engine.checkpoint();
+  const legacy = { ...before, version: PREVIOUS_T3_FINGERPRINT, weights: [1, 0, 0], inputDigest: 'old-pair-model' };
+  engine.verifyRecovery(legacy);
+  assert.deepEqual(engine.checkpoint(), before);
+  engine.predict(records[17].issueNumber);
+  assert.equal(engine.activeSignals.t3pred, TEST3_SEQUENCE[17 % 14]);
+  assert.throws(() => engine.verifyRecovery({ ...legacy, totalPredictions: 16 }), InputRevisionError);
+  assert.throws(() => engine.verifyRecovery({ ...legacy, version: 'unknown-version' }), InputRevisionError);
+  assert.throws(() => engine.verifyRecovery({ ...engine.checkpoint(), predictionIndex: 0 }), InputRevisionError);
+  assert.throws(() => engine.verifyRecovery({ ...engine.checkpoint(), test3MaxLoss: 999 }), InputRevisionError);
 });
 
 test('restart reconstructs weights/streaks/audit and continues exactly; duplicate input never learns twice', () => {
   const { records, signals } = fixture();
   const original = new AdaptiveLearningEngine();
   original.setSignals(signals);
-  for (const record of records.slice(0, 70)) original.settle(record);
-  original.predict((BigInt(records[69].issueNumber) + 1n).toString());
+  for (const record of records.slice(0, 71)) original.settle(record);
+  original.predict((BigInt(records[70].issueNumber) + 1n).toString());
   const checkpoint = JSON.parse(JSON.stringify(original.checkpoint()));
   const restarted = new AdaptiveLearningEngine();
   restarted.setSignals(signals);
-  for (const record of records.slice(0, 70)) restarted.settle(record);
+  for (const record of records.slice(0, 71)) restarted.settle(record);
   restarted.verifyRecovery(checkpoint);
   assert.deepStrictEqual(restarted.current(), original.current());
   assert.deepStrictEqual([...restarted.firstPredictions], [...original.firstPredictions]);
-  assert.equal(restarted.settle(records[69]), false);
-  for (const record of records.slice(70)) {
+  assert.equal(restarted.settle(records[70]), false);
+  assert.equal(restarted.predictionIndex, 71);
+  assert.equal(restarted.activeSignals.t3pred, TEST3_SEQUENCE[71 % 14]);
+  for (const record of records.slice(71)) {
     const left = restarted.settle(record);
     const right = original.settle(record);
     assert.deepStrictEqual(left, right);

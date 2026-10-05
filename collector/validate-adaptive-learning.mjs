@@ -6,7 +6,7 @@ import { AdaptiveLearningEngine } from './adaptive-learning.js';
 import { AdaptiveLearningStore, createAdaptiveClient } from './adaptive-learning-store.js';
 import {
   computeTest3, computeTest7, evaluateWalkForward, runCpl3WalkForward, CPL3_CONFIGS,
-  browserAdaptiveInputs, browserActiveInput, browserT9Active, replayBrowser, compareIssuesAsc,
+  browserAdaptiveInputs, browserActiveInput, browserT9Active, replayBrowser, compareIssuesAsc, calculateLossStreakMetrics,
 } from './adaptive-algorithms.generated.js';
 
 const statFields = [
@@ -44,6 +44,11 @@ export function validateDataset(records, signals, { activeSamples = 5 } = {}) {
     assert.deepStrictEqual(step.evaluated, reference.history[i], `Adaptive row mismatch at ${period}`);
     const prefixReference = replayBrowser(inputs.filter((r) => compareIssuesAsc(r.period, period) <= 0), null);
     assertCurrentParity(engine, prefixReference, period);
+    const prefixDatasetForStats = dataset.filter((row) => compareIssuesAsc(row.period, period) <= 0);
+    const current = engine.current();
+    assert.equal(current.test3MaxLoss, computeTest3(prefixDatasetForStats).longestMissStreak, `Test 3 max loss at ${period}`);
+    assert.equal(current.test7MaxLoss, computeTest7(prefixDatasetForStats, signalMap).longestMissStreak, `Test 7 max loss at ${period}`);
+    assert.equal(current.test9MaxLoss, calculateLossStreakMetrics(cpl3.slice(0, i + 1)).longestLossStreak, `Test 9 max loss at ${period}`);
     // Directly compare POST-update weights, not only the following prediction.
     assert.deepStrictEqual(engine.weights, prefixReference.weights, `Weight update mismatch at ${period}`);
     if (i % sampleEvery === 0 || i === ascending.length - 1) {
@@ -73,6 +78,7 @@ export function validateDataset(records, signals, { activeSamples = 5 } = {}) {
         t7: reference.history.filter((r) => r.t7pred !== null).length,
         t9: reference.history.filter((r) => r.t9pred !== null).length,
       },
+      maxLoss: { test3: engine.test3MaxLoss, test7: engine.test7MaxLoss, test9: engine.test9MaxLoss },
       result: 'EXACT MATCH (no numeric tolerance)',
     },
   };
