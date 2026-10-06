@@ -43,6 +43,18 @@ async function currentIssue() {
   }
 }
 
+/** Commit only the ready chronological prefix; the rest stays behind the history cursor. */
+export function settleReadyHistory(engine, records, { quiet = false } = {}) {
+  let processedCount = 0;
+  for (const record of records) {
+    if (!engine.t7Signals.has(record.issueNumber)) {
+      return { processedCount, pendingPeriod: record.issueNumber };
+    }
+    if (engine.settle(record, { quiet })) processedCount++;
+  }
+  return { processedCount, pendingPeriod: null };
+}
+
 async function run() {
   const log = (message) => parentPort.postMessage({ type: 'log', message });
   const store = new AdaptiveLearningStore(createAdaptiveClient(workerData.url, workerData.key));
@@ -73,14 +85,20 @@ async function run() {
         candidate.setSignals(storedSignals.signals);
         let verified = !checkpoint;
         if (checkpoint && checkpoint.period === null) { candidate.verifyRecovery(checkpoint); verified = true; }
+        let replayedCount = 0;
+        // Reconstruct the committed prefix exactly, including legitimate historical
+        // no-signal rows. Never gate or bypass checkpoint integrity verification.
         for (const record of batch.records) {
+          if (verified) break;
           candidate.settle(record, { quiet: true });
+          replayedCount++;
           if (checkpoint?.period === record.issueNumber) {
             candidate.verifyRecovery(checkpoint);
             verified = true;
           }
         }
         if (!verified) throw new InputRevisionError('Checkpoint period is missing from Supabase history.');
+        settleReadyHistory(candidate, batch.records.slice(replayedCount), { quiet: true });
         engine = candidate;
         signalsThrough = storedSignals.through;
         dirty = true;
@@ -88,19 +106,28 @@ async function run() {
       }
       // Retry a failed durable write before admitting any further input.
       if (dirty) await persist();
-      const [batch, storedSignals] = await Promise.all([store.historyAfter(engine.lastProcessedPeriod), store.signalsSince(signalsThrough)]);
+      const batch = await store.historyAfter(engine.lastProcessedPeriod);
       store.assertCoverage(engine, batch);
+      // Exact pending-period reads also catch commits older than the delta cursor.
+      const storedSignals = await store.signalsSince(signalsThrough, batch.records.map((record) => record.issueNumber));
       engine.setSignals(storedSignals.signals);
-      for (const record of batch.records) {
-        engine.settle(record);
-        dirty = true;
-      }
+      const { processedCount, pendingPeriod } = settleReadyHistory(engine, batch.records);
+      if (processedCount) dirty = true;
       signalsThrough = storedSignals.through;
       // Save settlements even if the independent schedule service is unavailable.
       if (dirty) await persist();
-      const changed = engine.predict(await currentIssue());
-      if (changed) { dirty = true; await persist(); }
-      parentPort.postMessage({ type: 'state', body: persistedBody });
+      if (pendingPeriod) {
+        // Predicting beyond held settlements would use incomplete weights/T3 position.
+        // Waiting is retryable input readiness, not an integrity failure.
+        parentPort.postMessage({ type: 'state', body: {
+          success: false, status: 'waiting_for_t7', pendingPeriod, checkpointAt,
+          error: `Waiting for stored T7 input at ${pendingPeriod}.`,
+        } });
+      } else {
+        const changed = engine.predict(await currentIssue());
+        if (changed) { dirty = true; await persist(); }
+        parentPort.postMessage({ type: 'state', body: persistedBody });
+      }
       if (lastError) log('recovered after transient error');
       lastError = null;
     } catch (error) {

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { AdaptiveLearningEngine, InputRevisionError, PREVIOUS_T3_FINGERPRINT } from './adaptive-learning.js';
 import { AdaptiveLearningStore, browserHistoryRecord } from './adaptive-learning-store.js';
+import { settleReadyHistory } from './adaptive-learning-worker.js';
 import { createClient } from '@supabase/supabase-js';
 import { validateDataset } from './validate-adaptive-learning.mjs';
 import { scheduledStartFromIssue, computeTest3, TEST3_SEQUENCE } from './adaptive-algorithms.generated.js';
@@ -134,6 +135,78 @@ test('changed evaluated inputs and corrupt recovery fail explicitly', () => {
   assert.throws(() => engine.verifyRecovery({ ...engine.checkpoint(), weights: [1, 0, 0] }), InputRevisionError);
 });
 
+test('history before T7 stays unlearned and uncheckpointed until its exact stored signal arrives', () => {
+  const { records } = fixture();
+  const engine = new AdaptiveLearningEngine();
+  const before = engine.checkpoint();
+  assert.deepEqual(settleReadyHistory(engine, [records[0]]), { processedCount: 0, pendingPeriod: records[0].issueNumber });
+  assert.deepEqual(engine.checkpoint(), before);
+  assert.equal(engine.history.length, 0);
+  assert.equal(engine.predictionIndex, 0);
+  engine.setSignals([{ period_id: records[0].issueNumber, signal: 'BIG', confidence: 72 }]);
+  assert.deepEqual(settleReadyHistory(engine, [records[0]]), { processedCount: 1, pendingPeriod: null });
+  assert.equal(engine.history[0].t7pred, 'Big');
+  assert.equal(engine.checkpoint().period, records[0].issueNumber);
+  assert.equal(engine.checkpoint().totalPredictions, 1);
+  assert.deepEqual(settleReadyHistory(engine, [records[0]]), { processedCount: 0, pendingPeriod: null });
+});
+
+test('T7 before history evaluates normally; multiple pending periods never bypass a missing predecessor', () => {
+  const { records } = fixture();
+  const rounds = records.slice(0, 4);
+  const engine = new AdaptiveLearningEngine();
+  engine.setSignals([0, 2, 3].map((i) => ({ period_id: rounds[i].issueNumber, signal: 'SMALL' })));
+  assert.deepEqual(settleReadyHistory(engine, rounds), { processedCount: 1, pendingPeriod: rounds[1].issueNumber });
+  const committed = engine.checkpoint();
+  assert.deepEqual(settleReadyHistory(engine, rounds.slice(1)), { processedCount: 0, pendingPeriod: rounds[1].issueNumber });
+  assert.deepEqual(engine.checkpoint(), committed);
+  engine.setSignals([{ period_id: rounds[1].issueNumber, signal: 'BIG' }]);
+  assert.deepEqual(settleReadyHistory(engine, rounds.slice(1)), { processedCount: 3, pendingPeriod: null });
+  assert.deepEqual(engine.history.map((row) => row.period), rounds.map((row) => row.issueNumber));
+  assert.deepEqual(engine.history.map((row) => row.t7pred), ['Small', 'Big', 'Small', 'Small']);
+});
+
+test('held tail reconstructs from the checkpoint cursor on restart and matches exact replay after asynchronous arrivals', () => {
+  const { records, signals } = fixture();
+  const rounds = records.slice(0, 80);
+  const engine = new AdaptiveLearningEngine();
+  // A pre-existing verified prefix may legitimately have historical no-signal rows.
+  engine.setSignals(signals.filter((s) => s.period_id <= rounds[69].issueNumber));
+  for (const row of rounds.slice(0, 70)) engine.settle(row);
+  const checkpoint = engine.checkpoint();
+  assert.deepEqual(settleReadyHistory(engine, rounds.slice(70)), { processedCount: 0, pendingPeriod: rounds[70].issueNumber });
+  assert.deepEqual(engine.checkpoint(), checkpoint);
+  const restarted = new AdaptiveLearningEngine();
+  restarted.setSignals([...engine.t7Signals.values()]);
+  for (const row of rounds.slice(0, 70)) restarted.settle(row);
+  restarted.verifyRecovery(checkpoint);
+  const tailSignals = rounds.slice(70).map((row, i) => ({ period_id: row.issueNumber, signal: i % 2 === 0 ? 'BIG' : 'SMALL' }));
+  restarted.setSignals(tailSignals.slice(1).reverse());
+  assert.equal(settleReadyHistory(restarted, rounds.slice(70)).processedCount, 0);
+  restarted.setSignals(tailSignals.slice(0, 1));
+  assert.equal(settleReadyHistory(restarted, rounds.slice(70)).processedCount, 10);
+  const { engine: reference } = validateDataset(rounds, [...engine.t7Signals.values(), ...tailSignals]);
+  assert.deepEqual(restarted.history, reference.history);
+  for (const field of ['weights', 'inputDigest', 'predictionIndex', 'test3MaxLoss', 'test7MaxLoss', 'test9MaxLoss']) {
+    assert.deepEqual(restarted.checkpoint()[field], reference.checkpoint()[field], field);
+  }
+});
+
+test('genuine post-evaluation T7 mutation still rejects without changing inputs, results or checkpoint', () => {
+  const { records } = fixture();
+  const engine = new AdaptiveLearningEngine();
+  const signal = { period_id: records[0].issueNumber, signal: 'BIG', confidence: 72 };
+  engine.setSignals([signal]);
+  settleReadyHistory(engine, [records[0]]);
+  const before = JSON.stringify({ checkpoint: engine.checkpoint(), history: engine.history, signals: [...engine.t7Signals] });
+  assert.throws(() => engine.setSignals([{ ...signal, signal: 'SMALL' }]), InputRevisionError);
+  assert.equal(JSON.stringify({ checkpoint: engine.checkpoint(), history: engine.history, signals: [...engine.t7Signals] }), before);
+  // Missing T7 in an already committed historical prefix is still immutable too.
+  const historical = new AdaptiveLearningEngine();
+  historical.settle(records[0]);
+  assert.throws(() => historical.setSignals([signal]), InputRevisionError);
+});
+
 test('Supabase mapping retains browser availability timestamps rather than collector source_time', () => {
   const row = { issue_number: '20260928100050001', number: '7', created_at: '2026-09-28T00:00:30Z', source_time: '2026-09-28T00:10:00Z' };
   assert.deepStrictEqual(browserHistoryRecord(row), {
@@ -169,6 +242,11 @@ test('Supabase adapter pages history/signals, reads only new rows, and surfaces 
         if (['select', 'order', 'offset', 'limit'].includes(key)) continue;
         const [operator, ...parts] = filter.split('.');
         const value = parts.join('.');
+        if (operator === 'in') {
+          const values = value.slice(1, -1).split(',');
+          rows = rows.filter((row) => values.includes(row[key]));
+          continue;
+        }
         rows = rows.filter((row) => operator === 'eq' ? row[key] === value
           : operator === 'gt' ? row[key] > value : operator === 'gte' ? row[key] >= value : row[key] <= value);
       }
@@ -207,6 +285,18 @@ test('Supabase adapter pages history/signals, reads only new rows, and surfaces 
   const changed = await store.signalsSince(since);
   assert.equal(changed.signals.length, 1003, 'Equal timestamp pages must retain every period');
   assert.equal(changed.through, since);
+  // A newer write advances the cursor while an older timestamp's transaction
+  // is still invisible. The exact pending ID read must recover that late commit.
+  const pending = database.wingo_t7_signals[0];
+  database.wingo_t7_signals = [{ ...database.wingo_t7_signals[1], stored_at: '2026-10-04T00:00:02.000Z' }];
+  const ahead = await store.signalsSince(since);
+  database.wingo_t7_signals.push({ ...pending, stored_at: '2026-10-04T00:00:01.000Z' });
+  const late = await store.signalsSince(ahead.through, [pending.period_id]);
+  assert.ok(late.signals.some((s) => s.period_id === pending.period_id));
+  assert.equal(late.through, ahead.through, 'Exact pending reads must not move the delta cursor backwards');
+  database.wingo_t7_signals = bootstrap.records.map((r) => ({ period_id: r.issueNumber, signal: 'BIG', stored_at: since }));
+  const manyPending = await store.signalsSince(ahead.through, bootstrap.records.map((r) => r.issueNumber));
+  assert.equal(manyPending.signals.length, 1003, 'All pending exact-ID pages must be retrieved');
   const checkpoint = { period: bootstrap.records.at(-1).issueNumber, weights: [0.1, 0.3, 0.6] };
   await store.saveCheckpoint(checkpoint);
   assert.deepStrictEqual(await store.loadCheckpoint(), checkpoint);

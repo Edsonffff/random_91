@@ -14,7 +14,7 @@ test('real HTTP server and adaptive worker recover their durable checkpoint acro
     const createdAt = new Date(scheduledStartFromIssue(issueNumber) + 30_000).toISOString();
     return { issueNumber, winningNumber: (i * 7 + 3) % 10, createdAt, sourceTime: createdAt };
   });
-  const signals = records.filter((_, i) => i % 4 !== 0).map((r) => ({
+  const signals = records.map((r) => ({
     period_id: r.issueNumber, signal: 'BIG', confidence: 70,
     fetched_at: r.createdAt, stored_at: r.createdAt,
   }));
@@ -76,7 +76,7 @@ test('real HTTP server and adaptive worker recover their durable checkpoint acro
   await once(dbServer, 'listening');
   t.after(() => new Promise((resolve) => dbServer.close(resolve)));
 
-  async function launch() {
+  async function launch({ ready = true } = {}) {
     let output = '';
     const child = spawn(process.execPath, ['--import', fileURLToPath(new URL('./fixtures/adaptive-upstream.mjs', import.meta.url)), fileURLToPath(new URL('./server.js', import.meta.url))], {
       env: { ...process.env, PORT: '0', SUPABASE_URL: `http://127.0.0.1:${dbServer.address().port}`, SUPABASE_SERVICE_ROLE_KEY: 'fixture-only', ADAPTIVE_FIXTURE_ACTIVE_PERIOD: activePeriod },
@@ -92,13 +92,21 @@ test('real HTTP server and adaptive worker recover their durable checkpoint acro
     };
     t.after(stop);
     // Discover the OS-assigned port via preload, keeping production HTTP code intact.
+    let port;
     for (let i = 0; i < 100; i++) {
-      const port = output.match(/ADAPTIVE_FIXTURE_PORT=(\d+)/)?.[1];
+      port = output.match(/ADAPTIVE_FIXTURE_PORT=(\d+)/)?.[1];
+      if (port && !ready) {
+        const response = await fetch(`http://127.0.0.1:${port}/api/adaptive-learning/current`);
+        if (response.status === 503) {
+          const body = await response.json();
+          if (body.status === 'waiting_for_t7') return { stop, port, body, output };
+        }
+      }
       if (port) {
         const response = await fetch(`http://127.0.0.1:${port}/api/adaptive-learning/current`);
         if (response.status === 200) {
           assert.equal(response.headers.get('cache-control'), 'no-store');
-          return { stop, body: await response.json(), output };
+          return { stop, port, body: await response.json(), output };
         }
       }
       assert.equal(child.exitCode, null, output);
@@ -107,7 +115,32 @@ test('real HTTP server and adaptive worker recover their durable checkpoint acro
     assert.fail(`Adaptive endpoint did not become ready: ${output}`);
   }
 
-  const first = await launch();
+  // History is visible first. The final T7 row is deliberately committed after
+  // the worker has persisted the ready prefix; no arbitrary sleep is involved.
+  const initialSignals = database.wingo_t7_signals;
+  database.wingo_t7_signals = initialSignals.slice(0, -1);
+  const waiting = await launch({ ready: false });
+  assert.equal(waiting.body.status, 'waiting_for_t7');
+  assert.equal(waiting.body.pendingPeriod, records.at(-1).issueNumber);
+  assert.equal(database.wingo_adaptive_checkpoints[0].state.period, records.at(-2).issueNumber);
+  assert.equal(database.wingo_adaptive_checkpoints[0].state.totalPredictions, 70);
+  assert.equal(database.wingo_adaptive_checkpoints[0].state.predictionIndex, 70);
+  await waiting.stop();
+  const waitingRestarted = await launch({ ready: false });
+  assert.equal(waitingRestarted.body.status, 'waiting_for_t7');
+  assert.match(waitingRestarted.output, /checkpoint=verified/);
+  database.wingo_t7_signals = initialSignals;
+
+  let first;
+  for (let i = 0; i < 100; i++) {
+    const response = await fetch(`http://127.0.0.1:${waitingRestarted.port}/api/adaptive-learning/current`);
+    if (response.status === 200) {
+      first = { ...waitingRestarted, body: await response.json() };
+      break;
+    }
+    await delay(100);
+  }
+  assert.ok(first, 'Worker did not recover after the delayed T7 signal');
   assert.equal(first.body.totalPredictions, 71);
   assert.equal(first.body.signals.t3pred, TEST3_SEQUENCE[71 % 14]);
   assert.equal(database.wingo_adaptive_checkpoints[0].state.predictionIndex, 71);

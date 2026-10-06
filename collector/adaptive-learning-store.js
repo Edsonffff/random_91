@@ -61,7 +61,7 @@ export class AdaptiveLearningStore {
     return { records, count: result.count };
   }
 
-  async signalsSince(since = null) {
+  async signalsSince(since = null, pendingPeriods = []) {
     const cutoff = new Date().toISOString();
     const signals = [];
     for (let from = 0; ; from += 1000) {
@@ -77,6 +77,16 @@ export class AdaptiveLearningStore {
     // Advance only to an observed write, never the polling wall clock: an in-flight
     // collector upsert may commit after this read with an earlier stored_at value.
     const through = signals.at(-1)?.stored_at ?? since;
+    // stored_at is assigned before the collector upsert commits. A delayed write
+    // can therefore become visible behind an already observed newer timestamp.
+    // Re-read every pending period by ID; these reads do not advance the delta cursor.
+    const periods = [...new Set(pendingPeriods)];
+    for (let from = 0; from < periods.length; from += 500) {
+      const page = checked(await this.client.from('wingo_t7_signals')
+        .select('period_id, signal, confidence, fetched_at, stored_at')
+        .in('period_id', periods.slice(from, from + 500)), 'Read pending T7 inputs');
+      signals.push(...page);
+    }
     return { signals, through };
   }
 

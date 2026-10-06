@@ -60,10 +60,15 @@ It preserves all-time streak maxima and the
 hook's first-prediction-per-period audit records (bounded to 500).
 
 After startup the worker fetches only history after its cursor and changed T7 rows
-by `stored_at`. It deduplicates unchanged signal values. An unchanged poll does not
-repeat prediction or learning. Stats and rolling windows are maintained without
-full replay. All adaptive rows remain in server memory for recovery verification
-and diagnostics; raw rows are already durable in the existing Supabase tables.
+by `stored_at`. Newly fetched history is committed only as a chronological prefix
+whose exact T7 period IDs are present. A missing T7 row produces a retryable
+`waiting_for_t7` state; it is not evaluated as a null signal and is not checkpointed.
+The worker also re-reads all pending period IDs each cycle, so a late row whose
+`stored_at` falls behind the observed cursor cannot be missed. It deduplicates
+unchanged signal values. An unchanged poll does not repeat prediction or learning.
+Stats and rolling windows are maintained without full replay. All adaptive rows
+remain in server memory for recovery verification and diagnostics; raw rows are
+already durable in the existing Supabase tables.
 
 The checkpoint holds the minimum replay-independent state and audit records rather
 than another copy of the full historical dataset. Supabase atomically upserts this
