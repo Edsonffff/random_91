@@ -36,6 +36,8 @@ This is a standalone, lightweight Node.js worker service that continuously fetch
 - **Preserves Existing Data**: Pre-loads all 1,042+ historical records on boot and only appends new draws.
 - **Fault-Tolerant Polling Loop**: Never crashes on network drops, HTTP errors, or upstream rate limits; automatically logs failures and retries.
 - **Precise Logging**: Clear, timestamped event logs for every step (`Fetch started`, `Period detected`, `already exists → skipped`, `New result → inserted`).
+- **T7 Permanent Capture**: Every BDGTharu `prediction` and `history[]` entry is upserted by `period_id`; pending-to-final transitions preserve the original capture time and finalized values are immutable.
+- **T7 Diagnostics**: Poll audits, provider-window expiry, and provider-stream gaps are available from `GET /api/t7/status` and `/health`.
 
 ---
 
@@ -52,6 +54,8 @@ POLL_INTERVAL_MS=30000
 RETRY_DELAY_MS=10000
 PORT=8080
 ```
+
+Apply `supabase/migrations/20261007_create_wingo_t7_monitoring.sql` before enabling the durable T7 diagnostics. The current BDGTharu endpoint does not provide verified historical lookup, so the collector reports `historicalBackfillSupported: false` and never issues unsupported period/page queries.
 
 ---
 

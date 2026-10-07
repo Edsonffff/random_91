@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { AdaptiveLearningEngine, InputRevisionError, PREVIOUS_T3_FINGERPRINT } from './adaptive-learning.js';
 import { AdaptiveLearningStore, browserHistoryRecord } from './adaptive-learning-store.js';
-import { settleReadyHistory } from './adaptive-learning-worker.js';
+import { isLateT7Checkpoint, recoverLateT7Checkpoint, settleReadyHistory } from './adaptive-learning-worker.js';
 import { createClient } from '@supabase/supabase-js';
 import { validateDataset } from './validate-adaptive-learning.mjs';
 import { scheduledStartFromIssue, computeTest3, TEST3_SEQUENCE } from './adaptive-algorithms.generated.js';
@@ -205,6 +205,48 @@ test('genuine post-evaluation T7 mutation still rejects without changing inputs,
   const historical = new AdaptiveLearningEngine();
   historical.settle(records[0]);
   assert.throws(() => historical.setSignals([signal]), InputRevisionError);
+});
+
+test('stale checkpoint recovery only recognizes absent T7 rows created after the checkpoint', () => {
+  const checkpoint = { period: '20261005100050002' };
+  const records = [
+    { period: '20261005100050001' },
+    { period: '20261005100050002' },
+  ];
+  const updatedAt = '2026-10-05T16:42:02.526Z';
+  const existing = {
+    period_id: records[0].period, signal: 'SMALL',
+    created_at: '2026-10-05T16:40:00.000Z', stored_at: '2026-10-05T16:42:03.000Z',
+  };
+  const late = {
+    period_id: records[1].period, signal: 'BIG',
+    created_at: '2026-10-05T16:42:04.000Z', stored_at: '2026-10-05T16:42:04.000Z',
+  };
+  assert.equal(isLateT7Checkpoint(checkpoint, updatedAt, [existing, late]), true);
+  assert.equal(isLateT7Checkpoint(checkpoint, updatedAt, [existing]), false);
+  assert.equal(isLateT7Checkpoint(checkpoint, updatedAt, [{ ...existing, created_at: '2026-10-05T16:41:00.000Z' }]), false);
+});
+
+test('late T7 checkpoint recovery proves the old state, then rebuilds with final input', () => {
+  const { records } = fixture();
+  const checkpointTime = '2026-10-05T16:42:02.526Z';
+  const old = new AdaptiveLearningEngine();
+  const oldSignals = records.slice(0, 4).map((record) => ({ period_id: record.issueNumber, signal: 'SMALL', created_at: '2026-10-05T16:40:00.000Z', stored_at: '2026-10-05T16:40:00.000Z' }));
+  old.setSignals(oldSignals.slice(0, 3));
+  records.slice(0, 4).forEach((record) => old.settle(record));
+  const checkpoint = old.checkpoint();
+  const finalSignals = [...oldSignals.slice(0, 3), {
+    period_id: records[3].issueNumber, signal: 'BIG',
+    created_at: '2026-10-05T16:42:04.000Z', stored_at: '2026-10-05T16:42:04.000Z',
+  }];
+  const recovered = recoverLateT7Checkpoint(records.slice(0, 4), finalSignals, checkpoint, checkpointTime);
+  assert.equal(recovered.replayedCount, 4);
+  assert.equal(recovered.candidate.history.length, 4);
+  assert.equal(recovered.candidate.history.at(-1).t7pred, 'Big');
+  assert.notEqual(recovered.candidate.checkpoint().inputDigest, checkpoint.inputDigest);
+  assert.throws(() => recoverLateT7Checkpoint(records.slice(0, 4), [
+    ...oldSignals.slice(0, 2), { ...oldSignals[2], signal: 'BIG' }, finalSignals[3],
+  ], checkpoint, checkpointTime), InputRevisionError);
 });
 
 test('Supabase mapping retains browser availability timestamps rather than collector source_time', () => {

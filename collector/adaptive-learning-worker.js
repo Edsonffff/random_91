@@ -1,28 +1,51 @@
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads';
-import { AdaptiveLearningEngine, InputRevisionError } from './adaptive-learning.js';
 import { AdaptiveLearningStore, createAdaptiveClient } from './adaptive-learning-store.js';
+import { AdaptiveRuntime } from './adaptive-runtime.js';
+export { isLateT7Checkpoint, recoverLateT7Checkpoint } from './adaptive-recovery.js';
 
-/** CPU-heavy startup and CPL-1 fitting stay off the collector/T7 event loop. */
-export function startAdaptiveWorker({ url, key, onState, log, logError }) {
+/** Retained compatibility helper for historical parity tests. Live readiness is stricter. */
+export function settleReadyHistory(engine, records, { quiet = false } = {}) {
+  let processedCount = 0;
+  for (const record of records) {
+    if (!engine.t7Signals.has(record.issueNumber)) return { processedCount, pendingPeriod: record.issueNumber };
+    if (engine.settle(record, { quiet })) processedCount++;
+  }
+  return { processedCount, pendingPeriod: null };
+}
+
+// Worker threads share one Node process. There is no independent polling here.
+export function startAdaptiveWorker({ url, key, log, logError }) {
   const worker = new Worker(new URL('./adaptive-learning-worker.js', import.meta.url), { workerData: { url, key } });
-  let failed = false;
+  const requests = new Map();
+  let sequence = 0;
+  let failure;
+  function fail(error) {
+    failure = error;
+    for (const { reject } of requests.values()) reject(error);
+    requests.clear();
+  }
   worker.on('message', (message) => {
-    if (message.type === 'state') {
-      failed = message.body.success === false;
-      onState(message.body);
-    }
-    else if (message.type === 'error') logError(`[Adaptive] ${message.message}`);
-    else log(`[Adaptive] ${message.message}`);
+    if (message.type === 'response') {
+      requests.get(message.id)?.resolve(message.body);
+      requests.delete(message.id);
+    } else log(message.message);
   });
-  worker.on('error', (error) => {
-    failed = true;
-    logError(`[Adaptive] worker error: ${error.message}`);
-    onState({ success: false, status: 'error', error: 'Adaptive worker failed.' });
-  });
-  worker.on('exit', (code) => {
-    if (!failed) onState({ success: false, status: 'stopped', error: `Adaptive worker stopped (${code}).` });
-  });
-  return worker;
+  worker.on('error', (error) => { logError(`[ADAPTIVE] status=worker_failed detail=${error.message}`); fail(error); });
+  worker.on('exit', (code) => fail(new Error(`Adaptive worker stopped (${code}).`)));
+  function request(type, inputs) {
+    if (failure) return Promise.reject(failure);
+    return new Promise((resolve, reject) => {
+      const id = ++sequence;
+      requests.set(id, { resolve, reject });
+      worker.postMessage({ type, id, inputs });
+    });
+  }
+  return {
+    advance: (inputs) => request('advance', inputs),
+    runRecovery: () => request('runRecovery'),
+    commitRecovery: () => request('commitRecovery'),
+    terminate: () => worker.terminate(),
+  };
 }
 
 async function currentIssue() {
@@ -38,116 +61,28 @@ async function currentIssue() {
     const period = String(schedule.current?.issueNumber || '').trim();
     if (!period) throw new Error('Schedule has no current issue.');
     return period;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-/** Commit only the ready chronological prefix; the rest stays behind the history cursor. */
-export function settleReadyHistory(engine, records, { quiet = false } = {}) {
-  let processedCount = 0;
-  for (const record of records) {
-    if (!engine.t7Signals.has(record.issueNumber)) {
-      return { processedCount, pendingPeriod: record.issueNumber };
-    }
-    if (engine.settle(record, { quiet })) processedCount++;
-  }
-  return { processedCount, pendingPeriod: null };
-}
-
-async function run() {
-  const log = (message) => parentPort.postMessage({ type: 'log', message });
-  const store = new AdaptiveLearningStore(createAdaptiveClient(workerData.url, workerData.key));
-  let engine;
-  let signalsThrough;
-  let dirty = false;
-  let lastError;
-  let lastErrorAt = 0;
-  let checkpointAt;
-  let persistedBody;
-
-  async function persist() {
-    await store.saveCheckpoint(engine.checkpoint());
-    checkpointAt = new Date().toISOString();
-    dirty = false;
-    persistedBody = { ...engine.current(), status: 'ready', checkpointAt };
-    log(`checkpoint persisted period=${engine.lastProcessedPeriod} predictions=${engine.history.length}`);
-  }
-
-  while (true) {
-    try {
-      if (!engine) {
-        log('startup/recovery: loading Supabase history, stored T7 signals and checkpoint');
-        const checkpoint = await store.loadCheckpoint();
-        const [batch, storedSignals] = await Promise.all([store.historyAfter(), store.signalsSince()]);
-        const candidate = new AdaptiveLearningEngine({ log });
-        store.assertCoverage(candidate, batch);
-        candidate.setSignals(storedSignals.signals);
-        let verified = !checkpoint;
-        if (checkpoint && checkpoint.period === null) { candidate.verifyRecovery(checkpoint); verified = true; }
-        let replayedCount = 0;
-        // Reconstruct the committed prefix exactly, including legitimate historical
-        // no-signal rows. Never gate or bypass checkpoint integrity verification.
-        for (const record of batch.records) {
-          if (verified) break;
-          candidate.settle(record, { quiet: true });
-          replayedCount++;
-          if (checkpoint?.period === record.issueNumber) {
-            candidate.verifyRecovery(checkpoint);
-            verified = true;
-          }
-        }
-        if (!verified) throw new InputRevisionError('Checkpoint period is missing from Supabase history.');
-        settleReadyHistory(candidate, batch.records.slice(replayedCount), { quiet: true });
-        engine = candidate;
-        signalsThrough = storedSignals.through;
-        dirty = true;
-        log(`recovery complete rows=${engine.history.length} latest=${engine.lastProcessedPeriod} checkpoint=${checkpoint ? 'verified' : 'first bootstrap'}`);
-      }
-      // Retry a failed durable write before admitting any further input.
-      if (dirty) await persist();
-      const batch = await store.historyAfter(engine.lastProcessedPeriod);
-      store.assertCoverage(engine, batch);
-      // Exact pending-period reads also catch commits older than the delta cursor.
-      const storedSignals = await store.signalsSince(signalsThrough, batch.records.map((record) => record.issueNumber));
-      engine.setSignals(storedSignals.signals);
-      const { processedCount, pendingPeriod } = settleReadyHistory(engine, batch.records);
-      if (processedCount) dirty = true;
-      signalsThrough = storedSignals.through;
-      // Save settlements even if the independent schedule service is unavailable.
-      if (dirty) await persist();
-      if (pendingPeriod) {
-        // Predicting beyond held settlements would use incomplete weights/T3 position.
-        // Waiting is retryable input readiness, not an integrity failure.
-        parentPort.postMessage({ type: 'state', body: {
-          success: false, status: 'waiting_for_t7', pendingPeriod, checkpointAt,
-          error: `Waiting for stored T7 input at ${pendingPeriod}.`,
-        } });
-      } else {
-        const changed = engine.predict(await currentIssue());
-        if (changed) { dirty = true; await persist(); }
-        parentPort.postMessage({ type: 'state', body: persistedBody });
-      }
-      if (lastError) log('recovered after transient error');
-      lastError = null;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (message !== lastError || Date.now() - lastErrorAt >= 60_000) {
-        parentPort.postMessage({ type: 'error', message });
-        lastErrorAt = Date.now();
-      }
-      lastError = message;
-      parentPort.postMessage({ type: 'state', body: { success: false, status: 'error', error: message, checkpointAt } });
-      // An input/recovery mismatch requires inspection, never silent algorithm adjustment.
-      if (error instanceof InputRevisionError) return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 5000));
-  }
+  } finally { clearTimeout(timeout); }
 }
 
 if (!isMainThread) {
-  run().catch((error) => {
-    parentPort.postMessage({ type: 'error', message: error.message });
-    process.exitCode = 1;
+  const log = (message) => parentPort.postMessage({ type: 'log', message });
+  log('[ADAPTIVE] worker started');
+  const runtime = new AdaptiveRuntime(new AdaptiveLearningStore(createAdaptiveClient(workerData.url, workerData.key)), { currentIssue, log });
+  let tail = Promise.resolve();
+  parentPort.on('message', (message) => {
+    if (!['advance', 'runRecovery', 'commitRecovery'].includes(message.type)) return;
+    tail = tail.then(async () => {
+      try {
+        const body = message.type === 'advance' ? await runtime.advance(message.inputs) : await runtime[message.type]();
+        parentPort.postMessage({ type: 'response', id: message.id, body });
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        parentPort.postMessage({ type: 'log', message: `[ADAPTIVE] request=${message.type} failed detail=${detail}` });
+        parentPort.postMessage({ type: 'response', id: message.id, body: {
+          success: false, status: 'error', adaptiveState: 'recovery_failed',
+          error: detail, checkpointStatus: 'error', databaseConnected: false,
+        } });
+      }
+    });
   });
 }

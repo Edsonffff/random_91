@@ -1,4 +1,4 @@
-// Test-process preload inherited by the real adaptive Worker thread.
+// Test-process preload inherited by the coordinated Adaptive Worker thread.
 // Persistence goes to local PostgREST fixtures; no live upstreams are contacted.
 import { Server } from 'node:http';
 
@@ -12,6 +12,11 @@ const nativeFetch = globalThis.fetch;
 globalThis.fetch = (input, options) => {
   const url = new URL(input instanceof Request ? input.url : String(input));
   if (url.hostname === '127.0.0.1') return nativeFetch(input, options);
+  if (process.env.ADAPTIVE_FIXTURE_UPSTREAM_URL) {
+    const kind = url.hostname === 'bdgtharu.com' ? 't7'
+      : url.pathname.endsWith('/WinGo_30S.json') ? 'schedule' : 'history';
+    return nativeFetch(`${process.env.ADAPTIVE_FIXTURE_UPSTREAM_URL}?kind=${kind}`, options);
+  }
   if (url.hostname === 'draw.ar-lottery01.com' && url.pathname.endsWith('/WinGo_30S.json')) {
     return Promise.resolve(Response.json({ current: { issueNumber: process.env.ADAPTIVE_FIXTURE_ACTIVE_PERIOD } }));
   }

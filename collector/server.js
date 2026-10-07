@@ -2,6 +2,13 @@ import http from 'http';
 import { createClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
 import { startAdaptiveWorker } from './adaptive-learning-worker.js';
+import { AdaptiveCoordinator } from './adaptive-coordinator.js';
+import {
+  compareT7Periods,
+  normalizeT7Entry,
+  T7Diagnostics,
+} from './t7-monitoring.js';
+import { T7IngestionLedger } from './t7-ingestion.js';
 
 // Load local environment variables if present
 dotenv.config();
@@ -10,7 +17,7 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS || '30000', 10);
 const RETRY_DELAY_MS = parseInt(process.env.RETRY_DELAY_MS || '10000', 10);
-const PORT = parseInt(process.env.PORT || '10000', 10);
+const PORT = parseInt(process.env.PORT || '8080', 10);
 const HOST = '0.0.0.0';
 
 // ─── Test 7 prediction source: https://bdgtharu.com/api.php ─────────────────
@@ -23,10 +30,26 @@ const T7_API_BASE_URL = 'https://bdgtharu.com/api.php';
 // Timeout for a single T7 request. The polling cadence (5s) stays
 // separate: a slow upstream simply makes a cycle overrun, it does not stack.
 const T7_REQUEST_TIMEOUT_MS = 15000;
+const T7_POLL_AUDIT_TABLE = 'wingo_t7_poll_audit';
+const T7_PENDING_DIAGNOSTICS_TABLE = 'wingo_t7_pending_diagnostics';
+const T7_GAP_DIAGNOSTICS_TABLE = 'wingo_t7_gap_diagnostics';
+const T7_AUDIT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+const T7_AUDIT_PRUNE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const OFFICIAL_WINGO_HISTORY_URL = 'https://draw.ar-lottery01.com/WinGo/WinGo_30S/GetHistoryIssuePage.json';
 
 let adaptiveWorker;
+let adaptiveCoordinator;
+let adaptiveRetryTimer;
 let adaptiveCurrent = { success: false, status: 'initializing' };
+
+function notifyAdaptive(period) {
+  if (!running || !adaptiveCoordinator) return;
+  adaptiveCoordinator.onSettledPeriod({ period }).catch((error) => {
+    adaptiveCurrent = { success: false, status: 'error', error: 'Adaptive runtime unavailable; retrying.', checkpointStatus: 'pending_retry',
+      latestEvaluatedPeriod: adaptiveCurrent.latestEvaluatedPeriod ?? null, checkpointAt: adaptiveCurrent.checkpointAt ?? null };
+    logError(`[ADAPTIVE] status=retrying detail=${error.message}`);
+  });
+}
 
 function getTimestamp() {
   return new Date().toISOString();
@@ -85,8 +108,22 @@ function formatRecordForSupabase(item, serviceTime, timeType = 'iso') {
  */
 const T7_POLL_INTERVAL_MS = 5000;
 let isT7Polling = false;
+let t7PollingRunning = false;
+let lastT7PollStartedAt = null;
+let lastT7PollCompletedAt = null;
+let lastT7PollStatus = 'initializing';
+let lastPendingT7Observation = null;
+let lastT7PollError = null;
+let t7CurrentProviderPeriod = null;
+let t7WindowOldestPeriod = null;
+let t7WindowNewestPeriod = null;
+let t7HistoryCount = 0;
+let lastT7AuditPrunedAt = 0;
+let t7AuditSchemaWarned = false;
+let t7DiagnosticsSchemaWarned = false;
 const knownT7Periods = new Set();
 const inMemoryT7Signals = new Map();
+const t7Diagnostics = new T7Diagnostics();
 let latestT7Timing = null;
 // Flipped once if the bdgtharu column migration has not been applied yet, so the
 // actionable hint is logged a single time instead of on every poll.
@@ -108,49 +145,6 @@ const T7_EXTRA_COLUMNS = [
   'prediction_created_at',
 ];
 
-/**
- * Map one bdgtharu.com prediction/history entry onto a wingo_t7_signals row.
- * Returns null when the entry is unusable (missing issue or non BIG/SMALL size),
- * which is how an empty/garbled prediction is tolerated without crashing.
- *
- * The upstream `size`/`color`/`confidence`/`status` are recorded EXACTLY as
- * returned. No prediction is ever derived, recomputed or invented here.
- */
-function normalizeT7Entry(raw) {
-  if (!raw || typeof raw !== 'object') return null;
-
-  const periodId = String(raw.issue ?? '').trim();
-  const size = String(raw.size ?? '').trim().toUpperCase();
-  if (!periodId || (size !== 'BIG' && size !== 'SMALL')) return null;
-
-  const num = (v) => {
-    const n = typeof v === 'string' ? Number(v) : v;
-    return typeof n === 'number' && Number.isFinite(n) ? n : null;
-  };
-  const bool = (v) => (typeof v === 'boolean' ? v : null);
-  // Upstream timestamps are epoch milliseconds.
-  const iso = (v) => (num(v) !== null ? new Date(num(v)).toISOString() : null);
-  const str = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
-
-  return {
-    period_id: periodId,
-    signal: size,
-    confidence: num(raw.confidence),
-    color: str(raw.color) ? str(raw.color).toUpperCase() : null,
-    status: str(raw.status) ? str(raw.status).toLowerCase() : null,
-    source: str(raw.source),
-    algorithm_version: num(raw.algorithmVersion),
-    guard_applied: bool(raw.guardApplied),
-    // The ACTUAL outcome — never conflated with the prediction above.
-    actual_number: num(raw.actualNumber),
-    actual_color: str(raw.actualColor),
-    size_hit: bool(raw.sizeHit),
-    color_hit: bool(raw.colorHit),
-    settled_at: iso(raw.settledAt),
-    prediction_created_at: iso(raw.createdAt),
-  };
-}
-
 async function storeT7Signal(supabaseClient, signalRow) {
   // `upsert ... onConflict: 'period_id'` makes a duplicate row impossible even
   // if the in-memory dedup set is stale, because period_id is the primary key.
@@ -159,6 +153,7 @@ async function storeT7Signal(supabaseClient, signalRow) {
     .upsert([signalRow], { onConflict: 'period_id' });
 
   if (error) {
+    isDbConnected = false;
     const missingColumn =
       error.code === '42703' ||
       /column .* does not exist/i.test(error.message) ||
@@ -179,103 +174,213 @@ async function storeT7Signal(supabaseClient, signalRow) {
     }
     return false;
   }
+  isDbConnected = true;
   return true;
 }
 
-/**
- * Persist a single bdgtharu entry.
- *  · unknown issue        -> insert (new prediction, or backfill from history[])
- *  · known, still pending -> left alone (no duplicate write, original capture
- *                            timestamps preserved)
- *  · pending -> settled   -> updated with the upstream settlement
- */
-async function handleT7Entry(supabaseClient, entry, responseTime, origin) {
-  const existing = inMemoryT7Signals.get(entry.period_id);
+function warnT7DiagnosticsSchema(error) {
+  if (!t7DiagnosticsSchemaWarned) {
+    t7DiagnosticsSchemaWarned = true;
+    logError(`[T7] Diagnostic tables unavailable: ${error.message}`);
+  }
+}
 
-  if (!existing) {
-    const storedAt = new Date().toISOString();
-    // For a fresh prediction prediction_created_at is ~now, so fetched_at stays
-    // an accurate capture time. For backfilled history it is the true age.
-    const fetchedAt = entry.prediction_created_at || storedAt;
+async function saveT7PendingDiagnostic(supabaseClient, diagnostic) {
+  if (!diagnostic?.period) return;
+  try {
+    const { error } = await supabaseClient.from(T7_PENDING_DIAGNOSTICS_TABLE).upsert([{
+      period_id: diagnostic.period,
+      signal: diagnostic.signal,
+      prediction_created_at: diagnostic.predictionCreatedAt,
+      first_seen_at: diagnostic.firstSeenAt,
+      last_seen_at: diagnostic.lastSeenAt,
+      state: diagnostic.state,
+      provider_window_oldest_period: diagnostic.providerWindowOldestPeriod,
+      provider_window_newest_period: diagnostic.providerWindowNewestPeriod,
+      evidence: { source: 't7_stream' },
+      updated_at: new Date().toISOString(),
+    }], { onConflict: 'period_id' });
+    if (error) warnT7DiagnosticsSchema(error);
+  } catch (error) {
+    warnT7DiagnosticsSchema(error);
+  }
+}
 
-    const signalRecord = {
-      ...entry,
-      fetched_at: fetchedAt,
-      stored_at: storedAt,
-    };
+async function saveT7GapDiagnostic(supabaseClient, diagnostic) {
+  if (!diagnostic?.period) return;
+  try {
+    const { error } = await supabaseClient.from(T7_GAP_DIAGNOSTICS_TABLE).upsert([{
+      period: diagnostic.period,
+      type: diagnostic.type,
+      first_detected_at: diagnostic.firstDetectedAt,
+      last_detected_at: diagnostic.lastDetectedAt,
+      evidence: diagnostic.evidence,
+      resolved: diagnostic.resolved,
+      updated_at: new Date().toISOString(),
+    }], { onConflict: 'period' });
+    if (error) warnT7DiagnosticsSchema(error);
+  } catch (error) {
+    warnT7DiagnosticsSchema(error);
+  }
+}
 
-    const storedOk = await storeT7Signal(supabaseClient, signalRecord);
-    if (!storedOk) return;
-
-    knownT7Periods.add(entry.period_id);
-    inMemoryT7Signals.set(entry.period_id, {
-      ...signalRecord,
-      wingoai_response_ms: responseTime,
-      collector_latency_ms: Math.max(0, Date.parse(storedAt) - Date.parse(fetchedAt)),
-    });
-
-    if (origin === 'prediction') {
-      latestT7Timing = {
-        fetched_at: fetchedAt,
-        period_id: entry.period_id,
-        wingoai_response_ms: responseTime,
-        api_response_ms: responseTime,
-        signal: entry.signal,
-        stored_at: storedAt,
-        collector_latency_ms: Math.max(0, Date.parse(storedAt) - Date.parse(fetchedAt)),
-      };
-    }
-
-    log(
-      `[T7 SUPABASE]\nissue=${entry.period_id}\nNEW -> inserted (${origin}, status=${entry.status ?? 'n/a'})`
-    );
+async function loadT7Diagnostics(supabaseClient) {
+  const [pendingResult, gapsResult] = await Promise.all([
+    supabaseClient.from(T7_PENDING_DIAGNOSTICS_TABLE).select('*'),
+    supabaseClient.from(T7_GAP_DIAGNOSTICS_TABLE).select('*'),
+  ]);
+  if (pendingResult.error || gapsResult.error) {
+    warnT7DiagnosticsSchema(pendingResult.error || gapsResult.error);
     return;
   }
+  for (const row of pendingResult.data || []) {
+    t7Diagnostics.pending.set(String(row.period_id), {
+      period: String(row.period_id),
+      signal: row.signal ?? null,
+      predictionCreatedAt: row.prediction_created_at ?? null,
+      firstSeenAt: row.first_seen_at,
+      lastSeenAt: row.last_seen_at,
+      state: row.state,
+      providerWindowOldestPeriod: row.provider_window_oldest_period ?? null,
+      providerWindowNewestPeriod: row.provider_window_newest_period ?? null,
+    });
+  }
+  for (const row of gapsResult.data || []) {
+    t7Diagnostics.gaps.set(String(row.period), {
+      period: String(row.period),
+      type: row.type,
+      firstDetectedAt: row.first_detected_at,
+      lastDetectedAt: row.last_detected_at,
+      evidence: row.evidence || {},
+      resolved: Boolean(row.resolved),
+    });
+  }
+}
 
-  const existingStatus = existing.status ?? null;
-  const nextStatus = entry.status ?? null;
-  const isSettledNow = nextStatus !== null && nextStatus !== 'pending';
-  const wasPending = existingStatus === null || existingStatus === 'pending';
+async function observeT7Entry(supabaseClient, entry, observedAt = new Date().toISOString()) {
+  t7Diagnostics.observeEntry(entry, observedAt);
+  const diagnostic = t7Diagnostics.pending.get(String(entry.period_id));
+  if (diagnostic) await saveT7PendingDiagnostic(supabaseClient, diagnostic);
+  const gap = t7Diagnostics.gaps.get(String(entry.period_id));
+  if (gap) await saveT7GapDiagnostic(supabaseClient, gap);
+}
 
-  // Settle a pending record, or refresh it if status changed. A settled record
-  // is never overwritten by a pending one.
-  const shouldUpdate = (wasPending && isSettledNow) || nextStatus !== existingStatus;
-  if (!shouldUpdate) return;
+async function observeT7History(supabaseClient, entries, observedAt = new Date().toISOString()) {
+  const result = t7Diagnostics.observeHistory(entries, observedAt);
+  for (const gap of result.gaps) await saveT7GapDiagnostic(supabaseClient, t7Diagnostics.gaps.get(gap.period));
+  for (const period of result.resolvedPeriods) await saveT7GapDiagnostic(supabaseClient, t7Diagnostics.gaps.get(period));
+  return result;
+}
 
-  const storedAt = new Date().toISOString();
-  const settleRow = {
-    period_id: entry.period_id,
-    signal: entry.signal,
-    confidence: entry.confidence,
-    color: entry.color,
-    status: entry.status,
-    source: entry.source,
-    algorithm_version: entry.algorithm_version,
-    guard_applied: entry.guard_applied,
-    actual_number: entry.actual_number,
-    actual_color: entry.actual_color,
-    size_hit: entry.size_hit,
-    color_hit: entry.color_hit,
-    settled_at: entry.settled_at,
-    prediction_created_at: entry.prediction_created_at,
-    // fetched_at must be sent on EVERY upsert: this column is NOT NULL with no
-    // DEFAULT, and PostgREST evaluates the INSERT branch before conflict
-    // handling, so omitting it fails even for a pure update. We write the
-    // EXISTING value back, which preserves the original capture time exactly.
-    fetched_at: existing.fetched_at || entry.prediction_created_at || storedAt,
-    stored_at: storedAt,
+async function expireT7Pending(supabaseClient, oldestPeriod, newestPeriod, observedAt = new Date().toISOString()) {
+  for (const diagnostic of t7Diagnostics.expirePending(oldestPeriod, newestPeriod, observedAt)) {
+    await saveT7PendingDiagnostic(supabaseClient, diagnostic);
+  }
+}
+
+async function recordT7PollAudit(supabaseClient, audit) {
+  const { error } = await supabaseClient.from(T7_POLL_AUDIT_TABLE).insert([audit]);
+  if (error) {
+    if (!t7AuditSchemaWarned) {
+      t7AuditSchemaWarned = true;
+      logError(`[T7] Poll audit unavailable: ${error.message}`);
+    }
+    return;
+  }
+  const now = Date.now();
+  if (now - lastT7AuditPrunedAt < T7_AUDIT_PRUNE_INTERVAL_MS) return;
+  lastT7AuditPrunedAt = now;
+  const cutoff = new Date(now - T7_AUDIT_RETENTION_MS).toISOString();
+  const { error: pruneError } = await supabaseClient
+    .from(T7_POLL_AUDIT_TABLE)
+    .delete()
+    .lt('created_at', cutoff);
+  if (pruneError) logError(`[T7] Poll audit retention cleanup failed: ${pruneError.message}`);
+}
+
+function t7WindowPeriods(entries) {
+  const periods = [...new Set(entries.map((entry) => entry?.period_id).filter(Boolean))]
+    .sort(compareT7Periods);
+  return {
+    oldest: periods[0] ?? null,
+    newest: periods.at(-1) ?? null,
   };
+}
 
-  const storedOk = await storeT7Signal(supabaseClient, settleRow);
-  if (!storedOk) return;
+function t7StatusBody() {
+  const diagnostics = t7Diagnostics.status();
+  return {
+    success: true,
+    pollingRunning: t7PollingRunning,
+    lastPollStartedAt: lastT7PollStartedAt,
+    lastPollCompletedAt: lastT7PollCompletedAt,
+    lastPollStatus: lastT7PollStatus,
+    currentProviderPeriod: t7CurrentProviderPeriod,
+    providerWindowOldestPeriod: t7WindowOldestPeriod,
+    providerWindowNewestPeriod: t7WindowNewestPeriod,
+    historyCount: t7HistoryCount,
+    historicalBackfillSupported: false,
+    pendingCount: diagnostics.pending.length,
+    pending: diagnostics.pending.map((entry) => ({
+      period: entry.period,
+      signal: entry.signal,
+      predictionCreatedAt: entry.predictionCreatedAt,
+      lastSeenAt: entry.lastSeenAt,
+      state: entry.state,
+    })),
+    gaps: diagnostics.gaps,
+    expiredPending: diagnostics.expiredPending,
+    lastError: lastT7PollError,
+  };
+}
 
-  inMemoryT7Signals.set(entry.period_id, { ...existing, ...settleRow });
+const t7Ledger = new T7IngestionLedger({
+  cache: inMemoryT7Signals,
+  loadExisting: async (period) => {
+    const { data, error } = await currentT7Client.from('wingo_t7_signals').select('*').eq('period_id', period).limit(1);
+    if (error) {
+      isDbConnected = false;
+      throw new Error(`Read T7 before upsert: ${error.message}`);
+    }
+    return data?.[0] ?? null;
+  },
+  persist: async (row) => {
+    const storedOk = await storeT7Signal(currentT7Client, row);
+    if (!storedOk) throw new Error(`T7 persistence awaits retry at ${row.period_id}`);
+  },
+  observe: (entry, observedAt) => observeT7Entry(currentT7Client, entry, observedAt),
+  onStored: async ({ entry, origin, operation, previousStatus }) => {
+    knownT7Periods.add(entry.period_id);
+    notifyAdaptive(entry.period_id);
+    if (operation === 'inserted') {
+      log(`[T7 SUPABASE]\nissue=${entry.period_id}\nNEW -> inserted (${origin}, status=${entry.status ?? 'n/a'})`);
+    } else {
+      log(`[T7 SUPABASE]\nissue=${entry.period_id}\nUPDATED ${previousStatus ?? 'pending'} -> ${entry.status}` +
+        `\nactual_number=${entry.actual_number ?? 'n/a'} actual_color=${entry.actual_color ?? 'n/a'}` +
+        `\nsizeHit=${entry.size_hit} colorHit=${entry.color_hit}`);
+    }
+  },
+  log,
+  logError: (message) => logError(message),
+});
 
-  log(
-    `[T7 SUPABASE]\nissue=${entry.period_id}\nUPDATED ${existingStatus ?? 'pending'} -> ${nextStatus}` +
-      `\nactual_number=${entry.actual_number ?? 'n/a'} actual_color=${entry.actual_color ?? 'n/a'}` +
-      `\nsizeHit=${entry.size_hit} colorHit=${entry.color_hit}`
-  );
+let currentT7Client = null;
+
+async function handleT7Entry(supabaseClient, entry, responseTime, origin) {
+  currentT7Client = supabaseClient;
+  await t7Ledger.ingest(entry, responseTime, origin);
+  const stored = inMemoryT7Signals.get(entry.period_id);
+  if (origin === 'prediction' && stored) {
+    latestT7Timing = {
+      fetched_at: stored.fetched_at,
+      period_id: entry.period_id,
+      wingoai_response_ms: responseTime,
+      api_response_ms: responseTime,
+      signal: stored.signal,
+      stored_at: stored.stored_at,
+      collector_latency_ms: stored.collector_latency_ms ?? 0,
+    };
+  }
 }
 
 /**
@@ -287,6 +392,16 @@ async function handleT7Entry(supabaseClient, entry, responseTime, origin) {
 async function fetchAndProcessT7Prediction(supabaseClient) {
   if (isT7Polling) return;
   isT7Polling = true;
+  const pollStartedAt = getTimestamp();
+  lastT7PollStartedAt = pollStartedAt;
+  lastT7PollStatus = 'requesting';
+  let responseTimeMs = null;
+  let predictionPeriod = null;
+  let historyCount = 0;
+  let oldestHistoryPeriod = null;
+  let newestHistoryPeriod = null;
+  let responseOk = false;
+  let errorMessage = null;
 
   try {
     const startTime = Date.now();
@@ -321,6 +436,9 @@ async function fetchAndProcessT7Prediction(supabaseClient) {
         ? 'aborted'
         : 'network/unreachable';
 
+      errorMessage = `${failureKind}: ${errMsg}`;
+      lastT7PollError = errorMessage;
+
       logError(
         `[T7] API request FAILED kind=${failureKind}\n` +
           `url=${T7_API_BASE_URL}?_=<cache-buster>\n` +
@@ -333,9 +451,13 @@ async function fetchAndProcessT7Prediction(supabaseClient) {
     clearTimeout(timeoutId);
 
     const responseTime = Date.now() - startTime;
+    responseTimeMs = responseTime;
     log(`[T7] HTTP ${response.status} ${response.statusText || ''}`.trimEnd() + ` in ${responseTime} ms`);
 
     if (!response.ok) {
+      lastT7PollStatus = `http_${response.status}`;
+      errorMessage = `HTTP ${response.status} ${response.statusText || ''}`.trim();
+      lastT7PollError = errorMessage;
       const bodySnippet = await response
         .text()
         .then((t) => t.replace(/\s+/g, ' ').slice(0, 300))
@@ -351,39 +473,111 @@ async function fetchAndProcessT7Prediction(supabaseClient) {
     try {
       data = await response.json();
     } catch (jsonErr) {
+      errorMessage = `Malformed JSON: ${jsonErr instanceof Error ? jsonErr.message : String(jsonErr)}`;
+      lastT7PollError = errorMessage;
       logError(
         `[T7] Malformed JSON in response (${jsonErr instanceof Error ? jsonErr.message : String(jsonErr)})`
       );
       return;
     }
+    if (!running) return;
 
+    const rawHistory = data?.history;
+    const malformedHistory = rawHistory !== undefined && !Array.isArray(rawHistory);
     const prediction = normalizeT7Entry(data?.prediction);
-    if (!prediction) {
-      log('[T7] Empty or unusable prediction in response — skipped (nothing stored)');
-      return;
+    const responseHistory = Array.isArray(rawHistory) ? rawHistory.map(normalizeT7Entry).filter(Boolean) : [];
+    const responseEntries = [prediction, ...responseHistory].filter(Boolean);
+    responseOk = !malformedHistory
+      && !(data?.prediction !== undefined && !prediction)
+      && responseEntries.length > 0;
+    predictionPeriod = prediction?.period_id ?? null;
+    historyCount = Array.isArray(rawHistory) ? rawHistory.length : 0;
+    ({ oldest: oldestHistoryPeriod, newest: newestHistoryPeriod } = t7WindowPeriods(responseHistory.length ? responseHistory : responseEntries));
+    t7CurrentProviderPeriod = predictionPeriod;
+    t7WindowOldestPeriod = oldestHistoryPeriod;
+    t7WindowNewestPeriod = newestHistoryPeriod;
+    t7HistoryCount = historyCount;
+    const pendingPeriod = adaptiveCurrent.status === 'waiting_for_t7' ? adaptiveCurrent.pendingPeriod : null;
+    const observedAt = getTimestamp();
+    await observeT7History(supabaseClient, responseHistory, observedAt);
+    await expireT7Pending(supabaseClient, oldestHistoryPeriod, newestHistoryPeriod, observedAt);
+    if (pendingPeriod) {
+      const pendingInResponse = responseEntries.some((entry) => entry.period_id === pendingPeriod);
+      lastPendingT7Observation = {
+        period: pendingPeriod,
+        available: pendingInResponse,
+        checkedAt: getTimestamp(),
+      };
+      if (!pendingInResponse) {
+        log(`[T7] pending_period=${pendingPeriod} status=not_in_upstream_response; waiting for source backfill`);
+      }
     }
 
-    log('[T7] Prediction received');
-    log(`[T7] Issue: ${prediction.period_id}`);
-    log(`[T7] Size: ${prediction.signal}`);
-    log(`[T7] Color: ${prediction.color ?? 'n/a'}`);
-    log(`[T7] Confidence: ${prediction.confidence ?? 'n/a'}`);
-    log(`[T7] Status: ${prediction.status ?? 'n/a'}`);
-
-    // 1. The live prediction. A new one is recognised purely by issue change.
-    await handleT7Entry(supabaseClient, prediction, responseTime, 'prediction');
-
-    // 2. history[] — backfills older issues and settles rows still pending.
-    const history = Array.isArray(data?.history) ? data.history : [];
-    for (const raw of history) {
-      const entry = normalizeT7Entry(raw);
-      if (!entry) continue;
-      await handleT7Entry(supabaseClient, entry, responseTime, 'history');
+    if (prediction) {
+      log('[T7] Prediction received');
+      log(`[T7] Issue: ${prediction.period_id}`);
+      log(`[T7] Size: ${prediction.signal}`);
+      log(`[T7] Color: ${prediction.color ?? 'n/a'}`);
+      log(`[T7] Confidence: ${prediction.confidence ?? 'n/a'}`);
+      log(`[T7] Status: ${prediction.status ?? 'n/a'}`);
+    } else {
+      log('[T7] No usable prediction entry; processing history entries independently');
     }
+
+    if (malformedHistory) {
+      errorMessage = 'Malformed history: expected an array.';
+      lastT7PollError = errorMessage;
+      lastT7PollStatus = 'malformed_history';
+    } else if (data?.prediction !== undefined && !prediction) {
+      errorMessage = 'Malformed prediction entry.';
+      lastT7PollError = errorMessage;
+      lastT7PollStatus = 'malformed_prediction';
+    } else if (!prediction && responseHistory.length === 0) {
+      errorMessage = 'Response contained no usable prediction or history entries.';
+      lastT7PollError = errorMessage;
+      lastT7PollStatus = 'empty_response';
+    }
+
+    // No Adaptive read can run between prediction and history[] finalization.
+    if (responseEntries.length) {
+      await adaptiveCoordinator.ingest(async () => {
+        for (const entry of responseEntries) {
+          await handleT7Entry(supabaseClient, entry, responseTime, entry === prediction ? 'prediction' : 'history');
+        }
+      }, 't7');
+    }
+    if (pendingPeriod && responseEntries.some((entry) => entry.period_id === pendingPeriod)) {
+      const persisted = inMemoryT7Signals.get(pendingPeriod);
+      log(`[T7] pending_period=${pendingPeriod} status=persisted signal=${persisted?.signal ?? 'none'} status=${persisted?.status ?? 'none'} actual_number=${persisted?.actual_number ?? 'none'}`);
+    }
+    if (!errorMessage) {
+      lastT7PollStatus = 'healthy';
+      lastT7PollError = null;
+    }
+    notifyAdaptive();
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    errorMessage = msg;
+    lastT7PollError = msg;
+    lastT7PollStatus = 'error';
     logError(`[T7] Cycle error: ${msg}`);
   } finally {
+    lastT7PollCompletedAt = getTimestamp();
+    try {
+      await recordT7PollAudit(supabaseClient, {
+        poll_started_at: pollStartedAt,
+        poll_completed_at: lastT7PollCompletedAt,
+        response_time_ms: responseTimeMs,
+        prediction_period: predictionPeriod,
+        history_count: historyCount,
+        oldest_history_period: oldestHistoryPeriod,
+        newest_history_period: newestHistoryPeriod,
+        response_ok: responseOk,
+        error_message: errorMessage,
+      });
+    } catch (auditError) {
+      logError(`[T7] Poll audit cycle failed: ${auditError.message}`);
+    }
     isT7Polling = false;
   }
 }
@@ -394,6 +588,7 @@ async function loadExistingT7Signals(supabaseClient) {
 
   let data = null;
   let error = null;
+  let fullColumnsAvailable = true;
 
   try {
     ({ data, error } = await supabaseClient
@@ -408,6 +603,7 @@ async function loadExistingT7Signals(supabaseClient) {
   // Graceful degradation: if the bdgtharu columns have not been added yet, fall
   // back to the legacy column set so the collector still boots and serves.
   if (error) {
+    fullColumnsAvailable = false;
     if (!t7SchemaWarned) {
       t7SchemaWarned = true;
       logError(
@@ -427,45 +623,76 @@ async function loadExistingT7Signals(supabaseClient) {
     return;
   }
 
-  if (Array.isArray(data)) {
-    for (const row of data) {
-      if (!row.period_id) continue;
-      const pid = String(row.period_id).trim();
-      knownT7Periods.add(pid);
-      inMemoryT7Signals.set(pid, {
-        period_id: pid,
-        signal: row.signal,
-        confidence: row.confidence !== null ? Number(row.confidence) : null,
-        fetched_at: row.fetched_at,
-        stored_at: row.stored_at,
-        color: row.color ?? null,
-        status: row.status ?? null,
-        source: row.source ?? null,
-        algorithm_version: row.algorithm_version ?? null,
-        guard_applied: row.guard_applied ?? null,
-        actual_number: row.actual_number ?? null,
-        actual_color: row.actual_color ?? null,
-        size_hit: row.size_hit ?? null,
-        color_hit: row.color_hit ?? null,
-        settled_at: row.settled_at ?? null,
-        prediction_created_at: row.prediction_created_at ?? null,
-      });
+  const remember = (row) => {
+    if (!row?.period_id) return;
+    const pid = String(row.period_id).trim();
+    knownT7Periods.add(pid);
+    const normalized = {
+      period_id: pid,
+      signal: row.signal,
+      confidence: row.confidence !== null ? Number(row.confidence) : null,
+      fetched_at: row.fetched_at,
+      stored_at: row.stored_at,
+      color: row.color ?? null,
+      status: row.status ?? null,
+      source: row.source ?? null,
+      algorithm_version: row.algorithm_version ?? null,
+      guard_applied: row.guard_applied ?? null,
+      actual_number: row.actual_number ?? null,
+      actual_color: row.actual_color ?? null,
+      size_hit: row.size_hit ?? null,
+      color_hit: row.color_hit ?? null,
+      settled_at: row.settled_at ?? null,
+      prediction_created_at: row.prediction_created_at ?? null,
+    };
+    inMemoryT7Signals.set(pid, normalized);
+    t7Diagnostics.seedPending(normalized);
+  };
+
+  if (Array.isArray(data)) data.forEach(remember);
+
+  // The normal cache remains bounded, but every unresolved pending row is
+  // loaded independently so an old pending period cannot disappear from
+  // operational diagnostics merely because it left the recent cache window.
+  if (!error && fullColumnsAvailable) {
+    for (let from = 0; ; from += 1000) {
+      const { data: pendingRows, error: pendingError } = await supabaseClient
+        .from('wingo_t7_signals')
+        .select(fullSelect)
+        .eq('status', 'pending')
+        .order('period_id', { ascending: true })
+        .range(from, from + 999);
+      if (pendingError) {
+        logError(`Failed to preload pending T7 diagnostics: ${pendingError.message}`);
+        break;
+      }
+      if (!pendingRows?.length) break;
+      pendingRows.forEach(remember);
+      if (pendingRows.length < 1000) break;
     }
-    log(`Preloaded ${data.length} existing Test 7 signals from public.wingo_t7_signals into collector memory.`);
   }
+
+  log(`Preloaded ${data?.length ?? 0} recent plus unresolved pending Test 7 signals from public.wingo_t7_signals.`);
 }
 
 async function startT7Polling(supabaseClient) {
   log(`[T7] Starting prediction worker against ${T7_API_BASE_URL} (interval: ${T7_POLL_INTERVAL_MS / 1000}s)...`);
-  while (running) {
-    try {
-      await fetchAndProcessT7Prediction(supabaseClient);
-    } catch (err) {
-      logError(`[T7] Polling worker unhandled error: ${err.message}`);
+  t7PollingRunning = true;
+  try {
+    while (running) {
+      try {
+        await fetchAndProcessT7Prediction(supabaseClient);
+      } catch (err) {
+        lastT7PollStatus = 'error';
+        lastT7PollError = err instanceof Error ? err.message : String(err);
+        logError(`[T7] Polling worker unhandled error: ${lastT7PollError}`);
+      }
+      if (running) {
+        await sleep(T7_POLL_INTERVAL_MS);
+      }
     }
-    if (running) {
-      await sleep(T7_POLL_INTERVAL_MS);
-    }
+  } finally {
+    t7PollingRunning = false;
   }
   log('[T7] Polling worker stopped.');
 }
@@ -481,17 +708,21 @@ let running = true;
 let isFetching = false;
 let timeType = 'iso';
 
-process.on('SIGINT', () => {
-  log('Received SIGINT. Shutting down gracefully...');
+let shuttingDown = false;
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  log(`Received ${signal}. Draining the coordinated pipeline...`);
   running = false;
-  adaptiveWorker?.terminate();
-});
-
-process.on('SIGTERM', () => {
-  log('Received SIGTERM. Shutting down gracefully...');
-  running = false;
-  adaptiveWorker?.terminate();
-});
+  clearInterval(adaptiveRetryTimer);
+  await adaptiveCoordinator?.flight;
+  await adaptiveCoordinator?.tail;
+  await adaptiveWorker?.terminate();
+  healthServer.close(() => process.exit(0));
+  healthServer.closeIdleConnections?.();
+}
+process.on('SIGINT', () => { shutdown('SIGINT').catch((error) => { logError(error.message); process.exitCode = 1; }); });
+process.on('SIGTERM', () => { shutdown('SIGTERM').catch((error) => { logError(error.message); process.exitCode = 1; }); });
 
 // ─── STEP 1: START HTTP HEALTH SERVER IMMEDIATELY (Render Requirement) ────────
 // Render requires the HTTP port to open immediately on 0.0.0.0:PORT and return 200 OK.
@@ -529,6 +760,11 @@ const healthServer = http.createServer((req, res) => {
         timestamp: getTimestamp(),
       })
     );
+  }
+
+  if (req.method === 'GET' && urlPath === '/api/t7/status') {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    return res.end(JSON.stringify(t7StatusBody()));
   }
 
   // GET /api/real/t7-signals or /t7-signals — fast in-memory served with latency telemetry
@@ -574,9 +810,10 @@ const healthServer = http.createServer((req, res) => {
     );
   }
 
-  // Lightweight snapshot; computation and Supabase access run in the worker.
+  // Lightweight snapshot; waiting is input readiness, not an HTTP outage.
   if (req.method === 'GET' && urlPath === '/api/adaptive-learning/current') {
-    res.writeHead(adaptiveCurrent.success ? 200 : 503, {
+    const waiting = ['waiting_for_t7', 'waiting_for_history'].includes(adaptiveCurrent.status);
+    res.writeHead(adaptiveCurrent.success || waiting ? 200 : 503, {
       'Content-Type': 'application/json',
       'Cache-Control': 'no-store',
     });
@@ -594,7 +831,7 @@ const healthServer = http.createServer((req, res) => {
         uptime: Math.round(process.uptime()),
         port: PORT,
         host: HOST,
-        dbConnected: isDbConnected,
+        dbConnected: isDbConnected && adaptiveCurrent.databaseConnected !== false,
         pollingActive: isPollingActive,
         totalKnownPeriods: knownPeriods.size,
         wingoAiLastPeriod: latestT7Timing?.period_id || null,
@@ -602,6 +839,52 @@ const healthServer = http.createServer((req, res) => {
         lastCycleStatus,
         lastFetchTime,
         lastInsertedPeriod,
+        serverRunning: running,
+        collectorStatus: lastCycleStatus,
+        t7PollingActive: isT7Polling,
+        t7PollingRunning,
+        t7LastPollStartedAt: lastT7PollStartedAt,
+        t7LastPollCompletedAt: lastT7PollCompletedAt,
+        t7LastPollStatus: lastT7PollStatus,
+        pendingT7Observation: lastPendingT7Observation,
+        t7PollIntervalMs: T7_POLL_INTERVAL_MS,
+        t7CurrentProviderPeriod: t7CurrentProviderPeriod,
+        t7ProviderWindowOldestPeriod: t7WindowOldestPeriod,
+        t7ProviderWindowNewestPeriod: t7WindowNewestPeriod,
+        t7HistoryCount: t7HistoryCount,
+        t7PendingCount: t7Diagnostics.status().pending.length,
+        t7GapCount: t7Diagnostics.status().gaps.length,
+        t7ExpiredPendingCount: t7Diagnostics.status().expiredPending.length,
+        t7HistoricalBackfillSupported: false,
+        t7LastError: lastT7PollError,
+        historyPollIntervalMs: POLL_INTERVAL_MS,
+        adaptiveStatus: adaptiveCurrent.status,
+        adaptiveState: adaptiveCurrent.adaptiveState ?? 'normal',
+        recoveryId: adaptiveCurrent.recoveryId ?? null,
+        recoveryHighWater: adaptiveCurrent.recoveryHighWater ?? null,
+        observedHighWater: adaptiveCurrent.observedHighWater ?? null,
+        earliestAffectedPeriod: adaptiveCurrent.earliestAffectedPeriod ?? null,
+        replayCursor: adaptiveCurrent.replayCursor ?? null,
+        replayProcessed: adaptiveCurrent.replayProcessed ?? 0,
+        replayTotal: adaptiveCurrent.replayTotal ?? 0,
+        replayHighWater: adaptiveCurrent.replayHighWater ?? null,
+        recoveryPhase: adaptiveCurrent.recoveryPhase ?? adaptiveCurrent.adaptiveState ?? 'normal',
+        lastCollectedPeriod: lastInsertedPeriod,
+        lastEvaluatedPeriod: adaptiveCurrent.latestEvaluatedPeriod ?? null,
+        checkpointStatus: adaptiveCurrent.checkpointStatus ?? 'loading',
+        checkpointAt: adaptiveCurrent.checkpointAt ?? null,
+        waiting_for_t7: adaptiveCurrent.status === 'waiting_for_t7',
+        pendingPeriod: adaptiveCurrent.pendingPeriod ?? null,
+        baselineId: adaptiveCurrent.baselineId ?? null,
+        baselineStartPeriod: adaptiveCurrent.baselineStartPeriod ?? null,
+        baselineReason: adaptiveCurrent.baselineReason ?? null,
+        baselinePendingAfter: adaptiveCurrent.baselinePendingAfter ?? null,
+        baselinePeriodsIncluded: adaptiveCurrent.baselinePeriodsIncluded ?? 0,
+        adaptiveCursor: adaptiveCurrent.adaptiveCursor ?? adaptiveCurrent.latestEvaluatedPeriod ?? null,
+        pendingT7Count: adaptiveCurrent.pendingT7Count ?? 0,
+        oldestPendingT7: adaptiveCurrent.oldestPendingT7 ?? adaptiveCurrent.pendingPeriod ?? null,
+        t7Coverage: adaptiveCurrent.t7Coverage ?? 'unknown',
+        adaptiveBlocked: adaptiveCurrent.adaptiveBlocked ?? adaptiveCurrent.status !== 'ready',
         timestamp: getTimestamp(),
       })
     );
@@ -649,9 +932,11 @@ async function loadExistingPeriods(supabaseClient) {
       .range(from, from + BATCH_SIZE - 1);
 
     if (error) {
+      isDbConnected = false;
       logError(`Failed to load existing periods from Supabase: ${error.message}`);
       break;
     }
+    isDbConnected = true;
 
     if (from === 0 && typeof count === 'number') {
       totalRows = count;
@@ -700,17 +985,27 @@ async function startCollector() {
     }
   );
 
-  isDbConnected = true;
+  isDbConnected = false;
   log(`Connecting to Supabase at: ${process.env.SUPABASE_URL.replace(/https?:\/\//, '').split('.')[0]}...`);
 
   try {
-    adaptiveWorker = startAdaptiveWorker({
-      url: process.env.SUPABASE_URL,
-      key: process.env.SUPABASE_SERVICE_ROLE_KEY,
-      onState: (body) => { adaptiveCurrent = body; },
-      log,
-      logError,
-    });
+    const launchWorker = () => startAdaptiveWorker({ url: process.env.SUPABASE_URL, key: process.env.SUPABASE_SERVICE_ROLE_KEY, log, logError });
+    const workerRequest = async (method, inputs) => {
+      try {
+        adaptiveWorker ??= launchWorker();
+        return await adaptiveWorker[method](inputs);
+      }
+      catch (error) {
+        await adaptiveWorker?.terminate();
+        adaptiveWorker = null;
+        throw error;
+      }
+    };
+    adaptiveCoordinator = new AdaptiveCoordinator({
+      advance: (inputs) => workerRequest('advance', inputs),
+      runRecovery: () => workerRequest('runRecovery'),
+      commitRecovery: () => workerRequest('commitRecovery'),
+    }, { onState: (body) => { adaptiveCurrent = body; } });
   } catch (error) {
     adaptiveCurrent = { success: false, status: 'error', error: 'Adaptive worker could not start.' };
     logError(`[Adaptive] worker startup failed: ${error.message}`);
@@ -718,10 +1013,16 @@ async function startCollector() {
 
   // Query current Supabase periods strictly from the CURRENT database
   const { totalRows, newestPeriod } = await loadExistingPeriods(supabaseClient);
+  lastInsertedPeriod = newestPeriod;
   log(`Initialized. Preserved ${totalRows} existing records in Supabase. Newest period: ${newestPeriod || 'None'}`);
 
   // Preload existing Test 7 signals from public.wingo_t7_signals into collector memory
   await loadExistingT7Signals(supabaseClient);
+  await loadT7Diagnostics(supabaseClient);
+  // Retry readiness/checkpoint/network recovery at the existing 5s cadence.
+  // The worker has no timer; server.js owns every evaluation request.
+  adaptiveRetryTimer = setInterval(notifyAdaptive, T7_POLL_INTERVAL_MS);
+  notifyAdaptive();
 
   // Dedicated background 5-second Test 7 prediction worker (bdgtharu.com)
   startT7Polling(supabaseClient).catch((wErr) => {
@@ -799,6 +1100,7 @@ async function startCollector() {
       log('API response received');
 
       const payload = await response.json();
+      if (!running) break;
       const list = payload?.data?.list;
 
       if (!Array.isArray(list) || list.length === 0) {
@@ -808,52 +1110,58 @@ async function startCollector() {
       // Process chronologically (oldest to newest among fetched batch)
       const batchChronological = [...list].reverse();
 
-      for (const item of batchChronological) {
-        const issueNumber = String(item.issueNumber || '').trim();
-        const rawNum = item.number;
-        const num = typeof rawNum === 'number' ? rawNum : parseInt(String(rawNum ?? ''), 10);
+      await adaptiveCoordinator.ingest(async () => {
+        for (const item of batchChronological) {
+          const issueNumber = String(item.issueNumber || '').trim();
+          const rawNum = item.number;
+          const num = typeof rawNum === 'number' ? rawNum : parseInt(String(rawNum ?? ''), 10);
 
-        if (!issueNumber || isNaN(num) || num < 0 || num > 9) {
-          continue;
-        }
+          if (!issueNumber || isNaN(num) || num < 0 || num > 9) {
+            continue;
+          }
 
-        log(`Period detected: ${issueNumber}`);
+          log(`[COLLECTOR] period=${issueNumber} status=received`);
 
-        if (knownPeriods.has(issueNumber)) {
-          log(`Period ${issueNumber} already exists → skipped`);
-          continue;
-        }
+          if (knownPeriods.has(issueNumber)) {
+            log(`Period ${issueNumber} already exists → skipped`);
+            continue;
+          }
 
-        // New result! Insert into Supabase
-        let recordPayload = formatRecordForSupabase(item, payload.serviceTime, timeType);
+          // New result! Insert into Supabase
+          let recordPayload = formatRecordForSupabase(item, payload.serviceTime, timeType);
 
-        let { error: insertError } = await supabaseClient
-          .from('real_wingo_30s_history')
-          .upsert([recordPayload], { onConflict: 'game_code,issue_number' });
-
-        // Handle possible column source_time type format differences (millis vs ISO)
-        if (
-          insertError &&
-          (insertError.code === '22007' || insertError.code === '22P02') &&
-          timeType === 'iso'
-        ) {
-          timeType = 'millis';
-          recordPayload = formatRecordForSupabase(item, payload.serviceTime, 'millis');
-          const retryRes = await supabaseClient
+          let { error: insertError } = await supabaseClient
             .from('real_wingo_30s_history')
             .upsert([recordPayload], { onConflict: 'game_code,issue_number' });
-          insertError = retryRes.error;
-        }
 
-        if (insertError) {
-          logError(`Database insertion failure for Period ${issueNumber}: ${insertError.message}`);
-        } else {
-          knownPeriods.add(issueNumber);
-          lastInsertedPeriod = issueNumber;
-          const size = num >= 5 ? 'Big' : 'Small';
-          log(`New result → inserted (Period: ${issueNumber}, Number: ${num}, Size: ${size})`);
+          // Handle possible column source_time type format differences (millis vs ISO)
+          if (
+            insertError &&
+            (insertError.code === '22007' || insertError.code === '22P02') &&
+            timeType === 'iso'
+          ) {
+            timeType = 'millis';
+            recordPayload = formatRecordForSupabase(item, payload.serviceTime, 'millis');
+            const retryRes = await supabaseClient
+              .from('real_wingo_30s_history')
+              .upsert([recordPayload], { onConflict: 'game_code,issue_number' });
+            insertError = retryRes.error;
+          }
+
+          if (insertError) {
+            isDbConnected = false;
+            logError(`Database insertion failure for Period ${issueNumber}: ${insertError.message}`);
+            throw new Error(`History persistence failed at ${issueNumber}`);
+          } else {
+            isDbConnected = true;
+            knownPeriods.add(issueNumber);
+            lastInsertedPeriod = issueNumber;
+            const size = num >= 5 ? 'Big' : 'Small';
+            log(`[HISTORY] period=${issueNumber} status=persisted number=${num} size=${size}`);
+          }
         }
-      }
+      }, 'history');
+      notifyAdaptive();
 
       lastCycleStatus = 'healthy';
     } catch (err) {

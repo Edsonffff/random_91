@@ -1,19 +1,36 @@
 # Phone-side Adaptive Learning
 
-The collector exposes `GET /api/adaptive-learning/current`. A dedicated Node worker
-thread performs the calculations so CPL-1 fitting and startup recovery do not block
-the collector's HTTP server, BDGTharu polling, or result ingestion.
+`server.js` owns one coordinated Node service, listening on port **8080** by default.
+It collects official WinGo results and BDGTharu signals, persists them to Supabase,
+and exposes `GET /health` and `GET /api/adaptive-learning/current`. A dedicated
+worker **thread in this same process** performs CPL-1 fitting and recovery. It has
+no independent poller: every Adaptive request comes through the server's queue.
+
+```text
+official history ─┐
+BDGTharu API ─────┴─> server.js
+                       ├─ shared ingestion/evaluation queue
+                       ├─ Supabase history + T7 persistence
+                       ├─ finalized T7 / chronological readiness checks
+                       ├─ Adaptive worker thread + atomic checkpoints
+                       └─ HTTP :8080
+
+adaptive.random9111.sbs -> separate Android cloudflared -> 127.0.0.1:8080
+```
 
 ## Setup on Termux
 
 1. Apply `collector/adaptive-learning-schema.sql` once in the Supabase SQL editor.
 2. Use the collector's existing `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`.
-3. Run the existing `npm start` from `collector/`. Run one adaptive worker per database.
+3. Run `PORT=8080 npm start` from `collector/`. Run one coordinated service per database.
 
 The generated algorithm file ships with the collector. TypeScript, React, and the
 frontend source tree are **not** required on the phone. Node 18+ is supported.
 The schema creates only `wingo_adaptive_checkpoints`; it does not alter the existing
-history or T7 tables. Checkpoints are service-role-only.
+history or T7 tables. Checkpoints are service-role-only. The retired checkpoint stays
+under `game_code = WinGo_30S`; the active clean baseline is stored separately under
+`game_code = WinGo_30S:baseline` in the same table, so the old recovery remains
+available as audit evidence.
 
 ## Exact algorithm provenance
 
@@ -53,29 +70,77 @@ The API's `source_time` is **not** substituted for those fields.
 
 ## Recovery and durability
 
-Startup loads Supabase history and stored T7 signals, reconstructs once, and verifies
-the persisted checkpoint's source fingerprint, input digest, weights, counts, and
-current streaks, sequence index, and independent test maxima at its exact period.
-It preserves all-time streak maxima and the
-hook's first-prediction-per-period audit records (bounded to 500).
+### Clean baseline after the permanent missing T7 period
 
-After startup the worker fetches only history after its cursor and changed T7 rows
-by `stored_at`. Newly fetched history is committed only as a chronological prefix
-whose exact T7 period IDs are present. A missing T7 row produces a retryable
-`waiting_for_t7` state; it is not evaluated as a null signal and is not checkpointed.
-The worker also re-reads all pending period IDs each cycle, so a late row whose
-`stored_at` falls behind the observed cursor cannot be missed. It deduplicates
-unchanged signal values. An unchanged poll does not repeat prediction or learning.
+When the active baseline row does not yet exist, startup does not resume the old
+checkpoint recovery. It scans durable history strictly after
+`20261002100050850` and selects the first period whose T7 row is modern-finalized
+(`source`, `win`/`loss`, `settled_at`, and matching `actual_number`). It then takes
+only the contiguous finalized prefix from that start period. In the current durable
+dataset the detected start is `20261002100052078`; the current finalized prefix
+contains 142 periods and stops at `20261002100052219` because
+`20261002100052220` has no finalized T7 row.
+
+The new checkpoint state records `baselineId`, `baselineVersion`,
+`baselineStartPeriod`, `excludedThroughPeriod`, `reason`, `createdAt`,
+`sourceCheckpoint`, and `periodsIncluded`. The old `WinGo_30S` checkpoint is never
+deleted or overwritten. Baseline evaluation starts with a fresh Adaptive engine at
+the selected period; no result before that start, including the permanently missing
+period, is evaluated by the new baseline.
+
+If there is no eligible finalized start yet, the service remains blocked and keeps
+collecting. Once the baseline exists, a missing future T7 holds the cursor at the
+oldest pending period while later history continues to persist. T7-before-result and
+result-before-T7 are both safe: evaluation occurs only after the exact durable,
+finalized signal is available. A duplicate identical finalized signal is harmless;
+a conflicting finalized value remains an integrity/revision error and is never
+silently accepted.
+
+Startup captures the checkpoint and a verified durable source boundary. New checkpoints contain
+a resumable `runtime` snapshot and its SHA-256 digest inside the existing JSON
+`state` column; no SQL schema change is needed. This includes the engine's records,
+evaluations, CPL state, and signal/audit maps. The checkpoint is larger than the
+legacy format so restarts can restore the exact state without fitting all historical
+models again. Startup checks the runtime digest and source fingerprint, verifies
+durable history and T7 against the chained input digest, and checks checkpoint
+weights, counts, streaks, sequence index and independent maxima. Legacy checkpoints
+still use their existing exact replay verification, then gain a resumable snapshot.
+First-prediction audit records remain bounded to 500 and survive recovery.
+
+The coordinator serializes each entire collector batch and each normal Adaptive request.
+The collector never mutates engine internals. `onSettledPeriod({ periods })` is the
+handoff: it deduplicates concurrent requests and reads durable inputs in the worker.
+The HTTP server remains responsive while the worker computes. Upstream fetches
+remain outside the queue; their durable writes go inside it. Recovery uses the
+three-phase protocol below so ingestion can continue during CPU-heavy replay.
+
+After startup only history after the evaluated cursor and changed T7 rows by
+`stored_at` are fetched. Exact reads cover pending periods and IDs touched by the
+collector, including revisions behind the timestamp cursor. Each new evaluation
+requires an exact durable historical result and finalized T7 row. BDGTharu rows
+must have `win`/`loss`, `settled_at`, and a matching `actual_number`; pending signals
+can be revised before settlement. Legacy NULL-metadata signals retain their exact
+historical meaning. The readiness gate does not alter any prediction algorithm.
+
+Missing/pending T7 produces `waiting_for_t7`; no row is evaluated and no active
+prediction is generated from that incomplete tail. A missing live predecessor
+produces `waiting_for_history`, including across midnight. Existing sequence/date
+gaps in the initial historical dataset remain part of that dataset's replay.
+Exact input digests are checked before evaluation and again before checkpointing.
+An unchanged poll does not repeat prediction or learning. The original historical
+NO_SIGNAL behavior remains available for validated legacy checkpoint prefixes.
 Stats and rolling windows are maintained without full replay. All adaptive rows
 remain in server memory for recovery verification and diagnostics; raw rows are
 already durable in the existing Supabase tables.
 
-The checkpoint holds the minimum replay-independent state and audit records rather
-than another copy of the full historical dataset. Supabase atomically upserts this
-single JSON checkpoint after changed results/predictions. A success response is
-published only after persistence succeeds. A failed write is retried before any
-further inputs are admitted. A restart reconstructs the same deterministic state
-from durable source rows and verifies it against the checkpoint.
+Supabase atomically upserts one JSON checkpoint after each new settlement and
+changed active prediction. A ready response is published only after persistence.
+Failed/ambiguous checkpoint writes retain the computed row and retry verification
+and persistence before further learning; the period is not evaluated twice. Failed
+collector batches are retained and retried under the same queue even if the
+upstream becomes unavailable. They hold Adaptive behind an ingestion retry barrier,
+while the source pollers continue at their existing intervals (T7: 5s, history: configured
+30s default). Collector history insertion stops at a failed row to preserve order.
 
 The known previous pair-algorithm source fingerprint is explicitly migrated once:
 startup verifies checkpoint period/count coverage and reconstructs the new T3
@@ -84,12 +149,66 @@ first-prediction audit records remain intact; obsolete active predictions are
 replaced. The new checkpoint is persisted before publishing a ready response.
 Unknown versions and corrupt new-version checkpoints still fail recovery.
 
-Existing history/T7 storage remains authoritative. A changed/backfilled T7 signal
-for an already-evaluated period, coverage-changing history reset/backfill, or a
-checkpoint mismatch stops the adaptive worker with an explicit error. Those events
-would cause the browser to retrospectively replay different inputs; silently keeping
-the previous incremental result would violate parity. Inspect/reconcile the source
-data and checkpoint before restarting. The existing collector continues running.
+### Single-flight recovery state machine
+
+`adaptiveState` is explicitly one of `normal`, `recovering`, `ready`,
+`waiting_for_t7`, or `recovery_failed`. The API retains `recovery_required` for
+integrity failures and separately exposes this state, recovery ID, original
+high-water mark, observed high-water mark, and earliest affected evaluated period.
+It also exposes `replayCursor`, `replayProcessed`, `replayTotal`,
+`replayHighWater`, and `recoveryPhase`.
+
+`t7PollingActive` is the in-flight HTTP request flag and is normally `false`
+between five-second polls. `t7PollingRunning` reports whether the continuous
+polling loop is alive. While waiting for an exact period, the collector keeps
+polling the existing BDGTharu endpoint and records `pendingT7Observation` with
+whether that exact period appeared in the latest upstream response. The endpoint
+currently exposes only a recent bounded history window and does not honor tested
+period/page/offset selectors, so a period outside that window cannot be invented
+or reconstructed from official draw data.
+
+1. **Capture under the collector write lock.** Read durable history and exact T7
+   IDs twice, confirm coverage and identical canonical digests, then deep-copy the
+   result. This blocks local writes only during capture. If another writer changes
+   the dataset during capture, no replay starts on that mixed boundary. New data
+   beyond this boundary is deliberately deferred, not included in a running replay.
+2. **Replay outside the write lock.** One recovery session and one recovery promise
+   own a private candidate. The collector continues committing entire batches;
+   notifications coalesce into the existing flight. The worker does not query
+   changing durable inputs during replay. A valid resumable checkpoint is reused
+   when it precedes every potentially affected input. An evaluated T7 revision
+   identifies the earliest affected period; the table currently retains only one
+   checkpoint, so when that checkpoint already includes the revision, recovery
+   uses deterministic full chronological replay. Valid legacy checkpoints retain
+   their existing exact verification. A stale legacy checkpoint falls back to full
+   finalized replay instead of repeatedly failing a timestamp-only late-row proof.
+3. **Verify, checkpoint, promote under the write lock.** Check the snapshot digest
+   and reconstructed input chain. Persist one recovery checkpoint, then replace
+   the active engine atomically and transition to `ready` (logging
+   `status=promoted`). Only afterward process
+   newly collected periods. The previous active engine/checkpoint stays published
+   as the last evaluated boundary until persistence is acknowledged. If a write
+   acknowledgement is lost, read back the identical runtime digest before retrying,
+   avoiding a second durable recovery write. Neither replay nor promotion is concurrent.
+
+Replay accepts only exact finalized T7 inputs, matching history/actual numbers,
+and stops at the first incomplete predecessor. If this predecessor is within the
+old evaluated checkpoint boundary, keep the old checkpoint and the partially
+replayed candidate. Transition to `waiting_for_t7`. Later backfill resumes that
+**same recovery ID** at the missing row; previously replayed rows are not repeated.
+Under the write lock, refresh only its unevaluated signals and record the newer
+observed high-water mark. The original recovery history/high-water mark remains
+fixed. These readiness refreshes use incremental history after that mark, changed
+T7 rows and exact pending IDs; they do not refetch full history every five seconds.
+Once its finalized prefix can be safely checkpointed, promote it and catch
+up to the newer boundary. No collector notification restarts an in-flight replay.
+
+`InputRevisionError` remains the immutable-input guard; no revised input is accepted
+by an already evaluated engine without recovery. Unknown/corrupt checkpoints and
+verified history mutations latch `recovery_failed`/`recovery_required` and preserve
+the durable checkpoint. Polling and new T7 rows do not restart terminal failure.
+Transient capture or persistence failures retry safely, retaining any prepared
+candidate rather than replaying it again. No checkpoints or source rows are deleted.
 In-place edits to old history rows are checked during startup recovery; the normal
 incremental reader assumes those settled source records remain immutable.
 
@@ -109,9 +228,51 @@ The response is an in-memory snapshot, never a replay or database query:
 - `predictedAt`, `evaluatedAt`, `checkpointAt`, source `version`, `status`
 
 It contains no full history, raw training rows, credentials, or checkpoint audit map.
-Before recovery and on errors it returns HTTP 503 with `success: false`; ready state
-returns HTTP 200. The independent official schedule request identifies the active
-issue. A schedule error is reported rather than inventing an active issue.
+Responses distinguish:
+
+- HTTP 200: `{ "success": true, "status": "ready", ... }`
+- HTTP 200: `{ "success": false, "status": "waiting_for_t7", "pendingPeriod": "...", ... }`
+- HTTP 200: `waiting_for_history` (a live predecessor has not been persisted)
+- HTTP 503: `{ "success": false, "status": "recovery_required", ... }`
+- HTTP 503: `recovering` (one active recovery; evaluations/checkpoint advancement held)
+- HTTP 503: `initializing`/`error` for startup or a transient service failure
+
+The official schedule still identifies the active issue. Its exact T7 signal must
+exist before invoking the original active prediction calculation. A schedule error
+is reported rather than inventing an active issue. `/health` always responds HTTP
+200 and includes collector/database/polling status, last collected/evaluated periods,
+Adaptive state/status, recovery ID/boundaries/earliest affected period, pending
+period, checkpoint status/time, and `waiting_for_t7`.
+
+## Android startup and diagnostics
+
+From the repository root, install collector dependencies once and start the service:
+
+```sh
+npm ci --prefix collector
+PORT=8080 npm --prefix collector start
+```
+
+`npm --prefix collector start` runs in `collector/` and loads its existing `.env`.
+In another Termux session, start the existing remotely managed tunnel with its
+existing token held in the environment:
+
+```sh
+cloudflared tunnel --no-autoupdate run --token "$CLOUDFLARE_TUNNEL_TOKEN"
+```
+
+The tunnel's origin must be `http://127.0.0.1:8080`, independent of the phone's
+Wi-Fi address. Tunnel credentials/configuration are not part of the Node service.
+No Windows replica is required. The two processes can restart independently.
+
+```sh
+curl -i --max-time 10 http://127.0.0.1:8080/health
+curl -i --max-time 10 http://127.0.0.1:8080/api/adaptive-learning/current
+curl -i --max-time 20 https://adaptive.random9111.sbs/api/adaptive-learning/current
+```
+
+Read `status` and `success` as well as the HTTP status: a waiting response is HTTP
+200 and explicitly reports unavailable input instead of a generic 503 outage.
 
 `AdaptiveLearningPage` shares one compact server subscription between
 `AdaptiveLearningPanel` and the bottom `MAX LOSS` section. That section displays
@@ -123,15 +284,19 @@ browser-side algorithm replay.
 ```sh
 node collector/build-adaptive-algorithms.mjs --check
 npm run test:adaptive
+npm run test:t9
 npm run build
 npx tsc --noEmit -p tsconfig.server.json
+npm run lint
 node collector/validate-adaptive-learning.mjs --limit=300
 ```
 
 `test:adaptive` includes deterministic replay/max-loss tests, frontend contract and
-compact polling tests, MAX LOSS rendering checks, and a real server/worker process
-restart test. The restart test uses local PostgREST/schedule fixtures, checks HTTP
-200 and durable checkpoint recovery, and contacts no live collector upstreams.
+compact polling tests, MAX LOSS rendering checks, coordinator race/readiness/failure
+tests (including 60 historical T7 arrivals during a paused replay, collector
+progress, single-flight recovery, one recovery checkpoint, and deferred catch-up),
+and a real unified server process restart test. Local fixtures check HTTP
+200 and durable checkpoint recovery, and contact no live collector upstreams.
 
 The final command requires Supabase credentials and reads existing data only. Set `--limit` to the desired
 number of latest historical rows (a number larger than the dataset selects all).
@@ -140,6 +305,8 @@ and T7 map. Every row checks T3/T7/T9, CPL-1 probabilities, CPL-3 state-dependen
 output, adaptive decision, probabilities, exact pre/post-update weights, hit/miss
 and aggregate streak/rolling statistics. Active-period samples are also compared.
 No floating-point tolerance is used. Any mismatch throws and stops validation.
+Supabase authentication failures (for example `JWT issued at future`) must be
+resolved in the deployment environment before live-data parity can be established.
 
 The unit fixture exercises missing signals, availability-time gates, date changes,
 sequence gaps, restart/checkpoint recovery, duplicate settlement, and real T9 votes.
