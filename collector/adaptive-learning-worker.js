@@ -1,6 +1,7 @@
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads';
 import { AdaptiveLearningStore, createAdaptiveClient } from './adaptive-learning-store.js';
 import { AdaptiveRuntime } from './adaptive-runtime.js';
+import { ADAPTIVE_INPUT_POLICY } from './adaptive-input-policy.js';
 export { isLateT7Checkpoint, recoverLateT7Checkpoint } from './adaptive-recovery.js';
 
 /** Retained compatibility helper for historical parity tests. Live readiness is stricter. */
@@ -67,7 +68,7 @@ async function currentIssue() {
 if (!isMainThread) {
   const log = (message) => parentPort.postMessage({ type: 'log', message });
   log('[ADAPTIVE] worker started');
-  const runtime = new AdaptiveRuntime(new AdaptiveLearningStore(createAdaptiveClient(workerData.url, workerData.key)), { currentIssue, log });
+  const runtime = new AdaptiveRuntime(new AdaptiveLearningStore(createAdaptiveClient(workerData.url, workerData.key)), { currentIssue, log, inputPolicy: ADAPTIVE_INPUT_POLICY });
   let tail = Promise.resolve();
   parentPort.on('message', (message) => {
     if (!['advance', 'runRecovery', 'commitRecovery'].includes(message.type)) return;

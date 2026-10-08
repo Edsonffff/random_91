@@ -13,20 +13,24 @@ function snapshot(checkpoint = NOW) {
   return {
     success: true, version: 'phone-v1', signalLabels: ['Test 3', 'Test 7', 'Test 9'],
     finalDecision: 'Small', status: 'ready', checkpointAt: new Date(checkpoint).toISOString(),
+    adaptiveInputMode: 'adaptive-t3-t9-v1',
+    adaptiveRequiredSignals: ['T3', 'T9'], adaptiveOptionalSignals: ['T7'],
+    t7AvailableForAdaptive: false, adaptiveBlocked: false,
     activePrediction: {
       period: '20261004100051769', decision: 'Big', probBig: 100, probSmall: 0,
       signalsAvailable: 2, weights: [0.76, 0.23, 0.01],
     },
-    signals: { period: '20261004100051769', t3pred: null, t7pred: 'Big', t9pred: 'Big' },
+    signals: { period: '20261004100051769', t3pred: 'Big', t7pred: null, t9pred: 'Big' },
     latestEvaluation: {
-      period: '20261004100051767', t3pred: null, t7pred: 'Small', t9pred: 'Big',
+      period: '20261004100051767', t3pred: 'Small', t7pred: null, t9pred: 'Big',
       adaptiveDecision: 'Small', t4pred: 'Small', actual: 'Small', isHit: true,
       probBig: 12, probSmall: 88, weights: [0.78, 0.19, 0.03], signalsAvailable: 2,
     },
     totalPredictions: 5225, totalHits: 2621, totalMisses: 2604, accuracyPct: 50,
     currentHitStreak: 2, currentMissStreak: 0, longestHitStreak: 10, longestMissStreak: 9,
-    test3MaxLoss: 13, test7MaxLoss: 7, test9MaxLoss: 4,
+    test3MaxLoss: 13, test7MaxLoss: 0, test9MaxLoss: 4,
     weights: [0.76, 0.23, 0.01], dominantSignalIndex: 0,
+    adaptiveWeights: [0.76 / 0.77, 0.01 / 0.77], adaptiveDominantSignalIndex: 0,
     last20: { hits: 11, total: 20 }, last50: { hits: 24, total: 50 },
     last100: { hits: 45, total: 100 }, last250: { hits: 124, total: 250 },
     lastSignalAgreement: { bigVotes: 1, smallVotes: 1, total: 2, majority: null },
@@ -59,6 +63,11 @@ test('rejects missing fields, unsafe numbers, wrong signal layouts and malformed
     { ...snapshot(), lastSignalAgreement: { bigVotes: 3, smallVotes: 2, total: 5, majority: 'Big' } },
     { ...snapshot(), test3MaxLoss: -1 }, { ...snapshot(), test7MaxLoss: 2.5 },
     { ...snapshot(), test9MaxLoss: Infinity },
+    { ...snapshot(), adaptiveInputMode: 'legacy-t3-t7-t9' },
+    { ...snapshot(), adaptiveRequiredSignals: ['T3', 'T7', 'T9'] },
+    { ...snapshot(), adaptiveOptionalSignals: [] },
+    { ...snapshot(), t7AvailableForAdaptive: 'no' }, { ...snapshot(), adaptiveBlocked: 0 },
+    { ...snapshot(), adaptiveWeights: [0.5, 0.4] }, { ...snapshot(), adaptiveDominantSignalIndex: 2 },
   ];
   for (const input of invalid) assert.throws(() => parseAdaptiveSnapshot(input));
   for (const key of Object.keys(snapshot())) {

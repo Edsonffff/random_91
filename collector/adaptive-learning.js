@@ -4,6 +4,7 @@ import {
   predictExperimentalPeriod, sizeOfNumber, dateFromIssue, CPL3_CONFIGS,
   advanceCpl3, advanceAdaptive, freshWeights, computeVote, rowPredictions, rollingWindow,
 } from './adaptive-algorithms.generated.js';
+import { ADAPTIVE_INPUT_POLICY, LEGACY_T7_REQUIRED_POLICY } from './adaptive-input-policy.js';
 
 const CONFIG = CPL3_CONFIGS.find((config) => config.name === 'context-8-cap-3');
 const emptyCplState = () => ({ stats: [], previous: null, priorLossStreak: 0, previousActual: null });
@@ -14,9 +15,10 @@ export class InputRevisionError extends Error {}
 
 /** Stateful execution of the browser's exact calculations, in chronological order. */
 export class AdaptiveLearningEngine {
-  constructor({ log = () => {}, clock = () => new Date().toISOString() } = {}) {
+  constructor({ log = () => {}, clock = () => new Date().toISOString(), inputPolicy = LEGACY_T7_REQUIRED_POLICY } = {}) {
     this.log = log;
     this.clock = clock;
+    this.inputPolicy = inputPolicy;
     this.history = [];
     this.records = [];
     this.sameDateRecords = [];
@@ -51,7 +53,7 @@ export class AdaptiveLearningEngine {
       if (!period || !['BIG', 'SMALL'].includes(signal.signal)) continue;
       const previous = this.t7Signals.get(period);
       if (previous?.signal === signal.signal) continue;
-      if (this.lastProcessedPeriod && compareIssuesAsc(period, this.lastProcessedPeriod) <= 0) {
+      if (this.inputPolicy.includeOptionalT7 && this.lastProcessedPeriod && compareIssuesAsc(period, this.lastProcessedPeriod) <= 0) {
         const evaluated = this.history.find((row) => row.period === period);
         if (evaluated && evaluated.t7pred !== (signal.signal === 'BIG' ? 'Big' : 'Small')) {
           throw new InputRevisionError(`T7 input changed after evaluation at ${period}; browser replay would differ. Recovery required.`);
@@ -75,7 +77,8 @@ export class AdaptiveLearningEngine {
       throw new Error('Invalid settled history record.');
     }
     const t3 = test3Prediction(this.predictionIndex);
-    const t7 = computeTest7([{ period, number: record.winningNumber }], this.t7Signals).details[0]?.predictedSize ?? null;
+    const t7Metric = computeTest7([{ period, number: record.winningNumber }], this.t7Signals).details[0]?.predictedSize ?? null;
+    const t7 = this.inputPolicy.includeOptionalT7 ? t7Metric : null;
     if (dateFromIssue(this.lastProcessedPeriod || '') !== dateFromIssue(period)) this.sameDateRecords = [];
     const cpl1 = predictExperimentalPeriod(record, this.sameDateRecords);
     const actualSize = sizeOfNumber(record.winningNumber);
@@ -142,7 +145,8 @@ export class AdaptiveLearningEngine {
     // advanceCpl3 clones state; scoring the browser's synthetic target never learns.
     const t9 = advanceCpl3([targetRow], this.cplState, CONFIG).rows[0];
     const input = {
-      period, t3pred: test3Prediction(this.predictionIndex), t7pred: test7.latestPrediction,
+      period, t3pred: test3Prediction(this.predictionIndex),
+      t7pred: this.inputPolicy.includeOptionalT7 ? test7.latestPrediction : null,
       t9pred: t9.prediction === 'BIG' ? 'Big' : t9.prediction === 'SMALL' ? 'Small' : null,
     };
     const vote = computeVote(rowPredictions(input), this.weights);
@@ -169,8 +173,16 @@ export class AdaptiveLearningEngine {
     const available = last ? [last.t3pred, last.t7pred, last.t9pred].filter((p) => p !== null) : [];
     const bigVotes = available.filter((p) => p === 'Big').length;
     const smallVotes = available.filter((p) => p === 'Small').length;
+    const requiredWeightTotal = this.weights[0] + this.weights[2];
+    const adaptiveWeights = requiredWeightTotal > 0
+      ? [this.weights[0] / requiredWeightTotal, this.weights[2] / requiredWeightTotal]
+      : [0.5, 0.5];
+    const adaptiveDominantSignalIndex = adaptiveWeights[0] >= adaptiveWeights[1] ? 0 : 1;
     return {
       success: true, version: SOURCE_FINGERPRINT, signalLabels: SIGNAL_LABELS,
+      adaptiveInputMode: this.inputPolicy.id,
+      adaptiveRequiredSignals: [...this.inputPolicy.requiredSignals],
+      adaptiveOptionalSignals: [...this.inputPolicy.optionalSignals],
       finalDecision: last?.adaptiveDecision ?? null, activePrediction: this.activePrediction,
       signals: this.activeSignals, latestEvaluation: last,
       latestEvaluatedPeriod: this.lastProcessedPeriod, evaluatedAt: this.lastEvaluatedAt, predictedAt: this.predictedAt,
@@ -180,6 +192,7 @@ export class AdaptiveLearningEngine {
       longestHitStreak: this.longestHitStreak, longestMissStreak: this.longestMissStreak,
       test3MaxLoss: this.test3MaxLoss, test7MaxLoss: this.test7MaxLoss, test9MaxLoss: this.test9MaxLoss,
       weights: [...this.weights], dominantSignalIndex: this.weights.indexOf(Math.max(...this.weights)),
+      adaptiveWeights, adaptiveDominantSignalIndex,
       last20: rollingWindow(this.history, 20), last50: rollingWindow(this.history, 50),
       last100: rollingWindow(this.history, 100), last250: rollingWindow(this.history, 250),
       lastSignalAgreement: { bigVotes, smallVotes, total: available.length, majority: bigVotes > smallVotes ? 'Big' : smallVotes > bigVotes ? 'Small' : null },
@@ -191,6 +204,7 @@ export class AdaptiveLearningEngine {
     // do not duplicate thousands of rows in every checkpoint write.
     return {
       version: SOURCE_FINGERPRINT, period: this.lastProcessedPeriod, inputDigest: this.inputDigest,
+      adaptiveInputMode: this.inputPolicy.id,
       predictionIndex: this.predictionIndex,
       test3MissStreak: this.test3MissStreak, test7MissStreak: this.test7MissStreak,
       test3MaxLoss: this.test3MaxLoss, test7MaxLoss: this.test7MaxLoss, test9MaxLoss: this.test9MaxLoss,

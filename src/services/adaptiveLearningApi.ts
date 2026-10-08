@@ -12,6 +12,13 @@ export interface AdaptiveSnapshot extends Omit<AdaptiveResult, 'history' | 'rese
   latestEvaluation: AdaptiveHistoryRow | null;
   status: 'ready';
   checkpointAt: string;
+  adaptiveInputMode: string;
+  adaptiveRequiredSignals: ['T3', 'T9'];
+  adaptiveOptionalSignals: ['T7'];
+  t7AvailableForAdaptive: boolean;
+  adaptiveBlocked: boolean;
+  adaptiveWeights: [number, number];
+  adaptiveDominantSignalIndex: 0 | 1;
   /** Adaptive replay checkpoint counters; never the independent Verified Max Loss metric. */
   test3MaxLoss: number;
   test7MaxLoss: number;
@@ -73,6 +80,10 @@ function evaluation(value: unknown): value is AdaptiveHistoryRow {
     && size(value.actual) && value.t4pred === value.adaptiveDecision && typeof value.isHit === 'boolean'
     && ['t3pred', 't7pred', 't9pred'].every((key) => optionalSize(value[key]));
 }
+function adaptiveWeights(value: unknown): value is [number, number] {
+  return Array.isArray(value) && value.length === 2 && value.every((v) => numberIn(v, 1))
+    && Math.abs(value.reduce((sum, v) => sum + v, 0) - 1) < 0.000001;
+}
 
 /** Independent metric validation; a waiting Adaptive response is not a model snapshot. */
 export function parseVerifiedMaxLoss(value: unknown): VerifiedMaxLoss {
@@ -102,6 +113,11 @@ export function parseAdaptiveSnapshot(value: unknown): AdaptiveSnapshot {
   if (value.success !== true || value.status !== 'ready' || !text(value.version)
     || !text(value.checkpointAt) || !Number.isFinite(Date.parse(value.checkpointAt))
     || !Array.isArray(value.signalLabels) || value.signalLabels.join('|') !== 'Test 3|Test 7|Test 9'
+    || value.adaptiveInputMode !== 'adaptive-t3-t9-v1'
+    || !Array.isArray(value.adaptiveRequiredSignals) || value.adaptiveRequiredSignals.join('|') !== 'T3|T9'
+    || !Array.isArray(value.adaptiveOptionalSignals) || value.adaptiveOptionalSignals.join('|') !== 'T7'
+    || typeof value.t7AvailableForAdaptive !== 'boolean' || typeof value.adaptiveBlocked !== 'boolean'
+    || !adaptiveWeights(value.adaptiveWeights) || !count(value.adaptiveDominantSignalIndex, 1)
     || !optionalSize(value.finalDecision) || !weights(value.weights)) return malformed();
 
   if (value.activePrediction !== null && !prediction(value.activePrediction)) return malformed();
@@ -133,6 +149,10 @@ export function parseAdaptiveSnapshot(value: unknown): AdaptiveSnapshot {
     activePrediction: value.activePrediction as AdaptiveSnapshot['activePrediction'],
     signals: value.signals as AdaptiveSnapshot['signals'],
     latestEvaluation: value.latestEvaluation as AdaptiveSnapshot['latestEvaluation'],
+    adaptiveInputMode: value.adaptiveInputMode,
+    adaptiveRequiredSignals: ['T3', 'T9'], adaptiveOptionalSignals: ['T7'],
+    t7AvailableForAdaptive: value.t7AvailableForAdaptive, adaptiveBlocked: value.adaptiveBlocked,
+    adaptiveWeights: value.adaptiveWeights, adaptiveDominantSignalIndex: value.adaptiveDominantSignalIndex as 0 | 1,
     weights: value.weights, dominantSignalIndex: dominantSignalIndex as number,
     totalPredictions: value.totalPredictions as number, totalHits: value.totalHits as number,
     totalMisses: value.totalMisses as number, accuracyPct: value.accuracyPct,

@@ -1,7 +1,8 @@
 import { AdaptiveLearningEngine, InputRevisionError } from './adaptive-learning.js';
+import { LEGACY_T7_REQUIRED_POLICY } from './adaptive-input-policy.js';
 
-export function replayCheckpoint(records, signals, checkpoint, log = () => {}) {
-  const candidate = new AdaptiveLearningEngine({ log });
+export function replayCheckpoint(records, signals, checkpoint, log = () => {}, inputPolicy = LEGACY_T7_REQUIRED_POLICY) {
+  const candidate = new AdaptiveLearningEngine({ log, inputPolicy });
   candidate.setSignals(signals);
   let replayedCount = 0;
   for (const record of records) {

@@ -6,6 +6,10 @@ import { AdaptiveLearningEngine } from './adaptive-learning.js';
 import { AdaptiveLearningStore } from './adaptive-learning-store.js';
 import { scheduledStartFromIssue } from './adaptive-algorithms.generated.js';
 import { validateDataset } from './validate-adaptive-learning.mjs';
+import { ADAPTIVE_INPUT_POLICY } from './adaptive-input-policy.js';
+
+// Adaptive operates in T3+T9 mode: T7 is optional and independent.
+const t3t9 = (records, signals) => validateDataset(records, signals, { inputPolicy: ADAPTIVE_INPUT_POLICY });
 
 function fixture(length = 4) {
   const records = Array.from({ length }, (_, i) => {
@@ -110,25 +114,31 @@ test('A: history → final T7 → one evaluation → atomic checkpoint → ready
     < logs.findIndex((s) => s.includes('status=evaluated')));
 });
 
-test('B/I: missing or pending T7 holds the entire tail; ingestion remains usable while waiting', async () => {
+test('B/I: missing or pending T7 never holds the tail; Adaptive progresses on T3+T9 alone', async () => {
   const { records, signals } = fixture(3);
   const active = nextPeriod(records.at(-1).issueNumber);
   const store = new MemoryStore([records[0]], []);
   const { runtime, coordinator } = session(store, active);
-  assert.equal((await coordinator.onSettledPeriod()).status, 'waiting_for_t7');
-  assert.equal(runtime.engine.predictionIndex, 0);
+  const first = await coordinator.onSettledPeriod();
+  assert.equal(first.status, 'ready', 'Missing T7 must not block Adaptive');
+  assert.equal(first.adaptiveRequiredSignals.join('|'), 'T3|T9');
+  assert.equal(first.adaptiveOptionalSignals.join('|'), 'T7');
+  assert.equal(first.t7AvailableForAdaptive, false);
+  assert.equal(first.adaptiveBlocked, false, 'T3+T9 are sufficient');
+  assert.equal(runtime.engine.predictionIndex, 1);
+  assert.equal(runtime.engine.history[0].t7pred, null, 'No fake T7 value may be invented');
   await coordinator.ingest(async () => {
     store.records.push(...records.slice(1));
     store.signals.push({ ...signals[0], status: 'pending' }, ...signals.slice(1));
   }, 't7');
-  assert.equal((await coordinator.onSettledPeriod()).pendingPeriod, records[0].issueNumber);
-  assert.equal(store.records.length, 3, 'Collector continues persisting while Adaptive waits');
-  assert.equal(store.saved.state.totalPredictions, 0);
-  await coordinator.ingest(async () => { store.signals[0] = signals[0]; activeSignal(store, active); }, 't7');
-  assert.equal((await coordinator.onSettledPeriod()).totalPredictions, 3);
+  const pending = await coordinator.onSettledPeriod();
+  assert.equal(pending.status, 'ready', 'A pending T7 row is still optional');
+  assert.equal(pending.totalPredictions, 3);
+  assert.equal(store.records.length, 3, 'Collector keeps persisting while Adaptive advances');
+  assert.equal(runtime.engine.history.every((row) => row.t7pred === null), true, 'T7 stays out of the model');
 });
 
-test('C: a complete T7 response batch is serialized; only its final value is evaluated', async () => {
+test('C: a T7 response batch is serialized and never becomes an Adaptive feature', async () => {
   const { records, signals } = fixture(1);
   const active = nextPeriod(records[0].issueNumber);
   const store = new MemoryStore(records);
@@ -147,35 +157,28 @@ test('C: a complete T7 response batch is serialized; only its final value is eva
   release();
   await ingest;
   await evaluation;
-  assert.equal(runtime.engine.history[0].t7pred, 'Big');
+  assert.equal(runtime.engine.history[0].t7pred, null, 'T7 is not an Adaptive feature');
   assert.equal(runtime.engine.predictionIndex, 1);
 });
 
-test('D: post-checkpoint revision blocks downstream and recovers the complete state safely', async () => {
+test('D: post-checkpoint T7 revisions never block or alter Adaptive', async () => {
   const { records, signals } = fixture(3);
   const active = nextPeriod(records.at(-1).issueNumber);
   const store = new MemoryStore(records.slice(0, 2), signals.slice(0, 2));
   activeSignal(store, active);
   const { runtime, coordinator, logs } = session(store, active);
   await coordinator.onSettledPeriod();
-  const before = structuredClone(store.saved.state);
+  const evaluated = structuredClone(runtime.engine.history);
   await coordinator.ingest(async () => {
-    store.signals[0] = { ...signals[0], signal: 'SMALL' };
+    store.signals[0] = { ...signals[0], signal: 'SMALL' }; // revision of an evaluated T7 row
     store.records.push(records[2]); store.signals.push(signals[2]);
   });
-  const blocked = await coordinator.onSettledPeriod();
-  assert.equal(blocked.status, 'recovery_required');
-  assert.equal(runtime.engine.history.length, 2);
-  assert.deepEqual(store.saved.state, before, 'Revision cannot silently overwrite the checkpoint');
-  const recovered = await coordinator.onSettledPeriod();
-  assert.equal(recovered.status, 'ready');
-  const reference = new AdaptiveLearningEngine();
-  reference.setSignals(store.signals);
-  records.forEach((r) => reference.settle(r)); reference.predict(active);
-  assert.deepEqual(runtime.engine.history, reference.history);
-  assert.deepEqual(recovered.weights, reference.weights);
-  assert.ok(logs.some((s) => s.includes('status=revision_detected')));
-  assert.ok(logs.some((s) => s.includes('[RECOVERY] status=completed')));
+  const advanced = await coordinator.onSettledPeriod();
+  assert.equal(advanced.status, 'ready', 'A T7 revision is not an Adaptive input');
+  assert.equal(advanced.totalPredictions, 3);
+  assert.deepEqual(runtime.engine.history.slice(0, 2), evaluated, 'Evaluated rows are immutable');
+  assert.equal(runtime.engine.history[2].t7pred, null);
+  assert.equal(logs.some((s) => s.includes('revision_detected')), false);
 });
 
 test('E: concurrent/duplicate handoffs share a flight and never advance weights/index twice', async () => {
@@ -280,7 +283,7 @@ test('failed collector writes block Adaptive until that same source retries, wit
   assert.equal((await coordinator.onSettledPeriod()).checkpointStatus, 'ingestion_pending_retry');
   unavailable = false;
   await coordinator.ingest(async () => {}, 't7');
-  assert.equal((await coordinator.onSettledPeriod()).status, 'waiting_for_t7');
+  assert.equal((await coordinator.onSettledPeriod()).status, 'ready');
 });
 
 test('a captured failed collector batch retries even when the upstream is unavailable', async () => {
@@ -298,7 +301,7 @@ test('a captured failed collector batch retries even when the upstream is unavai
   assert.equal(store.records.length, 1);
 });
 
-test('restart detects durable T7 revisions and repairs with exact full replay, preserving original audit', async () => {
+test('restart ignores durable T7 revisions and keeps every T3+T9 row exact', async () => {
   const { records, signals } = fixture(4);
   const active = nextPeriod(records.at(-1).issueNumber);
   const store = new MemoryStore(records, signals); activeSignal(store, active);
@@ -307,7 +310,7 @@ test('restart detects durable T7 revisions and repairs with exact full replay, p
   store.signals[0].signal = 'SMALL';
   const restarted = session(store, active);
   assert.equal((await restarted.coordinator.onSettledPeriod()).status, 'ready');
-  const { engine: reference } = validateDataset(records, store.signals);
+  const { engine: reference } = t3t9(records, store.signals);
   assert.deepEqual(restarted.runtime.engine.history, reference.history);
   assert.deepEqual(store.saved.state.firstPredictions, audit);
 });
@@ -322,9 +325,8 @@ test('PostgreSQL JSONB object-key reordering preserves runtime integrity, restar
   assert.equal((await restarted.coordinator.onSettledPeriod()).status, 'ready');
   assert.deepEqual(restarted.runtime.engine.current(), original.runtime.engine.current());
   store.signals[0].signal = 'SMALL';
-  assert.equal((await restarted.coordinator.onSettledPeriod()).status, 'recovery_required');
-  assert.equal((await restarted.coordinator.onSettledPeriod()).status, 'ready');
-  const { engine: reference } = validateDataset(records, store.signals);
+  assert.equal((await restarted.coordinator.onSettledPeriod()).status, 'ready', 'T7 revisions never force Adaptive recovery');
+  const { engine: reference } = t3t9(records, store.signals);
   assert.deepEqual(restarted.runtime.engine.history, reference.history);
 });
 
@@ -353,8 +355,9 @@ test('J: coordinated historical replay preserves every exact T3/T7/T9 row, weigh
   const store = new MemoryStore(records, signals); activeSignal(store, active);
   const { runtime, coordinator } = session(store, active);
   await coordinator.onSettledPeriod();
-  const { engine: reference } = validateDataset(records, store.signals);
+  const { engine: reference } = t3t9(records, store.signals);
   assert.deepEqual(runtime.engine.history, reference.history);
+  assert.equal(runtime.engine.history.every((row) => row.t7pred === null), true);
   for (const field of ['inputDigest', 'weights', 'predictionIndex', 'totalHits', 'currentHitStreak', 'currentMissStreak',
     'longestHitStreak', 'longestMissStreak', 'test3MaxLoss', 'test7MaxLoss', 'test9MaxLoss']) {
     assert.deepEqual(runtime.engine[field], reference[field], field);
@@ -365,7 +368,7 @@ test('midnight ordering advances the real 30s period format', () => {
   assert.equal(nextPeriod('20261007100052880'), '20261008100050001');
 });
 
-test('collector handoff detects evaluated revisions even behind the stored_at delta cursor', async () => {
+test('collector handoff ignores T7 revisions behind the stored_at delta cursor', async () => {
   const { records, signals } = fixture(2);
   const active = nextPeriod(records.at(-1).issueNumber);
   const store = new MemoryStore(records, signals); activeSignal(store, active);
@@ -376,11 +379,12 @@ test('collector handoff detects evaluated revisions even behind the stored_at de
   const { coordinator } = session(store, active);
   await coordinator.onSettledPeriod();
   store.signals[0] = { ...store.signals[0], signal: 'SMALL', stored_at: '2026-10-01T00:00:00Z' };
-  assert.equal((await coordinator.onSettledPeriod({ period: records[0].issueNumber })).status, 'recovery_required');
-  assert.equal((await coordinator.onSettledPeriod()).status, 'ready');
+  const body = await coordinator.onSettledPeriod({ period: records[0].issueNumber });
+  assert.equal(body.status, 'ready');
+  assert.equal(body.adaptiveBlocked, false);
 });
 
-test('an external revision during computation fails digest verification before the checkpoint is replaced', async () => {
+test('an external history revision during computation fails digest verification before the checkpoint is replaced', async () => {
   const { records, signals } = fixture(2);
   const active = nextPeriod(records.at(-1).issueNumber);
   const store = new MemoryStore([records[0]], signals); activeSignal(store, active);
@@ -391,64 +395,62 @@ test('an external revision during computation fails digest verification before t
   const settle = runtime.engine.settle.bind(runtime.engine);
   runtime.engine.settle = (record) => {
     const step = settle(record);
-    store.signals[1].signal = 'BIG';
+    store.records[1] = { ...records[1], winningNumber: (records[1].winningNumber + 1) % 10 };
     return step;
   };
   assert.equal((await coordinator.onSettledPeriod()).status, 'recovery_required');
   assert.deepEqual(store.saved.state, before);
+  store.records[1] = records[1]; // the durable value is restored, then recovery rebuilds
   assert.equal((await coordinator.onSettledPeriod()).status, 'ready');
   assert.equal(store.saved.state.totalPredictions, 2);
-  assert.equal(runtime.engine.history[1].t7pred, 'Big');
+  assert.equal(runtime.engine.history[1].period, records[1].issueNumber);
 });
 
-test('legacy late-addition recovery pauses the same full replay until its input is finalized', async () => {
+test('a legacy checkpoint is rebuilt in T3+T9 mode without waiting for T7', async () => {
   const { records, signals } = fixture(1);
   const active = nextPeriod(records[0].issueNumber);
   const store = new MemoryStore(records, [{ ...signals[0], status: 'pending', created_at: '2026-10-07T00:00:00Z' }]);
   activeSignal(store, active);
   const legacy = new AdaptiveLearningEngine(); legacy.settle(records[0]);
   store.saved = { state: legacy.checkpoint(), updatedAt: '2026-10-01T00:00:00Z' };
-  const before = structuredClone(store.saved);
-  const { runtime, coordinator } = session(store, active);
-  assert.equal((await coordinator.onSettledPeriod()).status, 'waiting_for_t7');
-  assert.deepEqual(store.saved, before);
-  store.signals[0].status = 'win';
+  const { runtime, coordinator, logs } = session(store, active);
   assert.equal((await coordinator.onSettledPeriod()).status, 'ready');
-  assert.equal(runtime.engine.history[0].t7pred, 'Big');
+  assert.equal(runtime.engine.history.length, 1);
+  assert.equal(runtime.engine.history[0].t7pred, null);
+  assert.ok(logs.some((line) => line.includes('incompatible mode=legacy')));
 });
 
-test('exact durable T7 verification cannot be satisfied by a stale cached signal', async () => {
+test('a missing durable T7 row is optional and never blocks Adaptive', async () => {
   const { records, signals } = fixture(1);
   const active = nextPeriod(records[0].issueNumber);
   const store = new MemoryStore(records, signals); activeSignal(store, active);
   store.periodInputs = async () => ({ record: records[0], signal: null });
   const { runtime, coordinator } = session(store, active);
-  assert.equal((await coordinator.onSettledPeriod()).status, 'waiting_for_t7');
-  assert.equal(runtime.engine.predictionIndex, 0);
+  const body = await coordinator.onSettledPeriod();
+  assert.equal(body.status, 'ready');
+  assert.equal(body.t7AvailableForAdaptive, false);
+  assert.equal(runtime.engine.predictionIndex, 1);
 });
 
-test('live-log reproduction: legacy checkpoint mismatch must not start startup recovery on every T7 backfill', async () => {
+test('a legacy checkpoint rebuilds in T3+T9 mode and never restarts for T7 backfill', async () => {
   const { records, signals } = fixture(65);
   const active = nextPeriod(records.at(-1).issueNumber);
   const legacy = new AdaptiveLearningEngine();
   legacy.setSignals(signals.slice(0, 5));
   records.forEach((record) => legacy.settle(record));
-  // Backfilled rows have old source timestamps: the timestamp-only late-addition
-  // proof used in the Windows log cannot classify this otherwise valid dataset.
   const store = new MemoryStore(records, signals.slice(0, 10));
   store.saved = { state: legacy.checkpoint(), updatedAt: '2026-10-08T00:00:00Z' };
   const { coordinator, logs } = session(store, active);
   const first = await coordinator.onSettledPeriod();
-  assert.equal(first.status, 'waiting_for_t7', logs.join('\n'));
+  assert.equal(first.status, 'ready', logs.join('\n'));
+  assert.equal(first.totalPredictions, 65);
   for (let offset = 10; offset < signals.length; offset += 10) {
     await coordinator.ingest(async () => { store.signals.push(...signals.slice(offset, offset + 10)); }, 't7');
     await coordinator.onSettledPeriod({ periods: signals.slice(offset, offset + 10).map((s) => s.period_id) });
   }
-  assert.equal(logs.filter((line) => line.includes('[RECOVERY] status=started')).length, 1,
-    'Historical backfill must continue the original recovery, not restart startup');
+  assert.equal(logs.filter((line) => line.includes('[RECOVERY] status=started')).length, 0,
+    'Adaptive never waits on the T7 queue');
   assert.equal(store.saved.state.totalPredictions, 65);
-  assert.equal(store.reads.filter((cursor) => cursor === null).length, 2,
-    'Backfill readiness polling must not fetch full history after initial boundary capture');
 });
 
 function latch() {
@@ -457,115 +459,94 @@ function latch() {
   return { promise, resolve };
 }
 
-test('60 historical T7 arrivals during recovery continue one frozen replay; accumulated new periods run after promotion', { timeout: 20_000 }, async () => {
+test('T7 backfill during a restart suffix replay never restarts it; accumulated periods run after promotion', { timeout: 20_000 }, async () => {
   const { records, signals } = fixture(130);
   const active = nextPeriod(records.at(-1).issueNumber);
-  const legacy = new AdaptiveLearningEngine();
-  legacy.setSignals(signals.slice(0, 5));
-  records.slice(0, 70).forEach((record) => legacy.settle(record));
   const store = new MemoryStore(records.slice(0, 70), signals.slice(0, 10));
   activeSignal(store, active);
-  store.saved = { state: legacy.checkpoint(), updatedAt: '2026-10-08T00:00:00Z' };
+  await session(store, active).coordinator.onSettledPeriod();
+  store.records.push(...records.slice(70)); // durable but unevaluated suffix
   const durableBefore = structuredClone(store.saved);
   const entered = latch(); const release = latch();
-  const replayed = []; const logs = []; const states = [];
+  const replayed = []; const logs = [];
   const runtime = new AdaptiveRuntime(store, {
     currentIssue: async () => active, log: (line) => logs.push(line),
     replayYield: async ({ period }) => {
       replayed.push(period);
-      if (period === records[4].issueNumber) { entered.resolve(); await release.promise; }
+      if (period === records[71].issueNumber) { entered.resolve(); await release.promise; }
     },
   });
-  const coordinator = new AdaptiveCoordinator(runtime, { onState: (body) => states.push(structuredClone(body)) });
+  const coordinator = new AdaptiveCoordinator(runtime);
   const recovery = coordinator.onSettledPeriod();
   await entered.promise;
   assert.equal(runtime.phase, 'recovering');
-  assert.equal(coordinator.body.status, 'recovering');
   assert.equal(runtime.engine, null, 'A private recovery candidate must not become the active engine');
   const recoveryId = runtime.recoverySession.id;
-  await coordinator.ingest(async () => {
-    store.signals.push(...signals.slice(10, 70)); // 60 late historical signals
-    store.records.push(...records.slice(70));
-    store.signals.push(...signals.slice(70));
-  }, 't7');
-  assert.equal(store.records.length, 130, 'Collector must commit while the replay is paused');
+  await coordinator.ingest(async () => { store.signals.push(...signals.slice(10, 70)); }, 't7');
   for (let i = 10; i < 70; i++) {
     assert.equal(coordinator.onSettledPeriod({ period: records[i].issueNumber }), recovery);
   }
   assert.equal(runtime.runRecovery(), runtime.recoveryPromise, 'Runtime recovery itself must also be single-flight');
-  assert.equal(runtime.recoverySession.boundary.highWater, records[69].issueNumber);
+  assert.equal(runtime.recoverySession.boundary.highWater, records[129].issueNumber);
   assert.equal(runtime.recoverySession.boundary.stored.signals.some((s) => s.period_id === records[10].issueNumber), false,
     'Backfill must not mutate the captured snapshot');
   assert.deepEqual(store.saved, durableBefore);
   release.resolve();
-  const waiting = await recovery;
-  assert.equal(waiting.status, 'waiting_for_t7');
-  assert.equal(waiting.pendingPeriod, records[10].issueNumber, 'First incomplete snapshot predecessor must hold replay');
-  assert.equal(store.writes.length, 0, 'No partial/regressive recovery checkpoint');
-  assert.equal(runtime.recoverySession.id, recoveryId);
-  const completed = await coordinator.onSettledPeriod();
+  const completed = await recovery;
   assert.equal(completed.status, 'ready');
   assert.equal(completed.totalPredictions, 130);
   assert.equal(logs.filter((line) => line.includes('[RECOVERY] status=started')).length, 1);
   assert.equal(logs.filter((line) => line.includes('[RECOVERY] status=completed')).length, 1);
-  assert.deepEqual(replayed, records.slice(0, 70).map((r) => r.issueNumber), 'Previously replayed rows cannot replay on backfill');
+  assert.deepEqual(replayed, records.slice(70).map((r) => r.issueNumber), 'The frozen replay covers the durable suffix once');
   const recoveryWrites = logs.filter((line) => line.startsWith('[CHECKPOINT]') && line.includes('recovery_id='));
   assert.equal(recoveryWrites.length, 1);
-  assert.match(recoveryWrites[0], new RegExp(`period=${records[69].issueNumber}`));
-  const promoted = states.find((body) => body.adaptiveState === 'ready' && body.totalPredictions === 70);
-  assert.ok(promoted, 'The original finalized boundary must be promoted before catch-up');
-  const settledCheckpoints = store.writes.filter((state) => state.activePrediction === null);
-  assert.equal(new Set(settledCheckpoints.map((state) => state.period)).size, settledCheckpoints.length);
+  assert.equal(runtime.recoverySession, null);
   assert.equal(store.saved.state.predictionIndex, 130);
-  assert.equal(store.reads.filter((cursor) => cursor === null).length, 2,
-    'Paused recovery refreshes only incremental history and required signal IDs');
-  const { engine: reference } = validateDataset(records, signals);
+  const { engine: reference } = t3t9(records, signals);
   assert.deepEqual(runtime.engine.history, reference.history);
   for (const field of ['weights', 'inputDigest', 'test3MaxLoss', 'test7MaxLoss', 'test9MaxLoss', 'totalHits', 'longestMissStreak']) {
     assert.deepEqual(runtime.engine[field], reference[field], field);
   }
+  assert.equal(logs.filter((line) => line.includes(`recovery_id=${recoveryId}`)).length > 0, true);
 });
 
-test('new data during an already finalized replay never restarts it and catches up after the one recovery checkpoint', { timeout: 20_000 }, async () => {
+test('new data during a suffix replay never restarts it and catches up after the one recovery checkpoint', { timeout: 20_000 }, async () => {
   const { records, signals } = fixture(125);
   const active = nextPeriod(records.at(-1).issueNumber);
-  const store = new MemoryStore(records.slice(0, 65), signals.slice(0, 65));
+  const store = new MemoryStore(records.slice(0, 60), signals.slice(0, 60));
   activeSignal(store, active);
   await session(store, active).coordinator.onSettledPeriod();
-  store.signals[0].signal = 'SMALL';
+  store.records.push(...records.slice(60, 65));
+  store.signals.push(...signals.slice(60, 65));
   const entered = latch(); const release = latch(); const logs = []; const replayed = [];
   const runtime = new AdaptiveRuntime(store, { currentIssue: async () => active, log: (line) => logs.push(line),
     replayYield: async ({ period }) => {
       replayed.push(period);
-      if (period === records[2].issueNumber) { entered.resolve(); await release.promise; }
+      if (period === records[61].issueNumber) { entered.resolve(); await release.promise; }
     } });
   const coordinator = new AdaptiveCoordinator(runtime);
   const flight = coordinator.onSettledPeriod();
   await entered.promise;
-  assert.equal(runtime.recoverySession.earliestAffectedPeriod, records[0].issueNumber);
   await coordinator.ingest(async () => { store.records.push(...records.slice(65)); store.signals.push(...signals.slice(65)); }, 'history');
   for (const row of records.slice(65)) assert.equal(coordinator.onSettledPeriod({ period: row.issueNumber }), flight);
-  assert.equal(store.saved.state.totalPredictions, 65);
+  assert.equal(store.saved.state.totalPredictions, 60);
   release.resolve();
   const body = await flight;
   assert.equal(body.totalPredictions, 125);
   assert.equal(logs.filter((line) => line.includes('[RECOVERY] status=started')).length, 1);
   assert.equal(logs.filter((line) => line.startsWith('[CHECKPOINT]') && line.includes('recovery_id=')).length, 1);
-  assert.deepEqual(replayed, records.slice(0, 65).map((row) => row.issueNumber));
-  const reference = new AdaptiveLearningEngine(); reference.setSignals(store.signals);
-  records.forEach((record) => reference.settle(record));
+  assert.deepEqual(replayed, records.slice(60, 65).map((row) => row.issueNumber));
+  const { engine: reference } = t3t9(records, signals);
   assert.deepEqual(runtime.engine.history, reference.history);
 });
 
 test('failed recovery checkpoint preserves active state and retries the same candidate without replay or duplicate durable write', async () => {
-  const { records, signals } = fixture(8);
+  const { records, signals } = fixture(9);
   const active = nextPeriod(records.at(-1).issueNumber);
-  const store = new MemoryStore(records, signals); activeSignal(store, active);
+  const store = new MemoryStore(records.slice(0, 8), signals.slice(0, 8)); activeSignal(store, active);
+  await session(store, active).coordinator.onSettledPeriod();
+  store.records.push(records[8]); store.signals.push(signals[8]); // durable unevaluated suffix
   const { runtime, coordinator, logs } = session(store, active);
-  await coordinator.onSettledPeriod();
-  const previousEngine = runtime.engine;
-  store.signals[0].signal = 'SMALL';
-  await coordinator.onSettledPeriod(); // revision detection
   const save = store.saveCheckpoint.bind(store); let acknowledgementLost = true;
   store.saveCheckpoint = async (state) => {
     await save(state);
@@ -573,7 +554,7 @@ test('failed recovery checkpoint preserves active state and retries the same can
   };
   const writesBefore = store.writes.length;
   assert.equal((await coordinator.onSettledPeriod()).status, 'recovering');
-  assert.equal(runtime.engine, previousEngine, 'Promotion must wait for verified persistence');
+  assert.equal(runtime.engine, null, 'Promotion must wait for verified persistence');
   const candidate = runtime.recoverySession.candidate;
   const recoveryId = runtime.recoverySession.id;
   assert.equal((await coordinator.onSettledPeriod()).status, 'ready');
@@ -586,13 +567,14 @@ test('failed recovery checkpoint preserves active state and retries the same can
 test('a changing durable capture is rejected before replay, then one stable recovery starts', async () => {
   const { records, signals } = fixture(4);
   const active = nextPeriod(records.at(-1).issueNumber);
-  const store = new MemoryStore(records, signals); activeSignal(store, active);
+  const store = new MemoryStore(records.slice(0, 3), signals.slice(0, 3)); activeSignal(store, active);
   await session(store, active).coordinator.onSettledPeriod();
+  store.records.push(records[3]); store.signals.push(signals[3]); // durable unevaluated suffix
   const saved = structuredClone(store.saved);
-  const read = store.signalsSince.bind(store); let externalWrite = true;
-  store.signalsSince = async (...args) => {
+  const read = store.historyAfter.bind(store); let externalWrite = true;
+  store.historyAfter = async (...args) => {
     const result = await read(...args);
-    if (externalWrite) { externalWrite = false; store.signals[0].signal = 'SMALL'; }
+    if (externalWrite) { externalWrite = false; store.records[3] = { ...records[3], createdAt: '2026-01-01T00:00:00.000Z' }; }
     return result;
   };
   const { runtime, coordinator, logs } = session(store, active);
@@ -600,6 +582,7 @@ test('a changing durable capture is rejected before replay, then one stable reco
   assert.equal(runtime.recoverySession, null);
   assert.deepEqual(store.saved, saved);
   assert.equal(logs.filter((line) => line.includes('status=started')).length, 0);
+  store.records[3] = records[3]; // the durable boundary is stable again
   assert.equal((await coordinator.onSettledPeriod()).status, 'ready');
   assert.equal(logs.filter((line) => line.includes('status=started')).length, 1);
 });
@@ -622,216 +605,94 @@ test('recovery_failed is latched: repeated polling/backfill cannot restart corru
   assert.equal(logs.filter((line) => line.includes('status=started')).length, 0);
 });
 
-test('blocked recovery ignores unrelated T7 backfill and resumes only when the exact replay cursor is finalized', async () => {
+test('recovery is unaffected by unrelated T7 backfill and completes on durable history', async () => {
   const { records, signals } = fixture(15);
   const active = nextPeriod(records.at(-1).issueNumber);
-  const legacy = new AdaptiveLearningEngine();
-  legacy.setSignals(signals.slice(0, 5));
-  records.forEach((record) => legacy.settle(record));
-  const store = new MemoryStore(records, signals.slice(0, 10));
+  const store = new MemoryStore(records.slice(0, 10), signals.slice(0, 10));
   activeSignal(store, active);
-  store.saved = { state: legacy.checkpoint(), updatedAt: '2026-10-08T00:00:00Z' };
-  const logs = []; const { coordinator } = (() => {
-    const runtime = new AdaptiveRuntime(store, { currentIssue: async () => active, log: (line) => logs.push(line) });
-    return { runtime, coordinator: new AdaptiveCoordinator(runtime) };
-  })();
-  const first = await coordinator.onSettledPeriod();
-  assert.equal(first.status, 'waiting_for_t7', logs.join('\\n'));
-  const cursor = first.replayCursor;
-  const processed = first.replayProcessed;
-  assert.equal(cursor, records[10].issueNumber);
-  assert.equal(processed, 10);
-  const resumedBefore = logs.filter((line) => line.includes('status=resumed')).length;
-  for (let i = 0; i < 50; i++) {
-    store.signals.push({ ...signals[14], period_id: `${signals[14].period_id}${i}`, status: 'win' });
-    const waiting = await coordinator.onSettledPeriod({ period: records[i % 10].issueNumber });
-    assert.equal(waiting.status, 'waiting_for_t7');
-    assert.equal(waiting.replayCursor, cursor);
-    assert.equal(waiting.replayProcessed, processed);
-  }
-  assert.equal(logs.filter((line) => line.includes('status=resumed')).length, resumedBefore);
-  store.signals.push(signals[10]);
-  const next = await coordinator.onSettledPeriod({ period: records[10].issueNumber });
-  assert.equal(next.status, 'waiting_for_t7');
-  assert.equal(next.replayCursor, records[11].issueNumber);
-  assert.ok(next.replayProcessed > processed);
-  assert.equal(logs.filter((line) => line.includes('status=resumed')).length, resumedBefore + 1);
-  for (let i = 11; i < records.length; i++) store.signals.push(signals[i]);
-  const ready = await coordinator.onSettledPeriod({ periods: records.slice(11).map((record) => record.issueNumber) });
+  await session(store, active).coordinator.onSettledPeriod();
+  store.records.push(...records.slice(10)); // durable unevaluated suffix
+  const logs = [];
+  const runtime = new AdaptiveRuntime(store, { currentIssue: async () => active, log: (line) => logs.push(line) });
+  const coordinator = new AdaptiveCoordinator(runtime);
+  for (let i = 0; i < 20; i++) store.signals.push({ ...signals[14], period_id: `${signals[14].period_id}${i}`, status: 'win' });
+  const ready = await coordinator.onSettledPeriod({ periods: records.slice(10).map((record) => record.issueNumber) });
   assert.equal(ready.status, 'ready');
   assert.equal(ready.totalPredictions, records.length);
   assert.equal(logs.filter((line) => line.includes('status=started')).length, 1);
   assert.equal(logs.filter((line) => line.includes('status=completed')).length, 1);
 });
 
-test('resume remains waiting when durable probe sees T7 but the captured replay snapshot omits it', async () => {
-  const { records, signals } = fixture(3);
-  const active = nextPeriod(records.at(-1).issueNumber);
-  const legacy = new AdaptiveLearningEngine();
-  legacy.setSignals([signals[0]]);
-  records.forEach((record) => legacy.settle(record));
-  const store = new MemoryStore(records, []);
-  activeSignal(store, active);
-  store.saved = { state: legacy.checkpoint(), updatedAt: '2026-10-08T00:00:00Z' };
-  const logs = [];
-  const runtime = new AdaptiveRuntime(store, { currentIssue: async () => active, log: (line) => logs.push(line) });
-  const coordinator = new AdaptiveCoordinator(runtime);
-  const originalPeriodInputs = store.periodInputs.bind(store);
-  let exposeAtProbe = false;
-  store.periodInputs = async (period) => exposeAtProbe && period === records[0].issueNumber
-    ? { record: records[0], signal: signals[0] } : originalPeriodInputs(period);
-  let exposeInSnapshot = false;
-  store.signalsSince = async (...args) => exposeInSnapshot
-    ? { signals: structuredClone(store.signals), through: '2026-10-08T00:00:00Z', args }
-    : { signals: [], through: null, args };
 
-  const first = await coordinator.onSettledPeriod();
-  assert.equal(first.status, 'waiting_for_t7', logs.join('\\n'));
-  assert.equal(first.replayProcessed, 0);
-  exposeAtProbe = true;
-  const transient = await coordinator.onSettledPeriod({ period: records[0].issueNumber });
-  assert.equal(transient.status, 'waiting_for_t7', logs.join('\n'));
-  assert.equal(transient.replayProcessed, 0);
-  assert.equal(logs.filter((line) => line.includes('phase=resume_probe status=rejected')).length, 0);
-  assert.equal(logs.filter((line) => line.includes('status=resumed')).length, 0);
-  assert.equal(logs.filter((line) => line.includes('phase=replay_blocked')).length, 1,
-    'Only the initial missing-input replay block should exist');
-  assert.ok(logs.some((line) => line.includes('phase=resume_probe_snapshot_mismatch') && line.includes('reason=missing_signal')));
-  assert.ok(logs.some((line) => line.includes('phase=resume_probe') && line.includes('finalized":true')));
-  exposeInSnapshot = true;
-  store.signals.push(signals[0]);
-  for (let i = 1; i < records.length; i++) store.signals.push(signals[i]);
-  const ready = await coordinator.onSettledPeriod({ periods: records.map((record) => record.issueNumber) });
+
+test('a missing history predecessor pauses evaluation and resumes when it is persisted', async () => {
+  const { records, signals } = fixture(6);
+  const active = nextPeriod(records.at(-1).issueNumber);
+  const store = new MemoryStore(records.slice(0, 3), signals.slice(0, 3));
+  activeSignal(store, active);
+  const { runtime, coordinator } = session(store, active);
+  await coordinator.onSettledPeriod();
+  assert.equal(runtime.engine.predictionIndex, 3);
+  await coordinator.ingest(async () => {
+    store.records.push(records[4], records[5]);
+    store.signals.push(signals[4], signals[5]);
+  }, 'history');
+  const waiting = await coordinator.onSettledPeriod({ periods: [records[4].issueNumber, records[5].issueNumber] });
+  assert.equal(waiting.status, 'waiting_for_history');
+  assert.equal(waiting.pendingPeriod, records[3].issueNumber);
+  assert.equal(waiting.adaptiveBlocked, true, 'A missing actual outcome remains an explicit boundary');
+  assert.equal(runtime.engine.predictionIndex, 3);
+  await coordinator.ingest(async () => { store.records.push(records[3]); store.signals.push(signals[3]); }, 'history');
+  const ready = await coordinator.onSettledPeriod({ period: records[3].issueNumber });
   assert.equal(ready.status, 'ready');
-  assert.equal(ready.totalPredictions, records.length);
-  assert.equal(logs.filter((line) => line.includes('status=resumed')).length, 1);
+  assert.equal(runtime.engine.history.length, 6);
+  assert.deepEqual(runtime.engine.records.map((row) => row.issueNumber), records.map((row) => row.issueNumber));
 });
 
-test('a verified resume snapshot is the exact snapshot consumed by replay', async () => {
-  const { records, signals } = fixture(4);
-  const active = nextPeriod(records.at(-1).issueNumber);
-  const legacy = new AdaptiveLearningEngine();
-  legacy.setSignals([signals[0]]);
-  records.forEach((record) => legacy.settle(record));
-  const store = new MemoryStore(records, []);
-  activeSignal(store, active);
-  store.saved = { state: legacy.checkpoint(), updatedAt: '2026-10-08T00:00:00Z' };
-  const logs = [];
-  const runtime = new AdaptiveRuntime(store, { currentIssue: async () => active, log: (line) => logs.push(line) });
-  const coordinator = new AdaptiveCoordinator(runtime);
-  let snapshotReady = false;
-  store.periodInputs = async (period) => period === records[1].issueNumber
-    ? { record: records[1], signal: signals[1] }
-    : { record: store.records.find((record) => record.issueNumber === period) ?? null,
-      signal: null };
-  store.signalsSince = async () => ({
-    signals: snapshotReady ? [...signals, ...store.signals] : [signals[0], signals[2], store.signals.find((signal) => signal.period_id === active)],
-    through: '2026-10-08T00:00:00Z',
-  });
-  const waiting = await coordinator.onSettledPeriod();
-  assert.equal(waiting.status, 'waiting_for_t7');
-  assert.equal(waiting.pendingPeriod, records[1].issueNumber);
-  snapshotReady = true;
-  const result = await coordinator.onSettledPeriod();
-  assert.equal(result.status, 'ready');
-  assert.equal(runtime.engine.history.length, records.length);
-  const probe = logs.find((line) => line.includes('phase=resume_probe pendingPeriod='));
-  const replayInput = logs.find((line) => line.includes(`phase=replay_input period=${records[0].issueNumber}`));
-  assert.ok(probe, 'resume probe diagnostics should be recorded');
-  assert.ok(replayInput, 'replay input diagnostics should be recorded');
-  assert.match(probe, /"finalized":true/);
-  assert.match(replayInput, /"finalized":true/);
-  assert.equal(logs.filter((line) => line.includes('phase=resume_probe_snapshot_mismatch')).length, 0);
-  assert.equal(logs.filter((line) => line.includes('status=resumed')).length, 1);
-});
-
-test('new baseline starts at the first strict finalized T7 period after the permanent gap', async () => {
-  const { records: tail } = fixture(5);
-  const before = tail.map((record, index) => ({ ...record, issueNumber: String(20261002100050851n + BigInt(index)) }));
+test('new baseline starts at the first period after the excluded gap without requiring T7', async () => {
+  const { records } = fixture(5);
+  const before = records.map((record, index) => ({ ...record, issueNumber: String(20261002100050851n + BigInt(index)) }));
   const start = { ...before[0], issueNumber: '20261002100050860' };
-  const records = [start, ...before.slice(1).map((record, index) => ({ ...record, issueNumber: String(20261002100050861n + BigInt(index)) }))];
-  const signals = records.map((record) => strictSignal(record));
-  const active = nextPeriod(records.at(-1).issueNumber);
-  const store = new BaselineMemoryStore(records, [...signals, { period_id: active, signal: 'BIG', status: 'pending' }]);
+  const shifted = [start, ...before.slice(1).map((record, index) => ({ ...record, issueNumber: String(20261002100050861n + BigInt(index)) }))];
+  const signals = shifted.map((record) => strictSignal(record));
+  const active = nextPeriod(shifted.at(-1).issueNumber);
+  const store = new BaselineMemoryStore(shifted, [...signals, { period_id: active, signal: 'BIG', status: 'pending' }]);
   const { runtime, coordinator, logs } = session(store, active);
   const body = await coordinator.onSettledPeriod();
   assert.equal(body.status, 'ready');
   assert.equal(body.baselineStartPeriod, start.issueNumber);
-  assert.equal(body.baselinePeriodsIncluded, records.length);
-  assert.equal(body.baselineReason, 'previous recovery contained an unrecoverable missing historical T7 input');
+  assert.equal(body.baselinePeriodsIncluded, shifted.length);
+  assert.equal(body.baselineReason, 'Adaptive T3+T9 mode; T7 is optional and independent');
   assert.equal(runtime.engine.records[0].issueNumber, start.issueNumber);
   assert.equal(store.legacyCheckpoint, null, 'The old checkpoint remains separate and untouched');
   assert.equal(store.baseline.state.baseline.baselineStartPeriod, start.issueNumber);
-  assert.equal(store.baseline.state.baseline.periodsIncluded, records.length);
+  assert.equal(store.baseline.state.adaptiveRequiredSignals.join('|'), 'T3|T9');
+  assert.equal(store.baseline.state.adaptiveOptionalSignals.join('|'), 'T7');
   assert.ok(logs.some((line) => line.includes('[ADAPTIVE] baseline initialization started')));
   assert.ok(logs.some((line) => line.includes('[ADAPTIVE] baseline checkpoint not_found')));
   assert.ok(logs.some((line) => line.includes('[ADAPTIVE] baseline candidate selected')));
-  assert.ok(logs.some((line) => line.includes('[ADAPTIVE] baseline checkpoint persisted')));
-  assert.ok(logs.some((line) => line.includes('[ADAPTIVE] baseline initialization completed')));
 });
 
-test('baseline waits for a future missing T7 and resumes after the exact finalized signal arrives', async () => {
-  const { records } = fixture(3);
+test('baseline progresses on T3+T9 while T7 is missing and never waits for it', async () => {
+  const { records } = fixture(4);
   const active = nextPeriod(records.at(-1).issueNumber);
-  const store = new BaselineMemoryStore(records.slice(0, 2), [strictSignal(records[0]), strictSignal(records[1])]);
+  const store = new BaselineMemoryStore(records.slice(0, 2), [strictSignal(records[0])]);
   store.signals.push({ period_id: active, signal: 'BIG', status: 'pending' });
   const { runtime, coordinator } = session(store, active);
-  assert.equal((await coordinator.onSettledPeriod()).status, 'ready');
+  const first = await coordinator.onSettledPeriod();
+  assert.equal(first.status, 'ready');
+  assert.equal(first.baselinePeriodsIncluded, 2);
   store.records.push(records[2]);
-  const waiting = await coordinator.onSettledPeriod({ period: records[2].issueNumber });
-  assert.equal(waiting.status, 'waiting_for_t7');
-  assert.equal(waiting.adaptiveCursor, records[1].issueNumber);
-  assert.equal(runtime.engine.records.at(-1).issueNumber, records[1].issueNumber);
-  store.signals.push(strictSignal(records[2]));
-  const ready = await coordinator.onSettledPeriod({ period: records[2].issueNumber });
-  assert.equal(ready.status, 'ready');
-  assert.equal(ready.adaptiveCursor, records[2].issueNumber);
+  const next = await coordinator.onSettledPeriod({ period: records[2].issueNumber });
+  assert.equal(next.status, 'ready', 'A missing T7 row cannot hold the baseline cursor');
+  assert.equal(next.adaptiveCursor, records[2].issueNumber);
+  assert.equal(runtime.engine.history.every((row) => row.t7pred === null), true);
 });
 
-test('baseline handles result-before-T7 and T7-before-result without future-result leakage', async () => {
-  const { records } = fixture(3);
-  const active = nextPeriod(records.at(-1).issueNumber);
-  const store = new BaselineMemoryStore([records[0]], [strictSignal(records[0])]);
-  store.signals.push({ period_id: active, signal: 'BIG', status: 'pending' });
-  const { runtime, coordinator } = session(store, active);
-  await coordinator.onSettledPeriod();
-  store.records.push(records[1]); // result arrives before its T7
-  const waiting = await coordinator.onSettledPeriod({ period: records[1].issueNumber });
-  assert.equal(waiting.status, 'waiting_for_t7');
-  assert.equal(runtime.engine.history.length, 1);
-  store.signals.push(strictSignal(records[2])); // T7 arrives before its result
-  store.records.push(records[2]);
-  assert.equal((await coordinator.onSettledPeriod({ period: records[2].issueNumber })).status, 'waiting_for_t7');
-  assert.equal(runtime.engine.history.length, 1);
-  store.signals.push(strictSignal(records[1]));
-  const ready = await coordinator.onSettledPeriod({ periods: [records[1].issueNumber, records[2].issueNumber] });
-  assert.equal(ready.status, 'ready');
-  assert.equal(runtime.engine.history.length, 3);
-  assert.deepEqual(runtime.engine.records.map((record) => record.issueNumber), records.map((record) => record.issueNumber));
-});
-
-test('baseline restart while T7 is pending restores the active baseline without using the retired checkpoint', async () => {
-  const { records } = fixture(3);
-  const active = nextPeriod(records[1].issueNumber);
-  const store = new BaselineMemoryStore(records.slice(0, 2), [strictSignal(records[0]), strictSignal(records[1])]);
-  store.signals.push({ period_id: active, signal: 'BIG', status: 'pending' });
-  const first = session(store, active);
-  await first.coordinator.onSettledPeriod();
-  store.records.push(records[2]);
-  assert.equal((await first.coordinator.onSettledPeriod()).status, 'waiting_for_t7');
-  const restarted = session(store, active);
-  const pending = await restarted.coordinator.onSettledPeriod();
-  assert.equal(pending.status, 'waiting_for_t7');
-  assert.equal(pending.baselineId, first.runtime.baseline.baselineId);
-  assert.equal(pending.adaptiveCursor, records[1].issueNumber);
-  assert.equal(restarted.runtime.engine.history.length, 2);
-});
-
-test('duplicate finalized T7 is idempotent, while a conflicting finalized value blocks the baseline', async () => {
+test('duplicate or conflicting T7 rows never affect the baseline', async () => {
   const { records } = fixture(2);
   const active = nextPeriod(records.at(-1).issueNumber);
-  const store = new BaselineMemoryStore(records, [...records.map((record) => strictSignal(record)),
-    { period_id: active, signal: 'BIG', status: 'pending' }]);
+  const store = new BaselineMemoryStore(records, [...records.map((record) => strictSignal(record)), { period_id: active, signal: 'BIG', status: 'pending' }]);
   const { runtime, coordinator } = session(store, active);
   const ready = await coordinator.onSettledPeriod();
   assert.equal(ready.status, 'ready');
@@ -839,12 +700,12 @@ test('duplicate finalized T7 is idempotent, while a conflicting finalized value 
   store.signals.push(structuredClone(store.signals[index]));
   assert.equal((await coordinator.onSettledPeriod({ period: records[0].issueNumber })).status, 'ready');
   store.signals[index] = { ...store.signals[index], signal: store.signals[index].signal === 'BIG' ? 'SMALL' : 'BIG' };
-  const blocked = await coordinator.onSettledPeriod({ period: records[0].issueNumber });
-  assert.equal(blocked.adaptiveState, 'recovery_failed');
+  const conflicted = await coordinator.onSettledPeriod({ period: records[0].issueNumber });
+  assert.equal(conflicted.status, 'ready', 'T7 conflicts are a separate T7 concern, not an Adaptive blocker');
   assert.equal(runtime.engine.history.length, records.length);
 });
 
-test('baseline checkpoint metadata and exact replay remain stable across a clean restart with no future-result leakage', async () => {
+test('baseline checkpoint metadata and exact replay remain stable across a clean restart', async () => {
   const { records } = fixture(6);
   const active = nextPeriod(records.at(-1).issueNumber);
   const signals = records.map((record) => strictSignal(record));
@@ -853,13 +714,11 @@ test('baseline checkpoint metadata and exact replay remain stable across a clean
   const ready = await first.coordinator.onSettledPeriod();
   assert.equal(ready.status, 'ready');
   const metadata = structuredClone(store.baseline.state.baseline);
-  const checkpoint = structuredClone(store.baseline.state);
   const restarted = session(store, active);
   const restored = await restarted.coordinator.onSettledPeriod();
   assert.equal(restored.status, 'ready');
   assert.deepEqual(store.baseline.state.baseline, metadata);
   assert.deepEqual(restarted.runtime.engine.history, first.runtime.engine.history);
   assert.equal(restarted.runtime.engine.history.some((row) => row.period === active), false);
-  assert.equal(store.baseline.state.period, checkpoint.period);
   assert.equal(restored.baselinePeriodsIncluded, records.length);
 });

@@ -151,7 +151,12 @@ const AdaptiveLearningPanelContent: React.FC<Props & { serverState: AdaptiveApiS
     finalDecision,
     activePrediction,
     signals,
-    signalLabels: SIGNAL_LABELS,
+    adaptiveRequiredSignals,
+    adaptiveOptionalSignals,
+    t7AvailableForAdaptive,
+    adaptiveBlocked,
+    adaptiveWeights,
+    adaptiveDominantSignalIndex,
     totalPredictions,
     totalHits,
     totalMisses,
@@ -160,8 +165,6 @@ const AdaptiveLearningPanelContent: React.FC<Props & { serverState: AdaptiveApiS
     currentMissStreak,
     longestHitStreak,
     longestMissStreak,
-    weights,
-    dominantSignalIndex,
     last20,
     last50,
     last100,
@@ -175,6 +178,7 @@ const AdaptiveLearningPanelContent: React.FC<Props & { serverState: AdaptiveApiS
   const currentPeriod = activePrediction?.period ?? lastRow?.period;
   const currentVote = activePrediction ?? lastRow;
   const live = status === 'ready';
+  const requiredSignalLabels = adaptiveRequiredSignals.map((signal) => signal.replace('T', 'Test '));
 
   const diff = accuracyPct - 50;
   const diffStr = diff >= 0 ? `+${diff.toFixed(1)}pp` : `${diff.toFixed(1)}pp`;
@@ -182,6 +186,11 @@ const AdaptiveLearningPanelContent: React.FC<Props & { serverState: AdaptiveApiS
   return (
     <div className="space-y-5">
       <AdaptiveCheckpointMaxLoss data={data} />
+      <div role="status" className="p-3 rounded-xl bg-[#06130F] border border-[#1E3A2B] text-xs font-mono text-[#8D9B95]">
+        <span className="text-[#35B978] font-bold">Adaptive = T3 + T9.</span>{' '}
+        T7 is an independent signal and metric. Missing T7 does not block Adaptive.
+        <span className="block mt-1">Optional: {adaptiveOptionalSignals.join(', ')} · T7 available for Adaptive: {t7AvailableForAdaptive ? 'yes' : 'no'} · blocked: {adaptiveBlocked ? 'yes' : 'no'}</span>
+      </div>
       <div role="status" aria-live="polite" className={`p-3 rounded-xl border text-xs font-mono ${live ? 'border-[#1E3A2B] text-[#8D9B95]' : 'border-[#E7B93F]/50 text-[#E7B93F]'}`}>
         {error ? `${error} Showing the last known server snapshot; retrying automatically.`
           : stale ? 'Server checkpoint is stale or its clock is out of sync. Showing the last known snapshot.'
@@ -205,10 +214,10 @@ const AdaptiveLearningPanelContent: React.FC<Props & { serverState: AdaptiveApiS
               </span>
             </div>
             <div className="flex items-center gap-2 text-xs font-mono">
-              <span className="text-[10px] text-[#8D9B95] uppercase">{SIGNAL_LABELS.length} Signals Active:</span>
-              <span className="text-[#F5F5F5] font-bold">
-                {SIGNAL_LABELS.map((l) => l.replace('Test ', 'T')).join(', ')}
-              </span>
+                <span className="text-[10px] text-[#8D9B95] uppercase">Required Signals:</span>
+                <span className="text-[#F5F5F5] font-bold">
+                 {adaptiveRequiredSignals.join(', ')}
+                </span>
             </div>
           </div>
 
@@ -259,8 +268,8 @@ const AdaptiveLearningPanelContent: React.FC<Props & { serverState: AdaptiveApiS
                 </span>
                 <span className="text-[10px] font-mono text-[#35B978]">
                   {currentVote
-                    ? `${currentVote.signalsAvailable} of ${SIGNAL_LABELS.length} signals voting`
-                    : `${SIGNAL_LABELS.length} signals configured`}
+                    ? `${currentVote.signalsAvailable} of ${adaptiveRequiredSignals.length} required signals voting`
+                    : `${adaptiveRequiredSignals.length} required signals configured`}
                 </span>
               </div>
 
@@ -344,7 +353,7 @@ const AdaptiveLearningPanelContent: React.FC<Props & { serverState: AdaptiveApiS
               <span className="text-[#8D9B95]">
                 Signals voting:{' '}
                 <span className="text-[#35B978] font-bold">
-                  {activePrediction.signalsAvailable} / {SIGNAL_LABELS.length}
+                  {activePrediction.signalsAvailable} / {adaptiveRequiredSignals.length}
                 </span>
               </span>
               <span className="text-[#8D9B95]">
@@ -364,9 +373,10 @@ const AdaptiveLearningPanelContent: React.FC<Props & { serverState: AdaptiveApiS
         )}
         {signals && (
           <div className="grid grid-cols-3 gap-2 font-mono">
-            {[signals.t3pred, signals.t7pred, signals.t9pred].map((prediction, index) => (
-              <StatBox key={SIGNAL_LABELS[index]} label={SIGNAL_LABELS[index]} value={prediction?.toUpperCase() ?? 'NO SIGNAL'} />
+            {[signals.t3pred, signals.t9pred].map((prediction, index) => (
+              <StatBox key={requiredSignalLabels[index]} label={`${requiredSignalLabels[index]} (required)`} value={prediction?.toUpperCase() ?? 'NO SIGNAL'} />
             ))}
+            <StatBox label="Test 7 (independent)" value={signals.t7pred?.toUpperCase() ?? 'NO SIGNAL'} />
           </div>
         )}
       </div>
@@ -420,7 +430,7 @@ const AdaptiveLearningPanelContent: React.FC<Props & { serverState: AdaptiveApiS
                 </div>
               </div>
               <p className="text-[10px] text-[#8D9B95] mt-1.5 font-mono">
-                Signals used: {lastRow.signalsAvailable} / {SIGNAL_LABELS.length}
+                 Required signals used: {lastRow.signalsAvailable} / {adaptiveRequiredSignals.length}
               </p>
             </div>
           )}
@@ -481,22 +491,22 @@ const AdaptiveLearningPanelContent: React.FC<Props & { serverState: AdaptiveApiS
                 </span>
               </div>
               <span className="text-[10px] font-mono text-[#8D9B95]">
-                Dominant: {SIGNAL_LABELS[dominantSignalIndex]}
+                Dominant: {requiredSignalLabels[adaptiveDominantSignalIndex]}
               </span>
             </div>
             <div className="space-y-2">
-              {SIGNAL_LABELS.map((label, i) => (
+              {requiredSignalLabels.map((label, i) => (
                 <WeightBar
                   key={label}
                   label={label}
-                  value={weights[i]}
-                  color={SIGNAL_COLORS[i]}
-                  isDominant={i === dominantSignalIndex}
+                  value={adaptiveWeights[i]}
+                  color={SIGNAL_COLORS[i === 0 ? 0 : 2]}
+                  isDominant={i === adaptiveDominantSignalIndex}
                 />
               ))}
             </div>
             <p className="text-[10px] text-[#8D9B95] font-sans">
-               Weights update after every settled round and always sum to 100%. Missing signals are temporarily excluded per round.
+               T3 and T9 weights update after every settled round and sum to 100%. T7 has no Adaptive weight and remains independent.
             </p>
           </div>
 

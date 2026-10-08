@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
 import dotenv from 'dotenv';
 import { AdaptiveLearningEngine } from './adaptive-learning.js';
+import { LEGACY_T7_REQUIRED_POLICY } from './adaptive-input-policy.js';
 import { AdaptiveLearningStore, createAdaptiveClient } from './adaptive-learning-store.js';
 import {
   computeTest3, computeTest7, evaluateWalkForward, runCpl3WalkForward, CPL3_CONFIGS,
@@ -21,7 +22,8 @@ export function assertCurrentParity(engine, reference, label) {
   assert.deepStrictEqual(current.activePrediction, reference.activePrediction, `${label}: activePrediction`);
 }
 
-export function validateDataset(records, signals, { activeSamples = 5 } = {}) {
+export function validateDataset(records, signals, { activeSamples = 5, inputPolicy = LEGACY_T7_REQUIRED_POLICY } = {}) {
+  const includeOptionalT7 = inputPolicy.includeOptionalT7;
   const ascending = [...records].sort((a, b) => compareIssuesAsc(a.issueNumber, b.issueNumber));
   const signalMap = new Map(signals.filter((s) => ['BIG', 'SMALL'].includes(s.signal)).map((s) => [String(s.period_id).trim(), s]));
   const dataset = [...ascending].reverse().map((r) => ({ period: r.issueNumber, number: r.winningNumber }));
@@ -30,9 +32,10 @@ export function validateDataset(records, signals, { activeSamples = 5 } = {}) {
   const cpl1 = evaluateWalkForward(ascending);
   const config = CPL3_CONFIGS.find((c) => c.name === 'context-8-cap-3');
   const cpl3 = runCpl3WalkForward(cpl1, config);
-  const inputs = browserAdaptiveInputs(dataset, t3, t7, cpl3);
+  const inputs = browserAdaptiveInputs(dataset, t3, t7, cpl3)
+    .map((row) => (includeOptionalT7 ? row : { ...row, t7pred: null }));
   const reference = replayBrowser(inputs, null);
-  const engine = new AdaptiveLearningEngine();
+  const engine = new AdaptiveLearningEngine({ inputPolicy });
   engine.setSignals(signals);
   const sampleEvery = Math.max(1, Math.floor(ascending.length / activeSamples));
   for (let i = 0; i < ascending.length; i++) {
@@ -47,7 +50,11 @@ export function validateDataset(records, signals, { activeSamples = 5 } = {}) {
     const prefixDatasetForStats = dataset.filter((row) => compareIssuesAsc(row.period, period) <= 0);
     const current = engine.current();
     assert.equal(current.test3MaxLoss, computeTest3(prefixDatasetForStats).longestMissStreak, `Test 3 max loss at ${period}`);
-    assert.equal(current.test7MaxLoss, computeTest7(prefixDatasetForStats, signalMap).longestMissStreak, `Test 7 max loss at ${period}`);
+    if (includeOptionalT7) {
+      assert.equal(current.test7MaxLoss, computeTest7(prefixDatasetForStats, signalMap).longestMissStreak, `Test 7 max loss at ${period}`);
+    } else {
+      assert.equal(current.test7MaxLoss, 0, `Test 7 is excluded from the Adaptive checkpoint in T3+T9 mode at ${period}`);
+    }
     assert.equal(current.test9MaxLoss, calculateLossStreakMetrics(cpl3.slice(0, i + 1)).longestLossStreak, `Test 9 max loss at ${period}`);
     // Directly compare POST-update weights, not only the following prediction.
     assert.deepStrictEqual(engine.weights, prefixReference.weights, `Weight update mismatch at ${period}`);
@@ -59,6 +66,7 @@ export function validateDataset(records, signals, { activeSamples = 5 } = {}) {
       const activeT7 = computeTest7(prefixDataset, signalMap);
       const activeT9 = browserT9Active({ currentIssue: activePeriod }, prefixHistory, cpl1.slice(0, i + 1));
       const activeInput = browserActiveInput(activePeriod, activeT3, activeT7, activeT9);
+      if (activeInput && !includeOptionalT7) activeInput.t7pred = null;
       const activeReference = replayBrowser(inputs.filter((r) => compareIssuesAsc(r.period, period) <= 0), activeInput);
       const beforePrediction = JSON.stringify({ weights: engine.weights, cpl: engine.cplState, history: engine.history });
       engine.predict(activePeriod);

@@ -11,7 +11,7 @@ official history ─┐
 BDGTharu API ─────┴─> server.js
                        ├─ shared ingestion/evaluation queue
                        ├─ Supabase history + T7 persistence
-                       ├─ finalized T7 / chronological readiness checks
+                       ├─ T3+T9 Adaptive readiness; T7 stored independently
                        ├─ Adaptive worker thread + atomic checkpoints
                        └─ HTTP :8080
 
@@ -61,7 +61,7 @@ T3 always has a prediction, starting at Small with zero settled rounds. Absent
 stored T7 signals and CPL-1's minimum-history gate retain their no-signal outcomes.
 The browser's adaptive tie/no-vote
 decision and initial equal weights are also preserved by the extracted source.
-Only T3, T7, and T9 vote.
+Adaptive votes only on its required signals T3 and T9. T7 is stored, scored, and monitored independently and is never an Adaptive feature.
 
 Historical CPL-1 uses ascending training order; active CPL-1 uses descending order,
 matching `AlgorithmAnalyzer`. Supabase history is normalized exactly like the
@@ -70,31 +70,32 @@ The API's `source_time` is **not** substituted for those fields.
 
 ## Recovery and durability
 
-### Clean baseline after the permanent missing T7 period
+### Clean T3+T9 baseline
 
 When the active baseline row does not yet exist, startup does not resume the old
 checkpoint recovery. It scans durable history strictly after
-`20261002100050850` and selects the first period whose T7 row is modern-finalized
-(`source`, `win`/`loss`, `settled_at`, and matching `actual_number`). It then takes
-only the contiguous finalized prefix from that start period. In the current durable
-dataset the detected start is `20261002100052078`; the current finalized prefix
-contains 142 periods and stops at `20261002100052219` because
-`20261002100052220` has no finalized T7 row.
+`20261002100050850` (the historical missing-T7 gap) and selects the first period
+after it. No T7 row is required: the new `adaptive-t3-t9-v1` model replays the
+prefix from that start period using only T3 and T9. In the current durable dataset
+the detected start is `20261002100052078`, and evaluation now continues straight
+through `20261002100052220` even though that period has no finalized T7 row.
 
 The new checkpoint state records `baselineId`, `baselineVersion`,
 `baselineStartPeriod`, `excludedThroughPeriod`, `reason`, `createdAt`,
-`sourceCheckpoint`, and `periodsIncluded`. The old `WinGo_30S` checkpoint is never
-deleted or overwritten. Baseline evaluation starts with a fresh Adaptive engine at
-the selected period; no result before that start, including the permanently missing
-period, is evaluated by the new baseline.
+`sourceCheckpoint`, `periodsIncluded`, `adaptiveInputMode`,
+`adaptiveRequiredSignals`, and `adaptiveOptionalSignals`. The old `WinGo_30S`
+checkpoint is never deleted or overwritten. Baseline evaluation starts with a fresh
+Adaptive engine at the selected period; no result before that start, including the
+permanently missing period, is evaluated by the new baseline.
 
-If there is no eligible finalized start yet, the service remains blocked and keeps
-collecting. Once the baseline exists, a missing future T7 holds the cursor at the
-oldest pending period while later history continues to persist. T7-before-result and
-result-before-T7 are both safe: evaluation occurs only after the exact durable,
-finalized signal is available. A duplicate identical finalized signal is harmless;
-a conflicting finalized value remains an integrity/revision error and is never
-silently accepted.
+If there is no durable history after the boundary yet, the service waits for
+history and keeps collecting. Once the baseline exists, T7 is optional: a missing,
+pending, expired, delayed, or historically absent T7 row never holds the cursor.
+Only a missing actual History outcome (a gap in settled results) pauses evaluation
+as `waiting_for_history`. A duplicate identical T7 signal is harmless; a conflicting
+finalized T7 value is a T7 concern and cannot alter Adaptive. T7 continues to be
+captured (BDGTharu prediction → `wingo_t7_signals` → Supabase) and scored
+independently.
 
 Startup captures the checkpoint and a verified durable source boundary. New checkpoints contain
 a resumable `runtime` snapshot and its SHA-256 digest inside the existing JSON
@@ -117,14 +118,18 @@ three-phase protocol below so ingestion can continue during CPU-heavy replay.
 After startup only history after the evaluated cursor and changed T7 rows by
 `stored_at` are fetched. Exact reads cover pending periods and IDs touched by the
 collector, including revisions behind the timestamp cursor. Each new evaluation
-requires an exact durable historical result and finalized T7 row. BDGTharu rows
-must have `win`/`loss`, `settled_at`, and a matching `actual_number`; pending signals
-can be revised before settlement. Legacy NULL-metadata signals retain their exact
-historical meaning. The readiness gate does not alter any prediction algorithm.
+requires an exact durable historical result. T7 is optional and independent, so a
+missing, pending, expired, or delayed signal never enters the Adaptive input digest,
+boundary, or cursor. BDGTharu rows keep their existing `win`/`loss`, `settled_at`,
+and matching `actual_number` scoring rules for T7's own metrics. Legacy NULL-metadata
+signals retain their exact historical meaning. The readiness gate does not alter any
+prediction algorithm.
 
-Missing/pending T7 produces `waiting_for_t7`; no row is evaluated and no active
-prediction is generated from that incomplete tail. A missing live predecessor
-produces `waiting_for_history`, including across midnight. Existing sequence/date
+Missing/pending T7 never blocks Adaptive: T3 and T9 alone are sufficient, so no row
+is withheld for T7 and no active prediction waits on it. Only a missing live actual
+outcome produces `waiting_for_history`, including across midnight. `waiting_for_t7`
+remains a reportable status for separate T7 workflows, never an Adaptive blocking
+reason. Existing sequence/date
 gaps in the initial historical dataset remain part of that dataset's replay.
 Exact input digests are checked before evaluation and again before checkpointing.
 An unchanged poll does not repeat prediction or learning. The original historical
@@ -152,7 +157,8 @@ Unknown versions and corrupt new-version checkpoints still fail recovery.
 ### Single-flight recovery state machine
 
 `adaptiveState` is explicitly one of `normal`, `recovering`, `ready`,
-`waiting_for_t7`, or `recovery_failed`. The API retains `recovery_required` for
+`waiting_for_history`, or `recovery_failed`. (`waiting_for_t7` is never an Adaptive
+blocking state; it is reserved for separate T7 workflows.) The API retains `recovery_required` for
 integrity failures and separately exposes this state, recovery ID, original
 high-water mark, observed high-water mark, and earliest affected evaluated period.
 It also exposes `replayCursor`, `replayProcessed`, `replayTotal`,
@@ -191,11 +197,11 @@ or reconstructed from official draw data.
    acknowledgement is lost, read back the identical runtime digest before retrying,
    avoiding a second durable recovery write. Neither replay nor promotion is concurrent.
 
-Replay accepts only exact finalized T7 inputs, matching history/actual numbers,
-and stops at the first incomplete predecessor. If this predecessor is within the
-old evaluated checkpoint boundary, keep the old checkpoint and the partially
-replayed candidate. Transition to `waiting_for_t7`. Later backfill resumes that
-**same recovery ID** at the missing row; previously replayed rows are not repeated.
+Replay uses actual History only, so it never waits for T7. It stops at the first
+missing actual outcome and reports `waiting_for_history`. If this predecessor is
+within the old evaluated checkpoint boundary, keep the old checkpoint and the
+partially replayed candidate. Later history backfill resumes that **same recovery
+ID** at the missing row; previously replayed rows are not repeated.
 Under the write lock, refresh only its unevaluated signals and record the newer
 observed high-water mark. The original recovery history/high-water mark remains
 fixed. These readiness refreshes use incremental history after that mark, changed
@@ -230,9 +236,9 @@ The response is an in-memory snapshot, never a replay or database query:
 It contains no full history, raw training rows, credentials, or checkpoint audit map.
 Responses distinguish:
 
-- HTTP 200: `{ "success": true, "status": "ready", ... }`
-- HTTP 200: `{ "success": false, "status": "waiting_for_t7", "pendingPeriod": "...", ... }`
-- HTTP 200: `waiting_for_history` (a live predecessor has not been persisted)
+- HTTP 200: `{ "success": true, "status": "ready", "adaptiveRequiredSignals": ["T3","T9"], "adaptiveOptionalSignals": ["T7"], "t7AvailableForAdaptive": false, "adaptiveBlocked": false, ... }`
+- HTTP 200: `waiting_for_history` (a live actual outcome has not been persisted; Adaptive uses T3+T9)
+- HTTP 200: `{ "success": false, "status": "waiting_for_t7", "pendingPeriod": "...", ... }` remains available for separate T7 workflows only; Adaptive never produces it as a blocking reason
 - HTTP 503: `{ "success": false, "status": "recovery_required", ... }`
 - HTTP 503: `recovering` (one active recovery; evaluations/checkpoint advancement held)
 - HTTP 503: `initializing`/`error` for startup or a transient service failure
@@ -242,7 +248,7 @@ exist before invoking the original active prediction calculation. A schedule err
 is reported rather than inventing an active issue. `/health` always responds HTTP
 200 and includes collector/database/polling status, last collected/evaluated periods,
 Adaptive state/status, recovery ID/boundaries/earliest affected period, pending
-period, checkpoint status/time, and `waiting_for_t7`.
+period, checkpoint status/time, `waiting_for_history`, and `waiting_for_t7` (separate T7 workflows).
 
 ## Android startup and diagnostics
 

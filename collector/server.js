@@ -68,7 +68,6 @@ let adaptiveCurrent = { success: false, status: 'initializing' };
 
 function notifyAdaptive(period) {
   if (!running || resetInProgress || !adaptiveCoordinator) return;
-  if (t7PersistenceQueue?.status().pendingCount > 0) return;
   adaptiveCoordinator.onSettledPeriod({ period }).catch((error) => {
     adaptiveCurrent = { success: false, status: 'error', error: 'Adaptive runtime unavailable; retrying.', checkpointStatus: 'pending_retry',
       latestEvaluatedPeriod: adaptiveCurrent.latestEvaluatedPeriod ?? null, checkpointAt: adaptiveCurrent.checkpointAt ?? null };
@@ -1255,6 +1254,9 @@ const healthServer = http.createServer((req, res) => {
         resetStartPeriod,
         adaptiveStatus: adaptiveCurrent.status,
         adaptiveState: adaptiveCurrent.adaptiveState ?? 'normal',
+        adaptiveRequiredSignals: adaptiveCurrent.adaptiveRequiredSignals ?? ['T3', 'T9'],
+        adaptiveOptionalSignals: adaptiveCurrent.adaptiveOptionalSignals ?? ['T7'],
+        t7AvailableForAdaptive: adaptiveCurrent.t7AvailableForAdaptive ?? false,
         recoveryId: adaptiveCurrent.recoveryId ?? null,
         recoveryHighWater: adaptiveCurrent.recoveryHighWater ?? null,
         observedHighWater: adaptiveCurrent.observedHighWater ?? null,

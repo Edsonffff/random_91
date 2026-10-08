@@ -1,8 +1,9 @@
 # Independent verified Max Loss
 
 `GET /api/adaptive-learning/current` retains its Adaptive response and adds a
-separate `maxLoss` object. A response may have `success: false` and
-`status: waiting_for_t7` while containing usable independent metrics.
+separate `maxLoss` object. A response may have `success: false` (for example
+`waiting_for_history`) while containing usable independent metrics. Missing T7 does
+not block Adaptive, so the ready snapshot carries `maxLoss` too.
 
 The metric worker only reads the active baseline metadata, durable history,
 and stored T7 predictions. It never starts an Adaptive engine, changes its

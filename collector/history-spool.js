@@ -22,8 +22,18 @@ function fileNameFor(key) {
 let batchSequence = 0;
 
 async function syncDirectory(directory) {
-  const handle = await open(directory, 'r');
-  try { await handle.sync(); } finally { await handle.close(); }
+  let handle;
+  try {
+    handle = await open(directory, 'r');
+    await handle.sync();
+  } catch (error) {
+    // Directory fsync is a POSIX durability primitive. Windows (and some
+    // filesystems) reject it with EPERM/EINVAL/EISDIR/ENOTSUP; the rename that
+    // precedes this call remains atomic there, so only these codes are ignored.
+    if (!['EPERM', 'EINVAL', 'EISDIR', 'ENOTSUP'].includes(error?.code)) throw error;
+  } finally {
+    await handle?.close();
+  }
 }
 
 export class HistorySpool {

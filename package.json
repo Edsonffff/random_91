@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "npm run build:adaptive && tsc -b && vite build",
     "build:adaptive": "node collector/build-adaptive-algorithms.mjs",
-    "test:adaptive": "node collector/build-adaptive-algorithms.mjs --check && node --test collector/adaptive-learning.test.js collector/adaptive-coordinator.test.js collector/adaptive-server-recovery.test.js collector/pending-t7.test.js collector/t7-monitoring.test.js collector/verified-max-loss.test.js && tsx --test scripts/adaptive-learning-api.test.ts scripts/adaptive-learning-page.test.ts",
+    "test:adaptive": "node collector/build-adaptive-algorithms.mjs --check && node --test collector/adaptive-learning.test.js collector/adaptive-coordinator.test.js collector/adaptive-server-recovery.test.js collector/adaptive-t7-optional.test.js collector/pending-t7.test.js collector/t7-monitoring.test.js collector/verified-max-loss.test.js && tsx --test scripts/adaptive-learning-api.test.ts scripts/adaptive-learning-page.test.ts",
     "test:collector-resilience": "node --test collector/history-spool.test.js collector/serial-persistence-queue.test.js",
     "lint": "oxlint",
     "preview": "vite preview",

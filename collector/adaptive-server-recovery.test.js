@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { AdaptiveLearningEngine } from './adaptive-learning.js';
 import { browserHistoryRecord } from './adaptive-learning-store.js';
 import { TEST3_SEQUENCE, scheduledStartFromIssue } from './adaptive-algorithms.generated.js';
+import { ADAPTIVE_INPUT_POLICY } from './adaptive-input-policy.js';
 
 async function serverRecoveryFixture(t, { baseline = false, startupFailure = false, reset = false } = {}) {
   const records = Array.from({ length: baseline ? 5 : 71 }, (_, i) => {
@@ -39,7 +40,7 @@ async function serverRecoveryFixture(t, { baseline = false, startupFailure = fal
     signals[69] = { ...signals[69], created_at: '2026-10-05T16:42:04.000Z', stored_at: '2026-10-05T16:42:04.000Z' };
     signals[70] = { ...signals[70], created_at: '2026-10-05T16:42:05.000Z', stored_at: '2026-10-05T16:42:05.000Z' };
   }
-  const reference = new AdaptiveLearningEngine();
+  const reference = new AdaptiveLearningEngine({ inputPolicy: ADAPTIVE_INPUT_POLICY });
   reference.setSignals(signals);
   records.forEach((record) => reference.settle(record));
   reference.predict(activePeriod);
@@ -145,7 +146,7 @@ async function serverRecoveryFixture(t, { baseline = false, startupFailure = fal
 
   async function launch({ ready = true, status = null, resetEnabled = false, spoolDir = null, pollIntervalMs = null } = {}) {
     let output = '';
-    const child = spawn(process.execPath, ['--import', fileURLToPath(new URL('./fixtures/adaptive-upstream.mjs', import.meta.url)), fileURLToPath(new URL('./server.js', import.meta.url))], {
+    const child = spawn(process.execPath, ['--import', new URL('./fixtures/adaptive-upstream.mjs', import.meta.url).href, fileURLToPath(new URL('./server.js', import.meta.url))], {
       env: { ...process.env, PORT: '0', RESET_ENABLED: resetEnabled ? 'true' : 'false', ...(pollIntervalMs ? { POLL_INTERVAL_MS: pollIntervalMs } : {}), ...(spoolDir ? { HISTORY_SPOOL_DIR: spoolDir } : {}), SUPABASE_URL: `http://127.0.0.1:${dbServer.address().port}`, SUPABASE_SERVICE_ROLE_KEY: 'fixture-only', ADAPTIVE_BASELINE_AFTER_PERIOD: baseline ? '20261002100050850' : 'disabled', ADAPTIVE_FIXTURE_ACTIVE_PERIOD: activePeriod,
         ADAPTIVE_FIXTURE_UPSTREAM_URL: `http://127.0.0.1:${dbServer.address().port}/_fixture/upstream` },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -268,9 +269,10 @@ async function serverRecoveryFixture(t, { baseline = false, startupFailure = fal
     // The first post-reset source window still contains the reset boundary and
     // older rows, but now also contains two genuinely newer periods. Only the
     // strict post-boundary suffix may be persisted.
+    const postResetNextPeriod = String(BigInt(postResetActivePeriod) + 1n);
     const postResetCreatedAt = new Date(scheduledStartFromIssue(postResetBaselinePeriod) + 30_000).toISOString();
     liveInput = {
-      active: postResetActivePeriod,
+      active: postResetNextPeriod,
       createdAt: postResetCreatedAt,
       history: { serviceTime: Date.parse(postResetCreatedAt), data: { list: [
         { issueNumber: freshPeriod, number: 7 },
@@ -279,23 +281,22 @@ async function serverRecoveryFixture(t, { baseline = false, startupFailure = fal
         { issueNumber: postResetActivePeriod, number: 3 },
       ] } },
       t7: {
-        prediction: { issue: postResetActivePeriod, size: 'SMALL', status: 'pending', source: 'server', createdAt: Date.parse(postResetCreatedAt) },
-        history: [{ issue: postResetBaselinePeriod, size: 'BIG', status: 'win', source: 'server', actualNumber: 8,
+        prediction: { issue: postResetNextPeriod, size: 'SMALL', status: 'pending', source: 'server', createdAt: Date.parse(postResetCreatedAt) },
+        history: [{ issue: postResetActivePeriod, size: 'BIG', status: 'win', source: 'server', actualNumber: 3,
           settledAt: Date.parse(postResetCreatedAt), createdAt: Date.parse(postResetCreatedAt) }],
       },
     };
 
-    let freshAdaptive;
     for (let i = 0; i < 120; i++) {
       const health = await fetch(`http://127.0.0.1:${enabled.port}/health`).then((response) => response.json());
       if (!health.resetInProgress && health.resetStartPeriod === freshNext) break;
       await delay(100);
     }
     for (let i = 0; i < 200; i++) {
-      if (database.wingo_t7_signals.some((row) => row.period_id === postResetActivePeriod)) break;
+      if (database.wingo_t7_signals.some((row) => row.period_id === postResetNextPeriod)) break;
       await delay(100);
     }
-    assert.ok(database.wingo_t7_signals.some((row) => row.period_id === postResetActivePeriod), 'Fresh T7 prediction must be captured');
+    assert.ok(database.wingo_t7_signals.some((row) => row.period_id === postResetNextPeriod), 'Fresh T7 prediction must be captured');
     for (let i = 0; i < 200; i++) {
       if (database.real_wingo_30s_history.some((row) => row.issue_number === postResetActivePeriod)) break;
       await delay(100);
@@ -304,18 +305,23 @@ async function serverRecoveryFixture(t, { baseline = false, startupFailure = fal
     assert.equal(database.real_wingo_30s_history.some((row) => row.issue_number === freshNext), false, 'Reset boundary must not be recreated');
     assert.ok(database.real_wingo_30s_history.some((row) => row.issue_number === postResetBaselinePeriod), 'Strictly newer baseline history must be captured');
     assert.ok(database.real_wingo_30s_history.some((row) => row.issue_number === postResetActivePeriod), 'Strictly newer history must be captured');
+    let freshAdaptive;
     for (let i = 0; i < 200; i++) {
       const body = await fetch(`http://127.0.0.1:${enabled.port}/api/adaptive-learning/current`).then((response) => response.json());
-      if (body.status === 'waiting_for_t7' && body.pendingPeriod === postResetActivePeriod) { freshAdaptive = body; break; }
+      if (body.success && body.totalPredictions === 2) { freshAdaptive = body; break; }
       await delay(100);
     }
-    assert.ok(freshAdaptive, `Fresh Adaptive runtime must remain strict while the fresh T7 input is pending: ${enabled.output}`);
-    assert.equal(freshAdaptive.pendingPeriod, postResetActivePeriod, `${JSON.stringify(freshAdaptive)}\n${enabled.output}`);
+    assert.ok(freshAdaptive, `Fresh Adaptive must advance on T3+T9 without T7: ${enabled.output}`);
+    assert.equal(freshAdaptive.adaptiveRequiredSignals.join('|'), 'T3|T9');
+    assert.equal(freshAdaptive.adaptiveBlocked, false);
+    assert.equal(freshAdaptive.latestEvaluatedPeriod, postResetActivePeriod);
+    assert.equal(freshAdaptive.latestEvaluation.t7pred, null, 'No fake T7 value may be created');
+    assert.equal(database.wingo_t7_signals.find((row) => row.period_id === postResetNextPeriod).status, 'pending');
     assert.ok(database.wingo_adaptive_checkpoints.some((row) => row.game_code === 'WinGo_30S:baseline'), 'Fresh baseline checkpoint must be recreated from new durable inputs');
     await enabled.stop('SIGTERM');
-    const restarted = await launch({ ready: false, resetEnabled: true, spoolDir, pollIntervalMs: '100' });
-    assert.equal(restarted.body.status, 'waiting_for_t7');
-    assert.equal(restarted.body.pendingPeriod, postResetActivePeriod);
+    const restarted = await launch({ resetEnabled: true, spoolDir, pollIntervalMs: '100' });
+    assert.equal(restarted.body.totalPredictions, 2);
+    assert.equal(restarted.body.adaptiveRequiredSignals.join('|'), 'T3|T9');
     await restarted.stop('SIGTERM');
     return;
   }
@@ -351,13 +357,13 @@ async function serverRecoveryFixture(t, { baseline = false, startupFailure = fal
     assert.equal(health.checkpointStatus, 'saved');
     assert.equal(health.baselineId, baselineId);
     assert.equal(health.baselineStartPeriod, records[0].issueNumber);
-    assert.equal(health.baselineReason, 'previous recovery contained an unrecoverable missing historical T7 input');
+    assert.equal(health.baselineReason, 'Adaptive T3+T9 mode; T7 is optional and independent');
     assert.equal(health.baselinePendingAfter, null);
     assert.equal(health.baselinePeriodsIncluded, records.length);
     assert.equal(health.adaptiveCursor, records.at(-1).issueNumber);
     assert.equal(health.pendingT7Count, 0);
     assert.equal(health.oldestPendingT7, null);
-    assert.equal(health.t7Coverage, 'complete');
+    assert.equal(health.t7Coverage, 'independent');
     assert.equal(health.adaptiveBlocked, false);
     for (const diagnostic of ['worker started', 'baseline initialization started', 'baseline checkpoint not_found',
       'baseline candidate selected', 'baseline checkpoint persisted', 'baseline initialization completed']) {
@@ -372,24 +378,15 @@ async function serverRecoveryFixture(t, { baseline = false, startupFailure = fal
       assert.deepEqual(first.body[field], reference.current()[field], field);
     }
     if (!startupFailure) {
-      const checkpointBeforeWaiting = structuredClone(saved);
-      database.real_wingo_30s_history.push({ game_code: 'WinGo_30S', issue_number: activePeriod,
-        number: 6, created_at: new Date(scheduledStartFromIssue(activePeriod) + 30_000).toISOString() });
-      let independentWaiting;
-      for (let i = 0; i < 150; i++) {
-        const body = await fetch(`http://127.0.0.1:${first.port}/api/adaptive-learning/current`).then((r) => r.json());
-        if (body.status === 'waiting_for_t7' && body.maxLoss) { independentWaiting = body; break; }
-        await delay(100);
-      }
-      assert.ok(independentWaiting, 'Independent Max Loss must be served while Adaptive waits for the provider settlement');
-      assert.equal(independentWaiting.success, false);
-      assert.equal(independentWaiting.pendingPeriod, activePeriod);
-      assert.equal(independentWaiting.latestEvaluatedPeriod, records.at(-1).issueNumber);
-      assert.deepEqual(database.wingo_adaptive_checkpoints.find((row) => row.game_code === 'WinGo_30S:baseline'), checkpointBeforeWaiting);
+      // The active T7 row is still pending, yet Adaptive is ready on T3+T9 and
+      // the independent Max Loss metric is served alongside it.
+      assert.equal(first.body.t7AvailableForAdaptive, false, 'A pending active T7 is not an Adaptive input');
+      assert.equal(first.body.adaptiveBlocked, false);
+      assert.equal(first.body.status, 'ready');
+      assert.ok(first.body.maxLoss, 'Independent Max Loss is served with the ready snapshot');
+      for (const name of ['test3', 'test7', 'test9']) assert.ok(Number.isInteger(first.body.maxLoss[name]));
       assert.equal(database.wingo_t7_signals.find((row) => row.period_id === activePeriod).status, 'pending');
-      for (const name of ['test3', 'test7', 'test9']) assert.ok(Number.isInteger(independentWaiting.maxLoss[name]));
-      // Restore only the local test fixture before exercising its original clean restart.
-      database.real_wingo_30s_history.pop();
+      assert.deepEqual(database.wingo_adaptive_checkpoints.find((row) => row.game_code === 'WinGo_30S:baseline'), saved);
     }
     await first.stop();
     const writesBeforeRestart = writes;
@@ -412,46 +409,29 @@ async function serverRecoveryFixture(t, { baseline = false, startupFailure = fal
     return;
   }
 
-  // History is visible first. The final T7 row is deliberately committed after
-  // the worker has persisted the ready prefix; no arbitrary sleep is involved.
+  // T7 is optional: delete the final settled T7 row entirely and prove Adaptive
+  // still evaluates every settled period and reaches a ready snapshot.
   const initialSignals = database.wingo_t7_signals;
   database.wingo_t7_signals = initialSignals.filter((s) => s.period_id !== records.at(-1).issueNumber);
-  const waiting = await launch({ ready: false });
-  assert.equal(waiting.body.status, 'waiting_for_t7');
-  assert.equal(waiting.body.pendingPeriod, records.at(-1).issueNumber);
-  assert.equal(database.wingo_adaptive_checkpoints[0].state.period, records.at(-2).issueNumber);
-  assert.equal(database.wingo_adaptive_checkpoints[0].state.totalPredictions, 70);
-  assert.equal(database.wingo_adaptive_checkpoints[0].state.predictionIndex, 70);
-  assert.match(waiting.output, /strategy=full_chronological_replay/);
-  assert.notEqual(database.wingo_adaptive_checkpoints[0].state.inputDigest, staleCheckpoint.inputDigest);
-  await waiting.stop();
-  const waitingRestarted = await launch({ ready: false });
-  assert.equal(waitingRestarted.body.status, 'waiting_for_t7');
-  assert.match(waitingRestarted.output, /checkpoint=verified/);
-  database.wingo_t7_signals = initialSignals;
-
-  let first;
-  for (let i = 0; i < 100; i++) {
-    const response = await fetch(`http://127.0.0.1:${waitingRestarted.port}/api/adaptive-learning/current`);
-    if (response.status === 200) {
-      const body = await response.json();
-      if (body.success) { first = { ...waitingRestarted, body }; break; }
-    }
-    await delay(100);
-  }
-  assert.ok(first, 'Worker did not recover after the delayed T7 signal');
-  assert.equal(first.body.totalPredictions, 71);
-  assert.equal(first.body.signals.t3pred, TEST3_SEQUENCE[71 % 14]);
-  assert.equal(database.wingo_adaptive_checkpoints[0].state.predictionIndex, 71);
+  const first = await launch();
+  assert.equal(first.body.adaptiveRequiredSignals.join('|'), 'T3|T9');
+  assert.equal(first.body.adaptiveOptionalSignals.join('|'), 'T7');
+  assert.equal(first.body.t7AvailableForAdaptive, false, 'Missing T7 is reported but optional');
+  assert.equal(first.body.adaptiveBlocked, false, 'T3+T9 are sufficient');
+  assert.equal(first.body.totalPredictions, records.length);
+  assert.equal(first.body.latestEvaluatedPeriod, records.at(-1).issueNumber);
   for (const field of ['weights', 'test3MaxLoss', 'test7MaxLoss', 'test9MaxLoss', 'latestEvaluation', 'activePrediction']) {
     assert.deepEqual(first.body[field], reference.current()[field], field);
   }
+  assert.equal(database.wingo_adaptive_checkpoints[0].state.adaptiveInputMode, 'adaptive-t3-t9-v1');
+  assert.equal(database.wingo_adaptive_checkpoints[0].state.predictionIndex, records.length);
   assert.equal('history' in first.body, false);
   assert.ok(JSON.stringify(first.body).length < 6000);
   const checkpoint = structuredClone(database.wingo_adaptive_checkpoints[0].state);
   await first.stop();
   const restarted = await launch();
   assert.match(restarted.output, /checkpoint=verified/);
+  assert.equal(restarted.body.totalPredictions, records.length);
   for (const field of ['signals', 'weights', 'test3MaxLoss', 'test7MaxLoss', 'test9MaxLoss', 'latestEvaluation', 'activePrediction', 'totalPredictions']) {
     assert.deepEqual(restarted.body[field], first.body[field], `Restart: ${field}`);
   }
@@ -459,39 +439,35 @@ async function serverRecoveryFixture(t, { baseline = false, startupFailure = fal
   for (const field of ['predictionIndex', 'inputDigest', 'weights', 'test3MaxLoss', 'test7MaxLoss', 'test9MaxLoss', 'firstPredictions']) {
     assert.deepEqual(restored[field], checkpoint[field], `Checkpoint: ${field}`);
   }
-  assert.ok(writes >= 3, 'Recovery, final settlement and active prediction must be durable');
+  assert.ok(writes >= 2, 'Rebuild and active prediction must be durable');
   const newActive = String(BigInt(activePeriod) + 1n);
   const createdAt = new Date(scheduledStartFromIssue(activePeriod) + 30_000).toISOString();
-  // Exercise the actual collector: one upstream response contains a pending
-  // revision followed by its final signal. Adaptive must not see the middle write.
+  // Exercise the real collector: the settled period has no finalized T7 row at all.
   liveInput = {
     active: newActive, createdAt,
     history: { serviceTime: Date.parse(createdAt), data: { list: [{ issueNumber: activePeriod, number: 7 }] } },
     t7: { prediction: { issue: newActive, size: 'SMALL', status: 'pending', source: 'server', createdAt: Date.parse(createdAt) },
       history: [
         { issue: activePeriod, size: 'SMALL', status: 'pending', source: 'server', createdAt: Date.parse(createdAt) },
-        { issue: activePeriod, size: 'BIG', status: 'win', source: 'server', actualNumber: 7,
-          settledAt: Date.parse(createdAt), createdAt: Date.parse(createdAt) },
       ] },
   };
   let collected;
   for (let i = 0; i < 200; i++) {
     const body = await fetch(`http://127.0.0.1:${restarted.port}/api/adaptive-learning/current`).then((r) => r.json());
-    if (body.success && body.totalPredictions === 72) { collected = body; break; }
+    if (body.success && body.totalPredictions === records.length + 1) { collected = body; break; }
     await delay(100);
   }
-  assert.ok(collected, 'Actual collector did not hand off the newly finalized period');
-  assert.equal(collected.latestEvaluation.t7pred, 'Big');
-  assert.equal(database.wingo_adaptive_checkpoints[0].state.predictionIndex, 72);
-  assert.ok(sourceWrites >= 3, 'History, pending T7 revision, and final T7 must be persisted');
+  assert.ok(collected, 'Adaptive did not hand off a settled period with no finalized T7');
+  assert.equal(collected.latestEvaluation.t7pred, null, 'No fake T7 value may be created');
+  assert.equal(database.wingo_adaptive_checkpoints[0].state.predictionIndex, records.length + 1);
   const health = await fetch(`http://127.0.0.1:${restarted.port}/health`).then((r) => r.json());
   assert.equal(health.serverRunning, true);
   assert.equal(health.collectorStatus, 'healthy');
   assert.equal(health.dbConnected, true);
   assert.equal(health.lastCollectedPeriod, activePeriod);
-  assert.equal(health.lastEvaluatedPeriod, activePeriod);
   assert.equal(health.checkpointStatus, 'saved');
   assert.equal(health.adaptiveStatus, 'ready');
+  database.wingo_t7_signals = initialSignals;
   await restarted.stop('SIGTERM');
 }
 
