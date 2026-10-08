@@ -1,8 +1,10 @@
 import http from 'http';
+import { randomUUID } from 'node:crypto';
 import { createClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
 import { startAdaptiveWorker } from './adaptive-learning-worker.js';
 import { AdaptiveCoordinator } from './adaptive-coordinator.js';
+import { BASELINE_CHECKPOINT_KEY } from './adaptive-learning-store.js';
 import {
   compareT7Periods,
   normalizeT7Entry,
@@ -11,6 +13,7 @@ import {
 import { T7IngestionLedger } from './t7-ingestion.js';
 import { startVerifiedMaxLossWorker } from './verified-max-loss-worker.js';
 import { RetryableSerialQueue } from './serial-persistence-queue.js';
+import { filterHistoryRecordsAfterBoundary } from './history-reset-boundary.js';
 import {
   compareHistoryPeriods,
   createDeadline,
@@ -29,6 +32,7 @@ const RETRY_DELAY_MS = parseInt(process.env.RETRY_DELAY_MS || '10000', 10);
 const HISTORY_REQUEST_TIMEOUT_MS = parseInt(process.env.HISTORY_REQUEST_TIMEOUT_MS || '15000', 10);
 const HISTORY_SUPABASE_TIMEOUT_MS = parseInt(process.env.HISTORY_SUPABASE_TIMEOUT_MS || '15000', 10);
 const HISTORY_SPOOL_DIR = process.env.HISTORY_SPOOL_DIR || `${process.cwd()}/.history-spool`;
+const RESET_WAIT_TIMEOUT_MS = parseInt(process.env.RESET_WAIT_TIMEOUT_MS || '30000', 10);
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const HOST = '0.0.0.0';
 
@@ -63,7 +67,7 @@ let verifiedMaxLossWorker;
 let adaptiveCurrent = { success: false, status: 'initializing' };
 
 function notifyAdaptive(period) {
-  if (!running || !adaptiveCoordinator) return;
+  if (!running || resetInProgress || !adaptiveCoordinator) return;
   if (t7PersistenceQueue?.status().pendingCount > 0) return;
   adaptiveCoordinator.onSettledPeriod({ period }).catch((error) => {
     adaptiveCurrent = { success: false, status: 'error', error: 'Adaptive runtime unavailable; retrying.', checkpointStatus: 'pending_retry',
@@ -346,6 +350,190 @@ async function supabaseWithDeadline(query, label, timeoutMs = HISTORY_SUPABASE_T
   return (await supabaseResultWithDeadline(query, label, timeoutMs)).data;
 }
 
+const RESET_TABLES = Object.freeze([
+  { table: 'real_wingo_30s_history', key: 'issue_number', required: true, scope: 'game_code=WinGo_30S' },
+  { table: 'wingo_t7_signals', key: 'period_id', required: true, scope: 'all rows' },
+  { table: 'wingo_adaptive_checkpoints', key: 'game_code', required: true, scope: 'WinGo_30S and WinGo_30S:baseline' },
+  { table: 'wingo_t7_pending_diagnostics', key: 'period_id', required: false, scope: 'all rows' },
+  { table: 'wingo_t7_gap_diagnostics', key: 'period', required: false, scope: 'all rows' },
+]);
+const RESET_PRESERVED_TABLES = Object.freeze([
+  'wingo_t7_poll_audit',
+  'wingo_t9_periodic_predictions',
+  'users/authentication tables',
+  'all unrelated application tables',
+]);
+
+function resetEnabled() { return String(process.env.RESET_ENABLED).toLowerCase() === 'true'; }
+
+async function readResetPlan(supabaseClient) {
+  const tables = [];
+  for (const spec of RESET_TABLES) {
+    try {
+      let query = supabaseClient.from(spec.table).select(spec.key, { count: 'exact', head: true });
+      if (spec.table === 'real_wingo_30s_history') query = query.eq('game_code', 'WinGo_30S');
+      if (spec.table === 'wingo_adaptive_checkpoints') query = query.in('game_code', ['WinGo_30S', BASELINE_CHECKPOINT_KEY]);
+      const result = await supabaseResultWithDeadline(query, `Inspect reset table ${spec.table}`);
+      tables.push({ ...spec, available: true, count: result.count ?? null });
+    } catch (error) {
+      if (!spec.required && /does not exist|not found|42P01|404/i.test(error.message)) {
+        tables.push({ ...spec, available: false, count: null, skipped: 'optional table unavailable' });
+        continue;
+      }
+      throw error;
+    }
+  }
+  return { tables, preservedTables: [...RESET_PRESERVED_TABLES] };
+}
+
+async function clearResetTable(supabaseClient, spec) {
+  if (!spec.available) return false;
+  let query = supabaseClient.from(spec.table).delete();
+  if (spec.table === 'real_wingo_30s_history') query = query.eq('game_code', 'WinGo_30S').neq(spec.key, '');
+  else if (spec.table === 'wingo_adaptive_checkpoints') query = query.in('game_code', ['WinGo_30S', BASELINE_CHECKPOINT_KEY]);
+  else query = query.neq(spec.key, '');
+  await supabaseWithDeadline(query, `Clear reset table ${spec.table}`);
+  return true;
+}
+
+async function waitForResetIdle() {
+  const deadline = Date.now() + RESET_WAIT_TIMEOUT_MS;
+  for (;;) {
+    const t7QueueBusy = t7PersistenceQueue.status().pendingCount > 0 || t7PersistenceQueue.status().running;
+    if (!isFetching && !isT7Polling && !t7QueueBusy && !adaptiveCoordinator?.flight) return;
+    if (Date.now() >= deadline) throw new Error(`Collector did not become idle within ${RESET_WAIT_TIMEOUT_MS}ms.`);
+    await sleep(50);
+  }
+}
+
+function clearResetMemoryState() {
+  knownPeriods.clear();
+  lastInsertedPeriod = null;
+  historyNewestPersistedPeriod = null;
+  historyContinuityGaps = [];
+  historySpoolLastError = null;
+  historySourceHost = null;
+  historySpoolStatus = { pendingCount: 0, oldestPendingAgeMs: null, retryCount: 0 };
+  knownT7Periods.clear();
+  inMemoryT7Signals.clear();
+  latestT7Timing = null;
+  lastPendingT7Observation = null;
+  lastT7PollError = null;
+  lastT7PollStatus = 'reset';
+  t7CurrentProviderPeriod = null;
+  t7WindowOldestPeriod = null;
+  t7WindowNewestPeriod = null;
+  t7HistoryCount = 0;
+  t7Diagnostics.pending.clear();
+  t7Diagnostics.gaps.clear();
+  adaptiveCurrent = { success: false, status: 'initializing', checkpointStatus: 'reset' };
+  timeType = 'iso';
+}
+
+async function readRequestJson(req, maxBytes = 4096) {
+  let body = '';
+  for await (const chunk of req) {
+    body += chunk;
+    if (Buffer.byteLength(body) > maxBytes) throw new Error('Request body is too large.');
+  }
+  if (!body.trim()) return {};
+  const parsed = JSON.parse(body);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Request body must be a JSON object.');
+  return parsed;
+}
+
+async function performResetAll(resetId) {
+  const resetStartedAt = getTimestamp();
+  log(`[RESET] resetId=${resetId} started`);
+  await waitForResetIdle();
+  const spoolBefore = await historySpool.status();
+  if (spoolBefore.pendingCount > 0) throw new Error(`History spool is not empty (${spoolBefore.pendingCount} pending batch(es)).`);
+  log(`[RESET] resetId=${resetId} spool verified empty`);
+
+  const current = await fetchOfficialHistoryWindow();
+  const currentRows = (current.payload?.data?.list ?? []).map(validHistoryItem).filter(Boolean);
+  if (!currentRows.length) throw new Error('Current upstream history window contained no valid periods.');
+  const currentPeriod = currentRows.map((row) => row.issueNumber).sort(compareHistoryPeriods).at(-1);
+
+  await adaptiveWorker?.terminate();
+  adaptiveWorker = null;
+  const plan = await readResetPlan(currentSupabaseClient);
+  for (const spec of plan.tables) {
+    if (await clearResetTable(currentSupabaseClient, spec)) log(`[RESET] resetId=${resetId} ${spec.table} cleared`);
+  }
+  const afterPlan = await readResetPlan(currentSupabaseClient);
+  const uncleared = afterPlan.tables.filter((table) => table.available && (table.count ?? 0) > 0);
+  if (uncleared.length) throw new Error(`Reset verification failed; rows remain in ${uncleared.map((table) => table.table).join(', ')}.`);
+
+  log(`[RESET] resetId=${resetId} history cleared`);
+  log(`[RESET] resetId=${resetId} T7 state cleared`);
+  log(`[RESET] resetId=${resetId} adaptive state cleared`);
+  clearResetMemoryState();
+  resetStartPeriod = currentPeriod;
+  postResetHistoryBoundary = currentPeriod;
+  log(`[RESET] resetId=${resetId} initialized at period=${currentPeriod}`);
+
+  adaptiveCoordinator = createAdaptiveCoordinator();
+  lastResetAt = getTimestamp();
+  log(`[RESET] resetId=${resetId} completed`);
+  return {
+    success: true,
+    resetId,
+    resetStartedAt,
+    lastResetAt,
+    resetStartPeriod: currentPeriod,
+    clearedTables: plan.tables.filter((table) => table.available).map((table) => table.table),
+    preservedTables: plan.preservedTables,
+    historyRowsCreated: 0,
+    note: 'The next normal history/T7 polls establish fresh durable inputs. No pre-reset period was reconstructed.',
+  };
+}
+
+async function handleAdminResetAll(req, res) {
+  if (!resetEnabled()) return res.writeHead(403, { 'Content-Type': 'application/json' }).end(JSON.stringify({ success: false, error: 'RESET_ENABLED is not true.' }));
+  if (req.method !== 'POST') return res.writeHead(405, { Allow: 'POST', 'Content-Type': 'application/json' }).end(JSON.stringify({ success: false, error: 'Use POST for reset-all.' }));
+  const requestUrl = new URL(req.url || '', 'http://collector');
+  if ([...requestUrl.searchParams].length) return res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ success: false, error: 'Reset confirmation must be in the JSON body; query parameters are not accepted.' }));
+  let body;
+  try { body = await readRequestJson(req); } catch (error) {
+    return res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ success: false, error: error.message }));
+  }
+  if (Object.keys(body).some((key) => !['confirm', 'dryRun'].includes(key))) {
+    return res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ success: false, error: 'Only confirm and dryRun are accepted.' }));
+  }
+  if (body.confirm !== 'RESET_ALL') return res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ success: false, error: 'Body must contain confirm: RESET_ALL.' }));
+  if (body.dryRun !== undefined && typeof body.dryRun !== 'boolean') return res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ success: false, error: 'dryRun must be boolean.' }));
+  if (!currentSupabaseClient || !historySpool) return res.writeHead(503, { 'Content-Type': 'application/json' }).end(JSON.stringify({ success: false, error: 'Collector storage is not initialized.' }));
+  const spoolStatus = await historySpool.status();
+  if (spoolStatus.pendingCount > 0) return res.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ success: false, error: `Reset refused: history spool has ${spoolStatus.pendingCount} pending batch(es).`, historySpoolPendingCount: spoolStatus.pendingCount }));
+  if (t7PersistenceQueue.status().pendingCount > 0 || t7PersistenceQueue.status().running) return res.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ success: false, error: 'Reset refused: T7 persistence is still pending.' }));
+  if (body.dryRun === true) {
+    try {
+      const plan = await readResetPlan(currentSupabaseClient);
+      return res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ success: true, dryRun: true, resetWouldClear: plan.tables, preservedTables: plan.preservedTables, historySpoolPendingCount: 0, note: 'No database or runtime state was modified.' }));
+    } catch (error) {
+      return res.writeHead(500, { 'Content-Type': 'application/json' }).end(JSON.stringify({ success: false, dryRun: true, error: error.message }));
+    }
+  }
+  if (resetInProgress || resetPromise) return res.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ success: false, error: 'Reset already in progress.' }));
+  resetInProgress = true;
+  const resetId = randomUUID();
+  lastResetId = resetId;
+  resetPromise = performResetAll(resetId).finally(() => {
+    resetInProgress = false;
+    resetPromise = null;
+    void historySpool.status().then((status) => { historySpoolStatus = status; });
+    notifyAdaptive();
+  });
+  try {
+    const result = await resetPromise;
+    return res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(result));
+  } catch (error) {
+    logError(`[RESET] resetId=${resetId} failed: ${error.message}`);
+    return res.writeHead(500, { 'Content-Type': 'application/json' }).end(JSON.stringify({ success: false, resetId, error: error.message, note: 'Reset did not complete. Inspect state before retrying.' }));
+  }
+}
+
 async function fetchOfficialHistoryWindow() {
   const sourceResponse = await fetchJsonWithFailover({
     hosts: OFFICIAL_WINGO_HISTORY_HOSTS,
@@ -409,6 +597,10 @@ async function persistHistorySpoolEntry(supabaseClient, spoolEntry) {
       historyNewestPersistedPeriod = period;
     }
     lastInsertedPeriod = period;
+    if (postResetHistoryBoundary && compareHistoryPeriods(period, postResetHistoryBoundary) > 0) {
+      log(`[HISTORY] post-reset boundary=${postResetHistoryBoundary} established_by=${period}`);
+      postResetHistoryBoundary = null;
+    }
     log(`[HISTORY] period=${period} status=persisted`);
   }
   await historySpool.acknowledge(spoolEntry);
@@ -441,7 +633,10 @@ async function drainHistorySpool(supabaseClient, reason = 'poll') {
 
 async function spoolHistoryResponse(sourceResponse) {
   const list = sourceResponse.payload?.data?.list;
-  const valid = Array.isArray(list) ? list.map(validHistoryItem).filter(Boolean) : [];
+  const sourceValid = Array.isArray(list) ? list.map(validHistoryItem).filter(Boolean) : [];
+  const resetBoundary = postResetHistoryBoundary;
+  const valid = filterHistoryRecordsAfterBoundary(sourceValid, resetBoundary, (entry) => entry.issueNumber);
+  const boundaryFilteredCount = sourceValid.length - valid.length;
   const periods = valid.map(({ issueNumber }) => issueNumber);
   const gaps = detectHistoryGaps(historyNewestPersistedPeriod, periods);
   for (const gap of gaps) {
@@ -465,8 +660,9 @@ async function spoolHistoryResponse(sourceResponse) {
     historySpoolStatus = await historySpool.status();
     log(`[HISTORY] batch=${result.key} status=spooled records=${records.length} new_records=${newRecords.length} pending_spool=${historySpoolStatus.pendingCount}`);
   }
-  log(`[HISTORY] fetched host=${sourceResponse.host} response_ms=${sourceResponse.responseTimeMs} records=${valid.length} spooled=${spooled}`);
-  return { validCount: valid.length, spooled };
+  log(`[HISTORY] fetched host=${sourceResponse.host} response_ms=${sourceResponse.responseTimeMs}` +
+    ` records=${sourceValid.length} accepted=${valid.length} boundary_filtered=${boundaryFilteredCount} spooled=${spooled}`);
+  return { validCount: sourceValid.length, acceptedCount: valid.length, boundaryFilteredCount, spooled };
 }
 
 function t7StatusBody() {
@@ -556,7 +752,7 @@ async function handleT7Entry(supabaseClient, entry, responseTime, origin) {
  * ever throwing out of the polling loop.
  */
 async function fetchAndProcessT7Prediction(supabaseClient) {
-  if (isT7Polling) return;
+  if (isT7Polling || resetInProgress) return;
   isT7Polling = true;
   const pollStartedAt = getTimestamp();
   lastT7PollStartedAt = pollStartedAt;
@@ -847,6 +1043,10 @@ async function startT7Polling(supabaseClient) {
   t7PollingRunning = true;
   try {
     while (running) {
+      if (resetInProgress) {
+        await sleep(100);
+        continue;
+      }
       try {
         await fetchAndProcessT7Prediction(supabaseClient);
       } catch (err) {
@@ -881,6 +1081,13 @@ let running = true;
 let isFetching = false;
 let timeType = 'iso';
 let collectorPromise = null;
+let currentSupabaseClient = null;
+let resetInProgress = false;
+let lastResetAt = null;
+let lastResetId = null;
+let resetStartPeriod = null;
+let postResetHistoryBoundary = null;
+let resetPromise = null;
 
 // T7 reset detection belongs to the T7 pipeline; history polling never reads
 // the T7 table. Kept as a named false hook only to preserve the old branch's
@@ -911,6 +1118,15 @@ process.on('SIGTERM', () => { shutdown('SIGTERM').catch((error) => { logError(er
 const healthServer = http.createServer((req, res) => {
   const urlPath = (req.url || '').split('?')[0];
 
+  if (urlPath === '/api/admin/reset-all') {
+    res.setHeader('Cache-Control', 'no-store');
+    void handleAdminResetAll(req, res).catch((error) => {
+      if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: error.message }));
+    });
+    return;
+  }
+
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
@@ -920,27 +1136,11 @@ const healthServer = http.createServer((req, res) => {
     return res.end();
   }
 
-  // POST /reset or /api/reset or /api/real/reset or /real/reset — resets in-memory knownPeriods and T7 signals
+  // Legacy reset aliases are intentionally non-destructive. Use the protected
+  // JSON-confirmed /api/admin/reset-all operation instead.
   if (req.method === 'POST' && (urlPath === '/reset' || urlPath === '/api/reset' || urlPath === '/api/real/reset' || urlPath === '/real/reset')) {
-    const previousCount = knownPeriods.size;
-    const previousT7Count = knownT7Periods.size;
-    knownPeriods.clear();
-    knownT7Periods.clear();
-    inMemoryT7Signals.clear();
-    latestT7Timing = null;
-    log(`[Collector Reset] In-memory known periods cleared (${previousCount} -> 0) and T7 signals cleared (${previousT7Count} -> 0). Collector continuing 24/7 polling.`);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(
-      JSON.stringify({
-        success: true,
-        message: 'All data reset successfully',
-        previousCount,
-        previousT7Count,
-        currentCount: 0,
-        active: isPollingActive,
-        timestamp: getTimestamp(),
-      })
-    );
+    res.writeHead(410, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ success: false, error: 'Legacy reset disabled. Use POST /api/admin/reset-all with RESET_ENABLED=true and confirm: RESET_ALL.' }));
   }
 
   if (req.method === 'GET' && urlPath === '/api/t7/status') {
@@ -1049,6 +1249,10 @@ const healthServer = http.createServer((req, res) => {
         historyContinuityGapCount: historyContinuityGaps.length,
         historyContinuityGaps: historyContinuityGaps.slice(-10),
         historyHistoricalBackfillSupported: false,
+        resetInProgress,
+        lastResetAt,
+        resetId: lastResetId,
+        resetStartPeriod,
         adaptiveStatus: adaptiveCurrent.status,
         adaptiveState: adaptiveCurrent.adaptiveState ?? 'normal',
         recoveryId: adaptiveCurrent.recoveryId ?? null,
@@ -1164,6 +1368,25 @@ async function loadExistingPeriods(supabaseClient) {
   return { totalRows: typeof totalRows === 'number' ? totalRows : knownPeriods.size, newestPeriod };
 }
 
+function createAdaptiveCoordinator() {
+  const launchWorker = () => startAdaptiveWorker({ url: process.env.SUPABASE_URL, key: process.env.SUPABASE_SERVICE_ROLE_KEY, log, logError });
+  const workerRequest = async (method, inputs) => {
+    try {
+      adaptiveWorker ??= launchWorker();
+      return await adaptiveWorker[method](inputs);
+    } catch (error) {
+      await adaptiveWorker?.terminate();
+      adaptiveWorker = null;
+      throw error;
+    }
+  };
+  return new AdaptiveCoordinator({
+    advance: (inputs) => workerRequest('advance', inputs),
+    runRecovery: () => workerRequest('runRecovery'),
+    commitRecovery: () => workerRequest('commitRecovery'),
+  }, { onState: (body) => { adaptiveCurrent = body; } });
+}
+
 // ─── STEP 3: INITIALIZE SUPABASE & RUN 24/7 POLLING LOOP ──────────────────────
 async function startCollector() {
   log('=== WinGo 30S Standalone Backend Collector Starting ===');
@@ -1187,6 +1410,7 @@ async function startCollector() {
       },
     }
   );
+  currentSupabaseClient = supabaseClient;
 
   isDbConnected = false;
   log(`Connecting to Supabase at: ${process.env.SUPABASE_URL.replace(/https?:\/\//, '').split('.')[0]}...`);
@@ -1205,23 +1429,7 @@ async function startCollector() {
   }
 
   try {
-    const launchWorker = () => startAdaptiveWorker({ url: process.env.SUPABASE_URL, key: process.env.SUPABASE_SERVICE_ROLE_KEY, log, logError });
-    const workerRequest = async (method, inputs) => {
-      try {
-        adaptiveWorker ??= launchWorker();
-        return await adaptiveWorker[method](inputs);
-      }
-      catch (error) {
-        await adaptiveWorker?.terminate();
-        adaptiveWorker = null;
-        throw error;
-      }
-    };
-    adaptiveCoordinator = new AdaptiveCoordinator({
-      advance: (inputs) => workerRequest('advance', inputs),
-      runRecovery: () => workerRequest('runRecovery'),
-      commitRecovery: () => workerRequest('commitRecovery'),
-    }, { onState: (body) => { adaptiveCurrent = body; } });
+    adaptiveCoordinator = createAdaptiveCoordinator();
   } catch (error) {
     adaptiveCurrent = { success: false, status: 'error', error: 'Adaptive worker could not start.' };
     logError(`[Adaptive] worker startup failed: ${error.message}`);
@@ -1238,6 +1446,7 @@ async function startCollector() {
   // Retry readiness/checkpoint/network recovery at the existing 5s cadence.
   // The worker has no timer; server.js owns every evaluation request.
   adaptiveRetryTimer = setInterval(() => {
+    if (resetInProgress) return;
     t7PersistenceQueue.retry();
     notifyAdaptive();
   }, T7_POLL_INTERVAL_MS);
@@ -1255,6 +1464,10 @@ async function startCollector() {
   let startupRecoveryComplete = false;
 
   while (running) {
+    if (resetInProgress) {
+      await sleep(100);
+      continue;
+    }
     if (isFetching) {
       await sleep(1000);
       continue;

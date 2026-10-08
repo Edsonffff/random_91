@@ -4,12 +4,14 @@ import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { AdaptiveLearningEngine } from './adaptive-learning.js';
 import { browserHistoryRecord } from './adaptive-learning-store.js';
 import { TEST3_SEQUENCE, scheduledStartFromIssue } from './adaptive-algorithms.generated.js';
 
-async function serverRecoveryFixture(t, { baseline = false, startupFailure = false } = {}) {
+async function serverRecoveryFixture(t, { baseline = false, startupFailure = false, reset = false } = {}) {
   const records = Array.from({ length: baseline ? 5 : 71 }, (_, i) => {
     const issueNumber = String((baseline ? 20261002100052078n : 20260928100050001n) + BigInt(i));
     const createdAt = new Date(scheduledStartFromIssue(issueNumber) + 30_000).toISOString();
@@ -45,6 +47,10 @@ async function serverRecoveryFixture(t, { baseline = false, startupFailure = fal
     real_wingo_30s_history: records.map((r) => ({ game_code: 'WinGo_30S', issue_number: r.issueNumber, number: r.winningNumber, created_at: r.createdAt })),
     wingo_t7_signals: signals,
     wingo_adaptive_checkpoints: [{ game_code: 'WinGo_30S', state: staleCheckpoint, updated_at: checkpointUpdatedAt }],
+    wingo_t7_pending_diagnostics: [{ period_id: activePeriod, signal: 'BIG', state: 'pending' }],
+    wingo_t7_gap_diagnostics: [{ period: 'old-gap', resolved: false }],
+    wingo_t7_poll_audit: [{ id: 1, poll_started_at: checkpointUpdatedAt }],
+    unrelated_application_table: [{ id: 1, value: 'preserve' }],
   };
   let writes = 0;
   let failBaselineLookup = startupFailure;
@@ -65,6 +71,18 @@ async function serverRecoveryFixture(t, { baseline = false, startupFailure = fal
       }
       const table = url.pathname.split('/').at(-1);
       assert.ok(table in database, `Unexpected table ${table}`);
+      const matchesFilters = (row) => [...url.searchParams].every(([key, filter]) => {
+        if (['select', 'order', 'offset', 'limit'].includes(key)) return true;
+        const [operator, ...parts] = filter.split('.');
+        const value = parts.join('.');
+        return operator === 'in' ? value.slice(1, -1).split(',').includes(String(row[key])) : operator === 'eq' ? String(row[key]) === value : operator === 'neq' ? String(row[key]) !== value
+          : operator === 'gt' ? String(row[key]) > value : operator === 'gte' ? String(row[key]) >= value : String(row[key]) <= value;
+      });
+      if (req.method === 'DELETE') {
+        database[table] = database[table].filter((row) => !matchesFilters(row));
+        res.writeHead(204);
+        return res.end();
+      }
       if (req.method === 'POST') {
         let body = '';
         for await (const chunk of req) body += chunk;
@@ -125,10 +143,10 @@ async function serverRecoveryFixture(t, { baseline = false, startupFailure = fal
   await once(dbServer, 'listening');
   t.after(() => new Promise((resolve) => dbServer.close(resolve)));
 
-  async function launch({ ready = true, status = null } = {}) {
+  async function launch({ ready = true, status = null, resetEnabled = false, spoolDir = null, pollIntervalMs = null } = {}) {
     let output = '';
     const child = spawn(process.execPath, ['--import', fileURLToPath(new URL('./fixtures/adaptive-upstream.mjs', import.meta.url)), fileURLToPath(new URL('./server.js', import.meta.url))], {
-      env: { ...process.env, PORT: '0', SUPABASE_URL: `http://127.0.0.1:${dbServer.address().port}`, SUPABASE_SERVICE_ROLE_KEY: 'fixture-only', ADAPTIVE_BASELINE_AFTER_PERIOD: baseline ? '20261002100050850' : 'disabled', ADAPTIVE_FIXTURE_ACTIVE_PERIOD: activePeriod,
+      env: { ...process.env, PORT: '0', RESET_ENABLED: resetEnabled ? 'true' : 'false', ...(pollIntervalMs ? { POLL_INTERVAL_MS: pollIntervalMs } : {}), ...(spoolDir ? { HISTORY_SPOOL_DIR: spoolDir } : {}), SUPABASE_URL: `http://127.0.0.1:${dbServer.address().port}`, SUPABASE_SERVICE_ROLE_KEY: 'fixture-only', ADAPTIVE_BASELINE_AFTER_PERIOD: baseline ? '20261002100050850' : 'disabled', ADAPTIVE_FIXTURE_ACTIVE_PERIOD: activePeriod,
         ADAPTIVE_FIXTURE_UPSTREAM_URL: `http://127.0.0.1:${dbServer.address().port}/_fixture/upstream` },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -169,6 +187,137 @@ async function serverRecoveryFixture(t, { baseline = false, startupFailure = fal
       await delay(100);
     }
     assert.fail(`Adaptive endpoint did not become ready: ${output}`);
+  }
+
+  if (reset) {
+    const spoolDir = await mkdtemp(`${tmpdir()}/wingo-reset-test-`);
+    t.after(() => rm(spoolDir, { recursive: true, force: true }));
+    const disabled = await launch({ resetEnabled: false, spoolDir, pollIntervalMs: '100' });
+    const disabledResponse = await fetch(`http://127.0.0.1:${disabled.port}/api/admin/reset-all`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirm: 'RESET_ALL' }),
+    });
+    assert.equal(disabledResponse.status, 403);
+    await disabled.stop();
+
+    const freshPeriod = String(BigInt(activePeriod) + 100n);
+    const freshNext = String(BigInt(freshPeriod) + 1n);
+    const postResetBaselinePeriod = String(BigInt(freshNext) + 1n);
+    const postResetActivePeriod = String(BigInt(postResetBaselinePeriod) + 1n);
+    const freshCreatedAt = new Date(scheduledStartFromIssue(freshPeriod) + 30_000).toISOString();
+    const freshInput = {
+      active: freshNext,
+      createdAt: freshCreatedAt,
+      history: { serviceTime: Date.parse(freshCreatedAt), data: { list: [
+        { issueNumber: freshPeriod, number: 7 }, { issueNumber: freshNext, number: 4 },
+      ] } },
+      t7: {
+        prediction: { issue: freshNext, size: 'SMALL', status: 'pending', source: 'server', createdAt: Date.parse(freshCreatedAt) },
+        history: [{ issue: freshPeriod, size: 'BIG', status: 'win', source: 'server', actualNumber: 7,
+          settledAt: Date.parse(freshCreatedAt), createdAt: Date.parse(freshCreatedAt) }],
+      },
+    };
+    const enabled = await launch({ resetEnabled: true, spoolDir, pollIntervalMs: '100' });
+    const spool = new (await import('./history-spool.js')).HistorySpool(spoolDir);
+    await spool.initialize();
+    await spool.enqueueBatch([{ game_code: 'WinGo_30S', issue_number: '20261008100059998', number: 1 }]);
+    const refused = await fetch(`http://127.0.0.1:${enabled.port}/api/admin/reset-all`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirm: 'RESET_ALL' }),
+    });
+    assert.equal(refused.status, 409);
+    assert.match((await refused.json()).error, /spool/);
+    const pending = (await spool.listPending())[0];
+    await spool.acknowledge(pending);
+
+    const missing = await fetch(`http://127.0.0.1:${enabled.port}/api/admin/reset-all`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}),
+    });
+    assert.equal(missing.status, 400);
+    const queryConfirmation = await fetch(`http://127.0.0.1:${enabled.port}/api/admin/reset-all?confirm=RESET_ALL`, { method: 'POST' });
+    assert.equal(queryConfirmation.status, 400);
+
+    const dryRunBefore = JSON.stringify(database);
+    const dryRun = await fetch(`http://127.0.0.1:${enabled.port}/api/admin/reset-all`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirm: 'RESET_ALL', dryRun: true }),
+    });
+    assert.equal(dryRun.status, 200);
+    const dryBody = await dryRun.json();
+    assert.equal(dryBody.dryRun, true);
+    assert.equal(JSON.stringify(database), dryRunBefore, 'Dry-run must not mutate fixture data');
+
+    liveInput = freshInput;
+
+    const resetRequests = await Promise.all([1, 2].map(() => fetch(`http://127.0.0.1:${enabled.port}/api/admin/reset-all`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirm: 'RESET_ALL' }),
+    }).then(async (response) => ({ status: response.status, body: await response.json() }))));
+    assert.deepEqual(resetRequests.map((request) => request.status).sort((a, b) => a - b), [200, 409]);
+    const actualBody = resetRequests.find((request) => request.status === 200).body;
+    assert.equal(actualBody.resetStartPeriod, freshNext);
+    assert.ok(actualBody.resetId);
+    const resetHealth = await fetch(`http://127.0.0.1:${enabled.port}/health`).then((response) => response.json());
+    assert.equal(resetHealth.resetInProgress, false);
+    assert.equal(resetHealth.resetId, actualBody.resetId);
+    assert.equal(resetHealth.resetStartPeriod, freshNext);
+    assert.ok(resetHealth.lastResetAt);
+    assert.deepEqual(database.unrelated_application_table, [{ id: 1, value: 'preserve' }]);
+    assert.equal(database.wingo_t7_poll_audit.length, 1, 'Poll audit is preserved');
+    assert.equal(database.real_wingo_30s_history.some((row) => row.issue_number === records[0].issueNumber), false);
+    assert.equal(database.wingo_t7_signals.some((row) => row.period_id === activePeriod), false);
+    assert.equal(database.wingo_adaptive_checkpoints.some((row) => row.game_code === 'WinGo_30S'), false);
+    assert.equal(database.wingo_adaptive_checkpoints.some((row) => row.game_code === 'WinGo_30S:baseline'), false);
+
+    // The first post-reset source window still contains the reset boundary and
+    // older rows, but now also contains two genuinely newer periods. Only the
+    // strict post-boundary suffix may be persisted.
+    const postResetCreatedAt = new Date(scheduledStartFromIssue(postResetBaselinePeriod) + 30_000).toISOString();
+    liveInput = {
+      active: postResetActivePeriod,
+      createdAt: postResetCreatedAt,
+      history: { serviceTime: Date.parse(postResetCreatedAt), data: { list: [
+        { issueNumber: freshPeriod, number: 7 },
+        { issueNumber: freshNext, number: 4 },
+        { issueNumber: postResetBaselinePeriod, number: 8 },
+        { issueNumber: postResetActivePeriod, number: 3 },
+      ] } },
+      t7: {
+        prediction: { issue: postResetActivePeriod, size: 'SMALL', status: 'pending', source: 'server', createdAt: Date.parse(postResetCreatedAt) },
+        history: [{ issue: postResetBaselinePeriod, size: 'BIG', status: 'win', source: 'server', actualNumber: 8,
+          settledAt: Date.parse(postResetCreatedAt), createdAt: Date.parse(postResetCreatedAt) }],
+      },
+    };
+
+    let freshAdaptive;
+    for (let i = 0; i < 120; i++) {
+      const health = await fetch(`http://127.0.0.1:${enabled.port}/health`).then((response) => response.json());
+      if (!health.resetInProgress && health.resetStartPeriod === freshNext) break;
+      await delay(100);
+    }
+    for (let i = 0; i < 200; i++) {
+      if (database.wingo_t7_signals.some((row) => row.period_id === postResetActivePeriod)) break;
+      await delay(100);
+    }
+    assert.ok(database.wingo_t7_signals.some((row) => row.period_id === postResetActivePeriod), 'Fresh T7 prediction must be captured');
+    for (let i = 0; i < 200; i++) {
+      if (database.real_wingo_30s_history.some((row) => row.issue_number === postResetActivePeriod)) break;
+      await delay(100);
+    }
+    assert.equal(database.real_wingo_30s_history.some((row) => row.issue_number === freshPeriod), false, 'Older pre-reset history must not be recreated');
+    assert.equal(database.real_wingo_30s_history.some((row) => row.issue_number === freshNext), false, 'Reset boundary must not be recreated');
+    assert.ok(database.real_wingo_30s_history.some((row) => row.issue_number === postResetBaselinePeriod), 'Strictly newer baseline history must be captured');
+    assert.ok(database.real_wingo_30s_history.some((row) => row.issue_number === postResetActivePeriod), 'Strictly newer history must be captured');
+    for (let i = 0; i < 200; i++) {
+      const body = await fetch(`http://127.0.0.1:${enabled.port}/api/adaptive-learning/current`).then((response) => response.json());
+      if (body.status === 'waiting_for_t7' && body.pendingPeriod === postResetActivePeriod) { freshAdaptive = body; break; }
+      await delay(100);
+    }
+    assert.ok(freshAdaptive, `Fresh Adaptive runtime must remain strict while the fresh T7 input is pending: ${enabled.output}`);
+    assert.equal(freshAdaptive.pendingPeriod, postResetActivePeriod, `${JSON.stringify(freshAdaptive)}\n${enabled.output}`);
+    assert.ok(database.wingo_adaptive_checkpoints.some((row) => row.game_code === 'WinGo_30S:baseline'), 'Fresh baseline checkpoint must be recreated from new durable inputs');
+    await enabled.stop('SIGTERM');
+    const restarted = await launch({ ready: false, resetEnabled: true, spoolDir, pollIntervalMs: '100' });
+    assert.equal(restarted.body.status, 'waiting_for_t7');
+    assert.equal(restarted.body.pendingPeriod, postResetActivePeriod);
+    await restarted.stop('SIGTERM');
+    return;
   }
 
   if (baseline) {
@@ -352,3 +501,5 @@ test('HTTP/worker startup creates a missing baseline checkpoint and restores bas
   { timeout: 90_000 }, (t) => serverRecoveryFixture(t, { baseline: true }));
 test('HTTP/worker startup publishes a failed baseline lookup and retries without remaining loading',
   { timeout: 90_000 }, (t) => serverRecoveryFixture(t, { baseline: true, startupFailure: true }));
+test('protected full reset supports dry-run and fresh strict restart without touching unrelated state',
+  { timeout: 180_000 }, (t) => serverRecoveryFixture(t, { reset: true, baseline: true }));

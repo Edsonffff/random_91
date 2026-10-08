@@ -13,7 +13,8 @@ test('failed source batch remains queued and retry executes it once', async () =
     return 'persisted';
   });
   await assert.rejects(result, /database unavailable/);
-  assert.deepEqual(queue.status(), { pendingCount: 1, blocked: true });
+  assert.equal(queue.status().pendingCount, 1);
+  assert.equal(queue.status().blocked, true);
   assert.deepEqual(errors, ['database unavailable']);
   available = true;
   const retry = new Promise((resolve) => {
@@ -25,6 +26,7 @@ test('failed source batch remains queued and retry executes it once', async () =
   await retry;
   assert.equal(attempts, 2);
   assert.equal(queue.status().pendingCount, 0);
+  assert.equal(queue.status().running, false);
 });
 
 test('later batches cannot pass a failed batch', async () => {

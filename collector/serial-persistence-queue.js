@@ -39,6 +39,6 @@ export class RetryableSerialQueue {
   retry() { void this.pump(); }
 
   status() {
-    return { pendingCount: this.items.length, blocked: this.items.length > 0 && !this.running };
+    return { pendingCount: this.items.length, running: this.running, blocked: this.items.length > 0 && !this.running };
   }
 }

@@ -1213,6 +1213,17 @@ app.post('/api/real/sync', handleSyncHistory);
 // Does NOT delete unrelated tables or user accounts.
 // Clears server in-memory caches and notifies the collector worker.
 const handleResetEndpoint = async (_req: express.Request, res: express.Response) => {
+  // Legacy application reset aliases are intentionally disabled. The collector
+  // owns the only supported full reset and protects it with RESET_ENABLED,
+  // JSON confirmation, spool checks, pause/resume, and checkpoint reset.
+  return res.status(410).json({
+    success: false,
+    error: 'Legacy reset disabled. Use POST /api/admin/reset-all on the collector with confirm: RESET_ALL.',
+  });
+
+  /* Legacy implementation intentionally removed from execution. The collector
+     is now the only reset owner. The old body remains commented for audit
+     history and must not be re-enabled as an unprotected mutation path.
   const client = getSupabaseClient();
   const deletedTables: string[] = [];
 
@@ -1304,7 +1315,7 @@ const handleResetEndpoint = async (_req: express.Request, res: express.Response)
     message: 'All data reset successfully',
     deletedTables,
     timestamp: new Date().toISOString(),
-  });
+  }); */
 };
 
 app.post(['/api/real/reset', '/api/reset', '/real/reset', '/reset'], handleResetEndpoint);

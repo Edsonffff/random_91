@@ -42,6 +42,7 @@ This is a standalone, lightweight Node.js worker service that continuously fetch
 - **Precise Logging**: Clear, timestamped event logs for every step (`Fetch started`, `Period detected`, `already exists → skipped`, `New result → inserted`).
 - **T7 Permanent Capture**: Every BDGTharu `prediction` and `history[]` entry is upserted by `period_id`; pending-to-final transitions preserve the original capture time and finalized values are immutable.
 - **T7 Diagnostics**: Poll audits, provider-window expiry, and provider-stream gaps are available from `GET /api/t7/status` and `/health`.
+- **Protected Full Reset**: An explicitly enabled, JSON-confirmed admin operation can clear only the current collector history/T7/checkpoint state. It is never run automatically.
 
 ---
 
@@ -63,6 +64,55 @@ PORT=8080
 ```
 
 Apply `supabase/migrations/20261007_create_wingo_t7_monitoring.sql` before enabling the durable T7 diagnostics. The current BDGTharu endpoint does not provide verified historical lookup, so the collector reports `historicalBackfillSupported: false` and never issues unsupported period/page queries.
+
+## Controlled full reset
+
+The reset is destructive and disabled by default. It does not run at startup and does not delete the durable `.history-spool` directory.
+
+Enable it only for an intentional maintenance window:
+
+```env
+RESET_ENABLED=true
+```
+
+The spool must already be empty. A pending spool batch causes the reset to refuse. The operation pauses History, T7, and Adaptive processing, clears the current collector state, then resumes normal polling.
+
+Dry-run, with no database or runtime mutation:
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/admin/reset-all \
+  -H 'Content-Type: application/json' \
+  -d '{"confirm":"RESET_ALL","dryRun":true}'
+```
+
+Actual reset:
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/admin/reset-all \
+  -H 'Content-Type: application/json' \
+  -d '{"confirm":"RESET_ALL"}'
+```
+
+The endpoint accepts only `POST`, requires `confirm: RESET_ALL` in the JSON body, rejects query-string confirmation, and returns `403` unless `RESET_ENABLED=true`. Duplicate reset requests are rejected while a reset is running.
+
+Cleared state:
+
+- `public.real_wingo_30s_history` rows for `game_code = WinGo_30S`
+- `public.wingo_t7_signals`
+- `public.wingo_adaptive_checkpoints` keys `WinGo_30S` and `WinGo_30S:baseline`
+- `public.wingo_t7_pending_diagnostics`
+- `public.wingo_t7_gap_diagnostics`
+- in-memory collector/T7/Adaptive runtime state
+
+Preserved state:
+
+- `.history-spool` files; a non-empty spool refuses the reset
+- `public.wingo_t7_poll_audit`
+- Test 3, Test 7, and Test 9 algorithm source
+- T9 prediction tables and unrelated application tables
+- users/authentication, configuration, repository, and Cloudflare settings
+
+After a successful reset, the newest period in the current upstream window becomes `resetStartPeriod`. The first post-reset History response accepts only periods strictly newer than that boundary; older and equal periods are ignored, including across midnight rollover. The boundary remains active until a strictly newer period is successfully persisted. No period before the reset is reconstructed, no missing historical result is fabricated, and no historical backfill beyond the provider window is attempted. Adaptive creates a new baseline only from new durable inputs and continues to wait for exact strict T7 inputs when required.
 
 ---
 
