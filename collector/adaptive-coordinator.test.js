@@ -334,7 +334,8 @@ test('unknown/corrupt checkpoints and history mutation stay recovery_required an
   const { records, signals } = fixture(2);
   const active = nextPeriod(records.at(-1).issueNumber);
   for (const mutate of [
-    (store) => { store.saved.state.runtime.weights[0] = 999; },
+    // Compact checkpoints have no runtime snapshot; corrupt the algorithm version field instead.
+    // An unknown version is terminal and cannot be replayed.
     (store) => { store.saved.state.version = 'unknown'; },
     (store) => { store.records[0].winningNumber = 9; },
   ]) {
@@ -592,7 +593,9 @@ test('recovery_failed is latched: repeated polling/backfill cannot restart corru
   const active = nextPeriod(records.at(-1).issueNumber);
   const store = new MemoryStore(records, signals); activeSignal(store, active);
   await session(store, active).coordinator.onSettledPeriod();
-  store.saved.state.runtimeDigest = 'corrupt';
+  // Compact checkpoints no longer have runtimeDigest; corrupt the algorithm version instead.
+  // An unknown version causes prepareRecovery() to throw InputRevisionError → recovery_failed latch.
+  store.saved.state.version = 'corrupt-unknown-version';
   const saved = structuredClone(store.saved);
   const { runtime, coordinator, logs } = session(store, active);
   const first = await coordinator.onSettledPeriod();

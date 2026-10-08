@@ -42,13 +42,6 @@ export function nextPeriod(period) {
   return `${date.toISOString().slice(0, 10).replaceAll('-', '')}100050001`;
 }
 
-function snapshot(engine) {
-  const state = Object.fromEntries(runtimeFields.map((field) => [field, engine[field]]));
-  state.t7Signals = [...engine.t7Signals];
-  state.firstPredictions = [...engine.firstPredictions];
-  return state;
-}
-
 function restore(checkpoint, log, inputPolicy = ADAPTIVE_INPUT_POLICY) {
   if (hash(canonicalJSON(checkpoint.runtime)) !== checkpoint.runtimeDigest) throw new InputRevisionError('Checkpoint runtime digest mismatch.');
   const engine = new AdaptiveLearningEngine({ log, inputPolicy });
@@ -88,13 +81,32 @@ function verifyInputs(engine, records, signals) {
   if (digest !== engine.inputDigest) throw new InputRevisionError('Durable input digest differs from checkpoint.');
 }
 
+// Fields included in the compact checkpoint digest. These are all bounded and
+// do not grow with History length. Order matters for hash stability.
+const COMPACT_DIGEST_FIELDS = [
+  'version', 'period', 'inputDigest', 'adaptiveInputMode',
+  'predictionIndex', 'test3MissStreak', 'test7MissStreak',
+  'test3MaxLoss', 'test7MaxLoss', 'test9MaxLoss',
+  'weights', 'totalPredictions', 'totalHits',
+  'currentHitStreak', 'currentMissStreak',
+  'longestHitStreak', 'longestMissStreak',
+];
+
+/** Compute a bounded identity digest from compact checkpoint fields only. */
+function compactCheckpointDigest(state) {
+  const fields = Object.fromEntries(COMPACT_DIGEST_FIELDS.map((k) => [k, state[k]]));
+  return hash(canonicalJSON(fields));
+}
+
 function checkpointState(engine) {
   const state = engine.checkpoint();
   state.adaptiveInputMode = engine.inputPolicy.id;
   state.adaptiveRequiredSignals = [...engine.inputPolicy.requiredSignals];
   state.adaptiveOptionalSignals = [...engine.inputPolicy.optionalSignals];
-  state.runtime = snapshot(engine);
-  state.runtimeDigest = hash(canonicalJSON(state.runtime));
+  // Compact checkpoints do NOT embed runtime/history snapshots. Recovery
+  // reconstructs engine state from durable Supabase History + replay.
+  // runtimeDigest is intentionally absent on new checkpoints.
+  state.compactDigest = compactCheckpointDigest(state);
   return structuredClone(state);
 }
 
@@ -227,8 +239,15 @@ export class AdaptiveRuntime {
     // and can leave startup apparently stuck for many minutes.
     const stored = await this.store.signalsSince(null);
     this.store.assertCoverage(new AdaptiveLearningEngine({ inputPolicy: this.inputPolicy }), batch);
-    const candidate = restore(saved.state, this.log, this.inputPolicy);
-    verifyInputs(candidate, batch.records, stored.signals);
+    // Old checkpoints embed a full runtime snapshot for instant restore.
+    // New compact checkpoints are recovered by deterministic replay from durable History.
+    let candidate;
+    if (saved.state.runtime) {
+      candidate = restore(saved.state, this.log, this.inputPolicy);
+      verifyInputs(candidate, batch.records, stored.signals);
+    } else {
+      ({ candidate } = replayCheckpoint(batch.records, stored.signals, saved.state, this.log, this.inputPolicy));
+    }
     this.baseline = metadata;
     this.baselineStartPeriod = metadata.baselineStartPeriod;
     this.engine = candidate;
@@ -457,6 +476,14 @@ export class AdaptiveRuntime {
       return this.body; // Keep the old checkpoint and the partial candidate intact.
     }
     if (checkpoint) candidate.firstPredictions = new Map(checkpoint.firstPredictions ?? []);
+    // For compact checkpoints (no runtime snapshot), verify the replayed inputDigest
+    // matches the checkpoint's stored value. This catches history mutations that
+    // would go undetected without the old runtime.records reference.
+    if (checkpoint?.inputDigest && !checkpoint.runtime
+      && candidate.lastProcessedPeriod === checkpoint.period
+      && candidate.inputDigest !== checkpoint.inputDigest) {
+      throw new InputRevisionError('Full replay inputDigest differs from compact checkpoint: history was mutated.');
+    }
     verifyInputs(candidate, batch.records.slice(0, session.index), stored.signals);
     session.preparedState = checkpointState(candidate);
     session.replayProcessed = session.index;
@@ -517,7 +544,11 @@ export class AdaptiveRuntime {
         throw new InputRevisionError('Recovery boundary digest changed before promotion.');
       }
       const durable = await this.store.loadCheckpointRecord();
-      if (durable?.state.runtimeDigest !== session.preparedState.runtimeDigest) {
+      // New compact checkpoints use compactDigest; old checkpoints use runtimeDigest.
+      // If either identity field differs (or is absent on one side), persist.
+      const durableIdentity = durable?.state.compactDigest ?? durable?.state.runtimeDigest ?? null;
+      const preparedIdentity = session.preparedState.compactDigest ?? session.preparedState.runtimeDigest ?? null;
+      if (durableIdentity !== preparedIdentity) {
         await this.store.saveCheckpoint(session.preparedState);
         this.log(`[CHECKPOINT] period=${session.preparedState.period} status=saved recovery_id=${session.id}`);
       }

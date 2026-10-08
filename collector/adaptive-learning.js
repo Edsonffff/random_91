@@ -242,5 +242,10 @@ export class AdaptiveLearningEngine {
     this.activePrediction = checkpoint.activePrediction;
     this.activeSignals = checkpoint.activeSignals;
     this.firstPredictions = new Map(checkpoint.firstPredictions);
+    // Restore the prediction cache key so predict() does not rerun on the same
+    // period and overwrite predictedAt with the current clock after recovery.
+    if (this.activePrediction?.period && this.lastProcessedPeriod) {
+      this.activeCacheKey = this.activePrediction.period + ':' + this.lastProcessedPeriod;
+    }
   }
 }
