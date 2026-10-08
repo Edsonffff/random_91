@@ -10,6 +10,14 @@ import {
 } from './t7-monitoring.js';
 import { T7IngestionLedger } from './t7-ingestion.js';
 import { startVerifiedMaxLossWorker } from './verified-max-loss-worker.js';
+import { RetryableSerialQueue } from './serial-persistence-queue.js';
+import {
+  compareHistoryPeriods,
+  createDeadline,
+  detectHistoryGaps,
+  fetchJsonWithFailover,
+  HistorySpool,
+} from './history-spool.js';
 
 // Load local environment variables if present
 dotenv.config();
@@ -18,6 +26,9 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS || '30000', 10);
 const RETRY_DELAY_MS = parseInt(process.env.RETRY_DELAY_MS || '10000', 10);
+const HISTORY_REQUEST_TIMEOUT_MS = parseInt(process.env.HISTORY_REQUEST_TIMEOUT_MS || '15000', 10);
+const HISTORY_SUPABASE_TIMEOUT_MS = parseInt(process.env.HISTORY_SUPABASE_TIMEOUT_MS || '15000', 10);
+const HISTORY_SPOOL_DIR = process.env.HISTORY_SPOOL_DIR || `${process.cwd()}/.history-spool`;
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const HOST = '0.0.0.0';
 
@@ -27,6 +38,7 @@ const HOST = '0.0.0.0';
 // host — it only reads what this collector stores in Supabase.
 // BDGTharu uses an unauthenticated GET request.
 const T7_API_BASE_URL = 'https://bdgtharu.com/api.php';
+const T7_SIGNAL_TABLE = 'wingo_t7_signals';
 
 // Timeout for a single T7 request. The polling cadence (5s) stays
 // separate: a slow upstream simply makes a cycle overrun, it does not stack.
@@ -36,7 +48,13 @@ const T7_PENDING_DIAGNOSTICS_TABLE = 'wingo_t7_pending_diagnostics';
 const T7_GAP_DIAGNOSTICS_TABLE = 'wingo_t7_gap_diagnostics';
 const T7_AUDIT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const T7_AUDIT_PRUNE_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const OFFICIAL_WINGO_HISTORY_PATH = '/WinGo/WinGo_30S/GetHistoryIssuePage.json';
 const OFFICIAL_WINGO_HISTORY_URL = 'https://draw.ar-lottery01.com/WinGo/WinGo_30S/GetHistoryIssuePage.json';
+const OFFICIAL_WINGO_HISTORY_HOSTS = [
+  OFFICIAL_WINGO_HISTORY_URL.replace(OFFICIAL_WINGO_HISTORY_PATH, ''),
+  'https://draw.ar-lottery02.com',
+  'https://draw.ar-lottery03.com',
+];
 
 let adaptiveWorker;
 let adaptiveCoordinator;
@@ -46,6 +64,7 @@ let adaptiveCurrent = { success: false, status: 'initializing' };
 
 function notifyAdaptive(period) {
   if (!running || !adaptiveCoordinator) return;
+  if (t7PersistenceQueue?.status().pendingCount > 0) return;
   adaptiveCoordinator.onSettledPeriod({ period }).catch((error) => {
     adaptiveCurrent = { success: false, status: 'error', error: 'Adaptive runtime unavailable; retrying.', checkpointStatus: 'pending_retry',
       latestEvaluatedPeriod: adaptiveCurrent.latestEvaluatedPeriod ?? null, checkpointAt: adaptiveCurrent.checkpointAt ?? null };
@@ -309,6 +328,147 @@ function t7WindowPeriods(entries) {
   };
 }
 
+async function supabaseResultWithDeadline(query, label, timeoutMs = HISTORY_SUPABASE_TIMEOUT_MS) {
+  const deadline = createDeadline(timeoutMs, label);
+  try {
+    const result = await query.abortSignal(deadline.signal);
+    if (result.error) throw new Error(`${label}: ${result.error.message}`);
+    return result;
+  } catch (error) {
+    if (deadline.signal.aborted) throw new Error(`${label}: timed out after ${timeoutMs}ms`);
+    throw error;
+  } finally {
+    deadline.clear();
+  }
+}
+
+async function supabaseWithDeadline(query, label, timeoutMs = HISTORY_SUPABASE_TIMEOUT_MS) {
+  return (await supabaseResultWithDeadline(query, label, timeoutMs)).data;
+}
+
+async function fetchOfficialHistoryWindow() {
+  const sourceResponse = await fetchJsonWithFailover({
+    hosts: OFFICIAL_WINGO_HISTORY_HOSTS,
+    path: OFFICIAL_WINGO_HISTORY_PATH,
+    timeoutMs: HISTORY_REQUEST_TIMEOUT_MS,
+  });
+  for (const failure of sourceResponse.failures) {
+    logError(`[HISTORY] source failed host=${failure.host} reason=${failure.reason}; failover continued`);
+  }
+  if (historySourceHost && historySourceHost !== sourceResponse.host) {
+    log(`[HISTORY] source failover ${historySourceHost} -> ${sourceResponse.host}`);
+  }
+  historySourceHost = sourceResponse.host;
+  return sourceResponse;
+}
+
+function validHistoryItem(item) {
+  const issueNumber = String(item?.issueNumber ?? '').trim();
+  const rawNum = item?.number;
+  const number = typeof rawNum === 'number' ? rawNum : parseInt(String(rawNum ?? ''), 10);
+  if (!issueNumber || !Number.isInteger(number) || number < 0 || number > 9) return null;
+  return { item, issueNumber };
+}
+
+async function persistHistorySpoolEntry(supabaseClient, spoolEntry) {
+  const records = Array.isArray(spoolEntry.records) ? spoolEntry.records : [spoolEntry.record];
+  for (const originalRecord of records) {
+    const period = originalRecord.issue_number;
+    if (knownPeriods.has(period)) continue;
+    let recordPayload = { ...originalRecord };
+    if (timeType === 'millis' && typeof recordPayload.source_time === 'string') {
+      recordPayload.source_time = Date.parse(recordPayload.source_time) || Date.now();
+    }
+    let insertError = null;
+    try {
+      await supabaseWithDeadline(
+        supabaseClient.from('real_wingo_30s_history').upsert([recordPayload], {
+          onConflict: 'game_code,issue_number', ignoreDuplicates: true,
+        }),
+        `Persist history ${period}`,
+      );
+    } catch (error) {
+      insertError = error;
+    }
+
+    if (insertError && /22007|22P02|invalid input syntax|date\/time field/i.test(insertError.message) && timeType === 'iso') {
+      timeType = 'millis';
+      recordPayload = { ...recordPayload, source_time: Date.parse(recordPayload.source_time) || Date.now() };
+      await supabaseWithDeadline(
+        supabaseClient.from('real_wingo_30s_history').upsert([recordPayload], {
+          onConflict: 'game_code,issue_number', ignoreDuplicates: true,
+        }),
+        `Persist history ${period} retry`,
+      );
+      insertError = null;
+    }
+    if (insertError) throw insertError;
+
+    knownPeriods.add(period);
+    if (!historyNewestPersistedPeriod || compareHistoryPeriods(period, historyNewestPersistedPeriod) > 0) {
+      historyNewestPersistedPeriod = period;
+    }
+    lastInsertedPeriod = period;
+    log(`[HISTORY] period=${period} status=persisted`);
+  }
+  await historySpool.acknowledge(spoolEntry);
+  historySpoolStatus = await historySpool.status();
+  log(`[HISTORY] batch=${spoolEntry.spool_key} status=acknowledged pending_spool=${historySpoolStatus.pendingCount}`);
+}
+
+async function drainHistorySpool(supabaseClient, reason = 'poll') {
+  const pending = await historySpool.listPending();
+  if (!pending.length) return { pendingCount: 0, persisted: 0 };
+  log(`[HISTORY] spool drain reason=${reason} pending=${pending.length}`);
+  let persisted = 0;
+  for (const entry of pending) {
+    try {
+      await persistHistorySpoolEntry(supabaseClient, entry);
+      persisted++;
+    } catch (error) {
+      const retryCount = historySpool.recordRetry(entry.spool_key);
+      historySpoolLastError = error.message;
+      const periods = Array.isArray(entry.records) ? entry.records.map((record) => record.issue_number).join(',') : entry.record.issue_number;
+      logError(`[HISTORY] persistence retry periods=${periods} retry=${retryCount} pending_spool=${pending.length} error=${error.message}`);
+      break;
+    }
+  }
+  const status = await historySpool.status();
+  historySpoolStatus = status;
+  log(`[HISTORY] spool status pending=${status.pendingCount} oldest_pending_age_ms=${status.oldestPendingAgeMs ?? 'none'} retry_count=${status.retryCount}`);
+  return { pendingCount: status.pendingCount, persisted };
+}
+
+async function spoolHistoryResponse(sourceResponse) {
+  const list = sourceResponse.payload?.data?.list;
+  const valid = Array.isArray(list) ? list.map(validHistoryItem).filter(Boolean) : [];
+  const periods = valid.map(({ issueNumber }) => issueNumber);
+  const gaps = detectHistoryGaps(historyNewestPersistedPeriod, periods);
+  for (const gap of gaps) {
+    const alreadyReported = historyContinuityGaps.some((existing) => existing.after === gap.after && existing.observedNext === gap.observedNext);
+    if (!alreadyReported) {
+      historyContinuityGaps.push({ ...gap, detectedAt: getTimestamp(), source: sourceResponse.host });
+      log(`[HISTORY] continuity gap detected after=${gap.after} expected_next=${gap.expectedNext} observed_next=${gap.observedNext} source=${sourceResponse.host}`);
+    }
+  }
+  const chronological = [...valid].sort((left, right) => compareHistoryPeriods(left.issueNumber, right.issueNumber));
+  const records = chronological.map(({ item }) => formatRecordForSupabase(item, sourceResponse.payload.serviceTime, timeType));
+  const newRecords = records.filter((record) => !knownPeriods.has(record.issue_number));
+  let spooled = 0;
+  if (newRecords.length) {
+    const result = await historySpool.enqueueBatch(records, {
+      sourceUrl: `${sourceResponse.host}${OFFICIAL_WINGO_HISTORY_PATH}`,
+      upstreamItems: chronological.map(({ item }) => item),
+      serviceTime: sourceResponse.payload.serviceTime ?? null,
+    });
+    spooled = result.created ? newRecords.length : 0;
+    historySpoolStatus = await historySpool.status();
+    log(`[HISTORY] batch=${result.key} status=spooled records=${records.length} new_records=${newRecords.length} pending_spool=${historySpoolStatus.pendingCount}`);
+  }
+  log(`[HISTORY] fetched host=${sourceResponse.host} response_ms=${sourceResponse.responseTimeMs} records=${valid.length} spooled=${spooled}`);
+  return { validCount: valid.length, spooled };
+}
+
 function t7StatusBody() {
   const diagnostics = t7Diagnostics.status();
   return {
@@ -364,6 +524,10 @@ const t7Ledger = new T7IngestionLedger({
   },
   log,
   logError: (message) => logError(message),
+});
+
+const t7PersistenceQueue = new RetryableSerialQueue({
+  onError: (error) => logError(`[T7] persistence queue blocked; retrying exact batch: ${error.message}`),
 });
 
 let currentT7Client = null;
@@ -540,13 +704,14 @@ async function fetchAndProcessT7Prediction(supabaseClient) {
       lastT7PollStatus = 'empty_response';
     }
 
-    // No Adaptive read can run between prediction and history[] finalization.
+    // T7 persistence is serialized independently. Adaptive is notified only
+    // after this exact response batch is durably persisted.
     if (responseEntries.length) {
-      await adaptiveCoordinator.ingest(async () => {
+      await t7PersistenceQueue.enqueue(async () => {
         for (const entry of responseEntries) {
           await handleT7Entry(supabaseClient, entry, responseTime, entry === prediction ? 'prediction' : 'history');
         }
-      }, 't7');
+      });
     }
     if (pendingPeriod && responseEntries.some((entry) => entry.period_id === pendingPeriod)) {
       const persisted = inMemoryT7Signals.get(pendingPeriod);
@@ -556,7 +721,7 @@ async function fetchAndProcessT7Prediction(supabaseClient) {
       lastT7PollStatus = 'healthy';
       lastT7PollError = null;
     }
-    notifyAdaptive();
+    if (t7PersistenceQueue.status().pendingCount === 0) notifyAdaptive();
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     errorMessage = msg;
@@ -706,9 +871,21 @@ let isPollingActive = false;
 let lastCycleStatus = 'initializing';
 let lastFetchTime = null;
 let lastInsertedPeriod = null;
+let historyNewestPersistedPeriod = null;
+let historySpool;
+let historySpoolStatus = { pendingCount: 0, oldestPendingAgeMs: null, retryCount: 0 };
+let historyContinuityGaps = [];
+let historySpoolLastError = null;
+let historySourceHost = null;
 let running = true;
 let isFetching = false;
 let timeType = 'iso';
+let collectorPromise = null;
+
+// T7 reset detection belongs to the T7 pipeline; history polling never reads
+// the T7 table. Kept as a named false hook only to preserve the old branch's
+// diagnostics during deployment diff review.
+function historyOwnsT7ResetCheck() { return false; }
 
 let shuttingDown = false;
 async function shutdown(signal) {
@@ -721,6 +898,7 @@ async function shutdown(signal) {
   await adaptiveCoordinator?.tail;
   await adaptiveWorker?.terminate();
   await verifiedMaxLossWorker?.terminate();
+  await collectorPromise?.catch(() => {});
   healthServer.close(() => process.exit(0));
   healthServer.closeIdleConnections?.();
 }
@@ -862,6 +1040,15 @@ const healthServer = http.createServer((req, res) => {
         t7HistoricalBackfillSupported: false,
         t7LastError: lastT7PollError,
         historyPollIntervalMs: POLL_INTERVAL_MS,
+        historySourceHost,
+        historyNewestPersistedPeriod,
+        historySpoolPendingCount: historySpoolStatus.pendingCount,
+        historySpoolOldestPendingAgeMs: historySpoolStatus.oldestPendingAgeMs,
+        historySpoolRetryCount: historySpoolStatus.retryCount,
+        historySpoolLastError,
+        historyContinuityGapCount: historyContinuityGaps.length,
+        historyContinuityGaps: historyContinuityGaps.slice(-10),
+        historyHistoricalBackfillSupported: false,
         adaptiveStatus: adaptiveCurrent.status,
         adaptiveState: adaptiveCurrent.adaptiveState ?? 'normal',
         recoveryId: adaptiveCurrent.recoveryId ?? null,
@@ -914,7 +1101,8 @@ healthServer.listen(PORT, HOST, () => {
   log(`Render health endpoint active at http://${HOST}:${PORT}/health (HTTP 200)`);
 
   // Start background collector only AFTER the HTTP port is officially open & listening
-  startCollector().catch((err) => {
+  collectorPromise = startCollector();
+  collectorPromise.catch((err) => {
     logError(`Fatal collector background error: ${err.message}`);
   });
 });
@@ -928,13 +1116,23 @@ async function loadExistingPeriods(supabaseClient) {
   let newestPeriod = null;
 
   while (true) {
-    const { data, count, error } = await supabaseClient
-      .from('real_wingo_30s_history')
-      .select('issue_number', { count: from === 0 ? 'exact' : undefined })
-      .eq('game_code', 'WinGo_30S')
-      .order('issue_number', { ascending: false })
-      .range(from, from + BATCH_SIZE - 1);
-
+    let result;
+    try {
+      const query = supabaseClient
+        .from('real_wingo_30s_history')
+        .select('issue_number', { count: from === 0 ? 'exact' : undefined })
+        .eq('game_code', 'WinGo_30S')
+        .order('issue_number', { ascending: false })
+        .range(from, from + BATCH_SIZE - 1);
+      const deadline = createDeadline(HISTORY_SUPABASE_TIMEOUT_MS, 'Load existing history');
+      try { result = await query.abortSignal(deadline.signal); }
+      finally { deadline.clear(); }
+    } catch (error) {
+      isDbConnected = false;
+      logError(`Failed to load existing periods from Supabase: ${error.message}`);
+      break;
+    }
+    const { data, count, error } = result;
     if (error) {
       isDbConnected = false;
       logError(`Failed to load existing periods from Supabase: ${error.message}`);
@@ -954,6 +1152,7 @@ async function loadExistingPeriods(supabaseClient) {
         knownPeriods.add(issue);
         if (!newestPeriod) {
           newestPeriod = issue;
+          historyNewestPersistedPeriod = issue;
         }
       }
     }
@@ -991,6 +1190,10 @@ async function startCollector() {
 
   isDbConnected = false;
   log(`Connecting to Supabase at: ${process.env.SUPABASE_URL.replace(/https?:\/\//, '').split('.')[0]}...`);
+  historySpool = await new HistorySpool(HISTORY_SPOOL_DIR).initialize();
+  const initialSpoolStatus = await historySpool.status();
+  historySpoolStatus = initialSpoolStatus;
+  log(`[HISTORY] durable spool initialized pending=${initialSpoolStatus.pendingCount} oldest_pending_age_ms=${initialSpoolStatus.oldestPendingAgeMs ?? 'none'}`);
 
   try {
     verifiedMaxLossWorker = startVerifiedMaxLossWorker({
@@ -1034,7 +1237,10 @@ async function startCollector() {
   await loadT7Diagnostics(supabaseClient);
   // Retry readiness/checkpoint/network recovery at the existing 5s cadence.
   // The worker has no timer; server.js owns every evaluation request.
-  adaptiveRetryTimer = setInterval(notifyAdaptive, T7_POLL_INTERVAL_MS);
+  adaptiveRetryTimer = setInterval(() => {
+    t7PersistenceQueue.retry();
+    notifyAdaptive();
+  }, T7_POLL_INTERVAL_MS);
   notifyAdaptive();
 
   // Dedicated background 5-second Test 7 prediction worker (bdgtharu.com)
@@ -1046,6 +1252,7 @@ async function startCollector() {
   log(`Starting 24/7 continuous polling loop (interval: ${POLL_INTERVAL_MS / 1000}s)...`);
   isPollingActive = true;
   lastCycleStatus = 'active';
+  let startupRecoveryComplete = false;
 
   while (running) {
     if (isFetching) {
@@ -1057,13 +1264,27 @@ async function startCollector() {
     let nextDelay = POLL_INTERVAL_MS;
 
     try {
+      if (!startupRecoveryComplete) {
+        const recovered = await drainHistorySpool(supabaseClient, 'startup');
+        if (recovered.pendingCount > 0) {
+          lastCycleStatus = 'spool_recovery_pending';
+          nextDelay = RETRY_DELAY_MS;
+          await sleep(nextDelay);
+          continue;
+        }
+        startupRecoveryComplete = true;
+        log('[HISTORY] startup spool recovery complete; normal polling may begin');
+      } else {
+        await drainHistorySpool(supabaseClient, 'pre_fetch');
+      }
+
       // If knownPeriods has entries, verify Supabase was not reset to 0
       if (knownPeriods.size > 0) {
         try {
-          const { count: currentDbCount, error: checkErr } = await supabaseClient
+          const checkResult = await supabaseResultWithDeadline(supabaseClient
             .from('real_wingo_30s_history')
-            .select('issue_number', { count: 'exact', head: true });
-          if (!checkErr && currentDbCount === 0) {
+            .select('issue_number', { count: 'exact', head: true }), 'Check history persistence');
+          if (checkResult.count === 0) {
             log(`[Database Reset Detected] Supabase history table is empty. Cleared ${knownPeriods.size} cached periods from memory.`);
             knownPeriods.clear();
           }
@@ -1073,10 +1294,10 @@ async function startCollector() {
       }
 
       // If knownT7Periods has entries, verify Supabase wingo_t7_signals was not reset to 0
-      if (knownT7Periods.size > 0) {
+      if (historyOwnsT7ResetCheck() && knownT7Periods.size > 0) {
         try {
           const { count: currentT7Count, error: t7CheckErr } = await supabaseClient
-            .from('wingo_t7_signals')
+            .from(T7_SIGNAL_TABLE)
             .select('period_id', { count: 'exact', head: true });
           if (!t7CheckErr && currentT7Count === 0) {
             log(`[Database Reset Detected] Supabase wingo_t7_signals table is empty. Cleared ${knownT7Periods.size} cached T7 periods.`);
@@ -1089,94 +1310,18 @@ async function startCollector() {
         }
       }
 
-      log('Fetch started');
+      log('[HISTORY] fetch started');
       lastFetchTime = getTimestamp();
+      const sourceResponse = await fetchOfficialHistoryWindow();
 
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15000);
-
-      const response = await fetch(`${OFFICIAL_WINGO_HISTORY_URL}?ts=${Date.now()}`, {
-        method: 'GET',
-        headers: {
-          'Accept': 'application/json, text/plain, */*',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        },
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeoutId);
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status} ${response.statusText}`);
-      }
-
-      log('API response received');
-
-      const payload = await response.json();
-      if (!running) break;
-      const list = payload?.data?.list;
-
-      if (!Array.isArray(list) || list.length === 0) {
-        throw new Error('API returned empty or invalid records list');
-      }
-
-      // Process chronologically (oldest to newest among fetched batch)
-      const batchChronological = [...list].reverse();
-
-      await adaptiveCoordinator.ingest(async () => {
-        for (const item of batchChronological) {
-          const issueNumber = String(item.issueNumber || '').trim();
-          const rawNum = item.number;
-          const num = typeof rawNum === 'number' ? rawNum : parseInt(String(rawNum ?? ''), 10);
-
-          if (!issueNumber || isNaN(num) || num < 0 || num > 9) {
-            continue;
-          }
-
-          log(`[COLLECTOR] period=${issueNumber} status=received`);
-
-          if (knownPeriods.has(issueNumber)) {
-            log(`Period ${issueNumber} already exists → skipped`);
-            continue;
-          }
-
-          // New result! Insert into Supabase
-          let recordPayload = formatRecordForSupabase(item, payload.serviceTime, timeType);
-
-          let { error: insertError } = await supabaseClient
-            .from('real_wingo_30s_history')
-            .upsert([recordPayload], { onConflict: 'game_code,issue_number' });
-
-          // Handle possible column source_time type format differences (millis vs ISO)
-          if (
-            insertError &&
-            (insertError.code === '22007' || insertError.code === '22P02') &&
-            timeType === 'iso'
-          ) {
-            timeType = 'millis';
-            recordPayload = formatRecordForSupabase(item, payload.serviceTime, 'millis');
-            const retryRes = await supabaseClient
-              .from('real_wingo_30s_history')
-              .upsert([recordPayload], { onConflict: 'game_code,issue_number' });
-            insertError = retryRes.error;
-          }
-
-          if (insertError) {
-            isDbConnected = false;
-            logError(`Database insertion failure for Period ${issueNumber}: ${insertError.message}`);
-            throw new Error(`History persistence failed at ${issueNumber}`);
-          } else {
-            isDbConnected = true;
-            knownPeriods.add(issueNumber);
-            lastInsertedPeriod = issueNumber;
-            const size = num >= 5 ? 'Big' : 'Small';
-            log(`[HISTORY] period=${issueNumber} status=persisted number=${num} size=${size}`);
-          }
-        }
-      }, 'history');
+      const result = await spoolHistoryResponse(sourceResponse);
+      await drainHistorySpool(supabaseClient, 'post_fetch');
+      const spoolStatus = await historySpool.status();
+      isDbConnected = spoolStatus.pendingCount === 0;
       notifyAdaptive();
+      log(`[HISTORY] cycle complete fetched=${result.validCount} spooled=${result.spooled} pending_spool=${spoolStatus.pendingCount}`);
 
-      lastCycleStatus = 'healthy';
+      lastCycleStatus = spoolStatus.pendingCount === 0 ? 'healthy' : 'spool_pending_retry';
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       logError(`API request failed: ${errMsg} → retrying`);

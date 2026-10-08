@@ -12,16 +12,17 @@ This is a standalone, lightweight Node.js worker service that continuously fetch
 │ 24/7 Standalone Backend Worker  │
 └────────────────┬────────────────┘
                  │
-          Fetch source API
-            every ~30 sec
-                 │
-                 ▼
-         Check new period
-                 │
-         Prevent duplicates
-                 │
-                 ▼
-         Supabase Database (public.real_wingo_30s_history)
+           Fetch source API
+             every ~30 sec
+                  │
+                  ▼
+           Durable local spool
+                  │
+                   ▼
+           Check new period
+                  │
+                  ▼
+          Supabase Database (public.real_wingo_30s_history)
                  │
                  ▼
          React Dashboard (reads/displays latest data)
@@ -35,6 +36,9 @@ This is a standalone, lightweight Node.js worker service that continuously fetch
 - **Deduplication**: Checks both an in-memory set and Supabase unique constraint (`game_code,issue_number`).
 - **Preserves Existing Data**: Pre-loads all 1,042+ historical records on boot and only appends new draws.
 - **Fault-Tolerant Polling Loop**: Never crashes on network drops, HTTP errors, or upstream rate limits; automatically logs failures and retries.
+- **Durable History Spool**: Every newly received history record is atomically written to `.history-spool` before Supabase persistence. Entries are removed only after an acknowledged upsert and are replayed before normal history polling after restart.
+- **Official Mirror Failover**: History requests try the official mirror hosts already used by the project, without assuming any mirror provides historical backfill.
+- **History Continuity Diagnostics**: The health endpoint reports the newest persisted period, pending spool age, retries, and observed gaps without fabricating periods.
 - **Precise Logging**: Clear, timestamped event logs for every step (`Fetch started`, `Period detected`, `already exists → skipped`, `New result → inserted`).
 - **T7 Permanent Capture**: Every BDGTharu `prediction` and `history[]` entry is upserted by `period_id`; pending-to-final transitions preserve the original capture time and finalized values are immutable.
 - **T7 Diagnostics**: Poll audits, provider-window expiry, and provider-stream gaps are available from `GET /api/t7/status` and `/health`.
@@ -52,6 +56,9 @@ SUPABASE_SERVICE_ROLE_KEY=your-supabase-service-role-key
 # Optional settings:
 POLL_INTERVAL_MS=30000
 RETRY_DELAY_MS=10000
+HISTORY_SPOOL_DIR=.history-spool
+HISTORY_REQUEST_TIMEOUT_MS=15000
+HISTORY_SUPABASE_TIMEOUT_MS=15000
 PORT=8080
 ```
 
