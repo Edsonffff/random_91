@@ -222,6 +222,26 @@ async function serverRecoveryFixture(t, { baseline = false, startupFailure = fal
     for (const field of ['weights', 'test3MaxLoss', 'test7MaxLoss', 'test9MaxLoss', 'latestEvaluation', 'activePrediction']) {
       assert.deepEqual(first.body[field], reference.current()[field], field);
     }
+    if (!startupFailure) {
+      const checkpointBeforeWaiting = structuredClone(saved);
+      database.real_wingo_30s_history.push({ game_code: 'WinGo_30S', issue_number: activePeriod,
+        number: 6, created_at: new Date(scheduledStartFromIssue(activePeriod) + 30_000).toISOString() });
+      let independentWaiting;
+      for (let i = 0; i < 150; i++) {
+        const body = await fetch(`http://127.0.0.1:${first.port}/api/adaptive-learning/current`).then((r) => r.json());
+        if (body.status === 'waiting_for_t7' && body.maxLoss) { independentWaiting = body; break; }
+        await delay(100);
+      }
+      assert.ok(independentWaiting, 'Independent Max Loss must be served while Adaptive waits for the provider settlement');
+      assert.equal(independentWaiting.success, false);
+      assert.equal(independentWaiting.pendingPeriod, activePeriod);
+      assert.equal(independentWaiting.latestEvaluatedPeriod, records.at(-1).issueNumber);
+      assert.deepEqual(database.wingo_adaptive_checkpoints.find((row) => row.game_code === 'WinGo_30S:baseline'), checkpointBeforeWaiting);
+      assert.equal(database.wingo_t7_signals.find((row) => row.period_id === activePeriod).status, 'pending');
+      for (const name of ['test3', 'test7', 'test9']) assert.ok(Number.isInteger(independentWaiting.maxLoss[name]));
+      // Restore only the local test fixture before exercising its original clean restart.
+      database.real_wingo_30s_history.pop();
+    }
     await first.stop();
     const writesBeforeRestart = writes;
     const restarted = await launch();

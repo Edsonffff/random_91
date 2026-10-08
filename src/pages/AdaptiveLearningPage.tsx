@@ -5,7 +5,6 @@ import { AdaptiveMaxLoss } from '../components/history/AdaptiveMaxLoss';
 
 export const AdaptiveLearningPage: React.FC = () => {
   const serverState = useServerAdaptiveLearning();
-  const { data } = serverState;
   return (
     <div className="space-y-6 animate-in fade-in duration-300">
       {/* Page Header */}
@@ -22,7 +21,7 @@ export const AdaptiveLearningPage: React.FC = () => {
       {/* Mount the server-backed panel without the full-history analysis parent. */}
       <AdaptiveLearningPanel serverState={serverState} />
 
-      <AdaptiveMaxLoss data={data} />
+      <AdaptiveMaxLoss metric={serverState.maxLoss} />
     </div>
   );
 };

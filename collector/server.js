@@ -9,6 +9,7 @@ import {
   T7Diagnostics,
 } from './t7-monitoring.js';
 import { T7IngestionLedger } from './t7-ingestion.js';
+import { startVerifiedMaxLossWorker } from './verified-max-loss-worker.js';
 
 // Load local environment variables if present
 dotenv.config();
@@ -40,6 +41,7 @@ const OFFICIAL_WINGO_HISTORY_URL = 'https://draw.ar-lottery01.com/WinGo/WinGo_30
 let adaptiveWorker;
 let adaptiveCoordinator;
 let adaptiveRetryTimer;
+let verifiedMaxLossWorker;
 let adaptiveCurrent = { success: false, status: 'initializing' };
 
 function notifyAdaptive(period) {
@@ -718,6 +720,7 @@ async function shutdown(signal) {
   await adaptiveCoordinator?.flight;
   await adaptiveCoordinator?.tail;
   await adaptiveWorker?.terminate();
+  await verifiedMaxLossWorker?.terminate();
   healthServer.close(() => process.exit(0));
   healthServer.closeIdleConnections?.();
 }
@@ -812,12 +815,13 @@ const healthServer = http.createServer((req, res) => {
 
   // Lightweight snapshot; waiting is input readiness, not an HTTP outage.
   if (req.method === 'GET' && urlPath === '/api/adaptive-learning/current') {
+    verifiedMaxLossWorker?.refresh();
     const waiting = ['waiting_for_t7', 'waiting_for_history'].includes(adaptiveCurrent.status);
     res.writeHead(adaptiveCurrent.success || waiting ? 200 : 503, {
       'Content-Type': 'application/json',
       'Cache-Control': 'no-store',
     });
-    return res.end(JSON.stringify(adaptiveCurrent));
+    return res.end(JSON.stringify({ ...adaptiveCurrent, maxLoss: verifiedMaxLossWorker?.current() ?? null }));
   }
 
   // GET /health, /api/health, /, /ping — fast, non-blocking 200 OK
@@ -987,6 +991,15 @@ async function startCollector() {
 
   isDbConnected = false;
   log(`Connecting to Supabase at: ${process.env.SUPABASE_URL.replace(/https?:\/\//, '').split('.')[0]}...`);
+
+  try {
+    verifiedMaxLossWorker = startVerifiedMaxLossWorker({
+      url: process.env.SUPABASE_URL, key: process.env.SUPABASE_SERVICE_ROLE_KEY, logError,
+    });
+    verifiedMaxLossWorker.refresh();
+  } catch (error) {
+    logError(`[MAX LOSS] Independent metric startup failed: ${error.message}`);
+  }
 
   try {
     const launchWorker = () => startAdaptiveWorker({ url: process.env.SUPABASE_URL, key: process.env.SUPABASE_SERVICE_ROLE_KEY, log, logError });

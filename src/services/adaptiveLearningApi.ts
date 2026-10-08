@@ -12,6 +12,7 @@ export interface AdaptiveSnapshot extends Omit<AdaptiveResult, 'history' | 'rese
   latestEvaluation: AdaptiveHistoryRow | null;
   status: 'ready';
   checkpointAt: string;
+  /** Adaptive replay checkpoint counters; never the independent Verified Max Loss metric. */
   test3MaxLoss: number;
   test7MaxLoss: number;
   test9MaxLoss: number;
@@ -19,14 +20,30 @@ export interface AdaptiveSnapshot extends Omit<AdaptiveResult, 'history' | 'rese
 
 export interface AdaptiveApiState {
   data: AdaptiveSnapshot | null;
-  status: 'loading' | 'ready' | 'stale' | 'error';
+  status: 'loading' | 'ready' | 'stale' | 'error' | 'waiting_for_t7' | 'waiting_for_history';
   stale: boolean;
   error: string | null;
   receivedAt: number | null;
+  maxLoss: VerifiedMaxLoss | null;
+  pendingPeriod: string | null;
+}
+
+export interface VerifiedMaxLoss {
+  test3: number;
+  test7: number;
+  test9: number;
+  coverage: 'partial' | 'complete';
+  coverageReason: string | null;
+  firstMissingHistoryPeriod: string | null;
+  lastMissingHistoryPeriod: string | null;
+  knownThrough: string | null;
+  scopeStartPeriod: string | null;
+  calculatedAt: string;
+  calculationStatus: 'calculating' | 'ready';
 }
 
 export const INITIAL_ADAPTIVE_API_STATE: AdaptiveApiState = {
-  data: null, status: 'loading', stale: false, error: null, receivedAt: null,
+  data: null, status: 'loading', stale: false, error: null, receivedAt: null, maxLoss: null, pendingPeriod: null,
 };
 
 function object(value: unknown): value is Record<string, unknown> {
@@ -55,6 +72,26 @@ function evaluation(value: unknown): value is AdaptiveHistoryRow {
   return object(value) && prediction({ ...value, decision: value.adaptiveDecision })
     && size(value.actual) && value.t4pred === value.adaptiveDecision && typeof value.isHit === 'boolean'
     && ['t3pred', 't7pred', 't9pred'].every((key) => optionalSize(value[key]));
+}
+
+/** Independent metric validation; a waiting Adaptive response is not a model snapshot. */
+export function parseVerifiedMaxLoss(value: unknown): VerifiedMaxLoss {
+  if (!object(value) || !['test3', 'test7', 'test9'].every((field) => count(value[field]))
+    || !['partial', 'complete'].includes(String(value.coverage))
+    || !['calculating', 'ready'].includes(String(value.calculationStatus))
+    || !text(value.calculatedAt) || !Number.isFinite(Date.parse(value.calculatedAt))
+    || !['coverageReason', 'firstMissingHistoryPeriod', 'lastMissingHistoryPeriod', 'knownThrough', 'scopeStartPeriod']
+      .every((field) => value[field] === null || text(value[field]))) {
+    throw new Error('Malformed verified Max Loss response.');
+  }
+  return {
+    test3: value.test3 as number, test7: value.test7 as number, test9: value.test9 as number,
+    coverage: value.coverage as VerifiedMaxLoss['coverage'], coverageReason: value.coverageReason as string | null,
+    firstMissingHistoryPeriod: value.firstMissingHistoryPeriod as string | null,
+    lastMissingHistoryPeriod: value.lastMissingHistoryPeriod as string | null,
+    knownThrough: value.knownThrough as string | null, scopeStartPeriod: value.scopeStartPeriod as string | null,
+    calculatedAt: value.calculatedAt, calculationStatus: value.calculationStatus as VerifiedMaxLoss['calculationStatus'],
+  };
 }
 
 /** Validate the compact contract; never fill missing predictions/stats with local calculations. */
@@ -128,7 +165,8 @@ export function startAdaptiveLearningPolling(
   function publish() {
     if (disposed) return;
     const stale = state.data ? isAdaptiveSnapshotStale(state.data, now()) : false;
-    state = { ...state, stale, status: state.error ? 'error' : state.data ? (stale ? 'stale' : 'ready') : 'loading' };
+    const waiting = state.status === 'waiting_for_t7' || state.status === 'waiting_for_history';
+    state = { ...state, stale, status: state.error ? 'error' : waiting ? state.status : state.data ? (stale ? 'stale' : 'ready') : 'loading' };
     onUpdate(state);
   }
 
@@ -147,11 +185,18 @@ export function startAdaptiveLearningPolling(
       catch { throw new Error('Malformed Adaptive Learning response: invalid JSON.'); }
       if (disposed) return;
       if (timedOut) throw new Error('Adaptive Learning request timed out.');
+      const maxLoss = object(payload) && payload.maxLoss != null ? parseVerifiedMaxLoss(payload.maxLoss) : state.maxLoss;
+      if (object(payload) && payload.success === false
+        && (payload.status === 'waiting_for_t7' || payload.status === 'waiting_for_history')) {
+        if (!text(payload.pendingPeriod)) throw new Error('Malformed Adaptive Learning waiting response.');
+        state = { ...state, status: payload.status, maxLoss, pendingPeriod: payload.pendingPeriod, receivedAt: now(), error: null };
+        return;
+      }
       const data = parseAdaptiveSnapshot(payload);
       if (state.data && Date.parse(data.checkpointAt) < Date.parse(state.data.checkpointAt)) {
         throw new Error('Outdated Adaptive Learning response: checkpoint moved backwards.');
       }
-      state = { ...state, data, receivedAt: now(), error: null };
+      state = { ...state, status: 'ready', data, maxLoss, pendingPeriod: null, receivedAt: now(), error: null };
     } catch (error) {
       if (disposed) return;
       state = { ...state, error: timedOut ? 'Adaptive Learning request timed out.'

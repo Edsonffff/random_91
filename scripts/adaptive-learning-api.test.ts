@@ -4,6 +4,7 @@ import { setImmediate } from 'node:timers/promises';
 import {
   ADAPTIVE_LEARNING_URL, ADAPTIVE_STALE_AFTER_MS,
   parseAdaptiveSnapshot, isAdaptiveSnapshotStale, startAdaptiveLearningPolling,
+  parseVerifiedMaxLoss,
   type AdaptiveApiState,
 } from '../src/services/adaptiveLearningApi.ts';
 
@@ -189,4 +190,46 @@ test('unmount aborts the current request and prevents all subsequent callbacks/r
   assert.equal(signal!.aborted, true);
   assert.equal(requests, 1);
   assert.equal(states.length, 1);
+});
+
+const metric = () => ({
+  test3: 5, test7: 15, test9: 8, coverage: 'partial', coverageReason: 'historical_gap',
+  firstMissingHistoryPeriod: '20261002100052302', lastMissingHistoryPeriod: '20261002100052347',
+  knownThrough: '20261002100052220', scopeStartPeriod: '20261002100052078',
+  calculatedAt: new Date(NOW).toISOString(), calculationStatus: 'ready',
+});
+
+test('independent metric contract rejects unsafe values and never retains full history', () => {
+  assert.deepEqual(parseVerifiedMaxLoss({ ...metric(), history: Array(10000).fill(0) }), metric());
+  for (const input of [{ ...metric(), test7: -1 }, { ...metric(), test9: Infinity },
+    { ...metric(), test3: 1.5 }, { ...metric(), coverage: 'all-time' }, { ...metric(), calculatedAt: 'invalid' }]) {
+    assert.throws(() => parseVerifiedMaxLoss(input));
+  }
+});
+
+test('a waiting Adaptive response displays independent metrics without inventing an Adaptive snapshot', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: NOW });
+  const states: AdaptiveApiState[] = [];
+  const waiting = { success: false, status: 'waiting_for_t7', pendingPeriod: '20261002100052220', maxLoss: metric() };
+  let payload: unknown = waiting;
+  const fetcher = (async () => Response.json(payload)) as typeof fetch;
+  const stop = startAdaptiveLearningPolling((state) => states.push(state), { fetcher });
+  t.after(stop);
+  await setImmediate();
+  assert.equal(states.at(-1)?.status, 'waiting_for_t7');
+  assert.equal(states.at(-1)?.data, null);
+  assert.equal(states.at(-1)?.error, null);
+  assert.deepEqual(states.at(-1)?.maxLoss, metric());
+  assert.deepEqual([states.at(-1)?.maxLoss?.test3, states.at(-1)?.maxLoss?.test7, states.at(-1)?.maxLoss?.test9], [5, 15, 8]);
+  payload = { ...snapshot(), maxLoss: metric() };
+  t.mock.timers.tick(5000);
+  await setImmediate();
+  assert.equal(states.at(-1)?.status, 'ready');
+  const ready = states.at(-1)?.data;
+  payload = waiting;
+  t.mock.timers.tick(5000);
+  await setImmediate();
+  assert.equal(states.at(-1)?.status, 'waiting_for_t7');
+  assert.equal(states.at(-1)?.data, ready, 'Waiting does not mutate the last real Adaptive snapshot');
+  assert.deepEqual(states.at(-1)?.maxLoss, metric());
 });

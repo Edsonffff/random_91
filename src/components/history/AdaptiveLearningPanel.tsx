@@ -14,7 +14,7 @@ import { CollapsibleCard } from '../common/CollapsibleCard';
 interface Props {
   /** Live feed schedule — used only for the active-round countdown if available. */
   activeSchedule?: RealGameSchedule | null;
-  /** Share the page's compact subscription with its MAX LOSS section. */
+  /** Share the page's compact subscription with its verified Max Loss section. */
   serverState?: AdaptiveApiState;
 }
 
@@ -82,6 +82,31 @@ function SigCell({ pred }: { pred: 'Big' | 'Small' | null }) {
   );
 }
 
+function AdaptiveCheckpointMaxLoss({ data }: { data: NonNullable<AdaptiveApiState['data']> }) {
+  const values = [
+    ['TEST 3', data.test3MaxLoss],
+    ['TEST 7', data.test7MaxLoss],
+    ['TEST 9', data.test9MaxLoss],
+  ] as const;
+  return (
+    <section aria-labelledby="adaptive-checkpoint-max-loss" className="p-4 rounded-xl bg-[#06130F] border border-[#1E3A2B]">
+      <div className="flex flex-wrap items-baseline justify-between gap-2 mb-1">
+        <h2 id="adaptive-checkpoint-max-loss" className="text-xs font-mono font-bold tracking-wider text-[#A78BFA]">ADAPTIVE CHECKPOINT COUNTERS</h2>
+        <span className="text-[10px] font-mono uppercase tracking-wider text-[#8D9B95]">Replay state · Not verified Max Loss</span>
+      </div>
+      <p className="text-[11px] text-[#8D9B95] mb-3">These values belong to the Adaptive replay checkpoint. They are not the independent historical Verified Max Loss metric below.</p>
+      <dl className="grid grid-cols-3 gap-3 text-xs font-mono">
+        {values.map(([label, value]) => (
+          <div key={label} className="flex items-center justify-between gap-2 p-2.5 rounded-lg bg-[#020806] border border-[#1E3A2B]/60">
+            <dt className="text-[#8D9B95]">{label}</dt>
+            <dd className="font-extrabold text-[#A78BFA]">{value}</dd>
+          </div>
+        ))}
+      </dl>
+    </section>
+  );
+}
+
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export const AdaptiveLearningPanel: React.FC<Props> = ({ serverState, ...props }) => {
@@ -97,6 +122,21 @@ const ConnectedAdaptiveLearningPanel: React.FC<Props> = (props) => {
 
 const AdaptiveLearningPanelContent: React.FC<Props & { serverState: AdaptiveApiState }> = ({ activeSchedule, serverState }) => {
   const { data, status, stale, error } = serverState;
+
+  if (status === 'waiting_for_t7' || status === 'waiting_for_history') {
+    const gap = serverState.maxLoss?.firstMissingHistoryPeriod && serverState.maxLoss.lastMissingHistoryPeriod
+      ? `Historical input is unavailable for this range. Historical gap: ${serverState.maxLoss.firstMissingHistoryPeriod} → ${serverState.maxLoss.lastMissingHistoryPeriod}.`
+      : 'Historical input is unavailable for part of the verified scope.';
+    return (
+      <div role="status" aria-live="polite" className="p-5 rounded-xl bg-[#06130F] border border-[#E7B93F]/50 text-sm text-[#E7B93F]">
+        <p>Adaptive Learning status: {status === 'waiting_for_t7' ? 'Waiting for T7 data' : 'Waiting for historical data'}</p>
+        <p className="mt-1 text-xs">Pending period: {serverState.pendingPeriod}</p>
+        <p className="mt-2 text-xs text-[#8D9B95]">Adaptive replay is paused and will not infer or finalize missing inputs. {status === 'waiting_for_t7' ? 'It is waiting for the exact finalized T7 input.' : 'It is waiting for the exact historical input.'}</p>
+        <p className="mt-1 text-xs text-[#8D9B95]">{gap}</p>
+        <p className="mt-2 text-xs text-[#8D9B95]">Verified Max Loss is an independent read-only metric and must not be interpreted as Adaptive checkpoint state.</p>
+      </div>
+    );
+  }
 
   if (!data) {
     return (
@@ -141,6 +181,7 @@ const AdaptiveLearningPanelContent: React.FC<Props & { serverState: AdaptiveApiS
 
   return (
     <div className="space-y-5">
+      <AdaptiveCheckpointMaxLoss data={data} />
       <div role="status" aria-live="polite" className={`p-3 rounded-xl border text-xs font-mono ${live ? 'border-[#1E3A2B] text-[#8D9B95]' : 'border-[#E7B93F]/50 text-[#E7B93F]'}`}>
         {error ? `${error} Showing the last known server snapshot; retrying automatically.`
           : stale ? 'Server checkpoint is stale or its clock is out of sync. Showing the last known snapshot.'
