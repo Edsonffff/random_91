@@ -14,7 +14,8 @@
     "server": "tsx server/mockServer.ts",
     "backtest:t9": "tsx scripts/backtest-periodic-logistic.ts",
     "backtest:t9:multi": "tsx scripts/backtest-cpl3-multi-window.ts",
-    "test:t9": "tsx --test scripts/cpl2-confidence-gate.test.ts"
+    "test:t9": "tsx --test scripts/cpl2-confidence-gate.test.ts",
+    "test:streaks": "tsx --test scripts/test-max-loss-calculator.test.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.117.2",
