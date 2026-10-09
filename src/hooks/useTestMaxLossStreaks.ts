@@ -20,6 +20,11 @@ const DEFAULT_METRIC = (name: 'T3' | 'T7' | 'T9', label: string): TestStreakMetr
   totalMisses: 0,
   accuracy: null,
   latestPrediction: null,
+  longestWinStreak: 0,
+  coverage: 'partial',
+  coverageReason: 'No historical coverage is available yet.',
+  knownThrough: null,
+  unknownPeriods: 0,
 });
 
 function loadCachedStreaks(): AllTestMaxLossResults | null {
@@ -94,6 +99,10 @@ export function useTestMaxLossStreaks(): UseTestMaxLossStreaksReturn {
             confidence: typeof s.confidence === 'number' ? s.confidence : null,
             lucky_number: typeof s.lucky_number === 'number' ? s.lucky_number : null,
             fetched_at: s.fetched_at || s.created_at || new Date().toISOString(),
+            status: typeof s.status === 'string' ? s.status : null,
+            actual_number: typeof s.actual_number === 'number' ? s.actual_number : null,
+            settled_at: typeof s.settled_at === 'string' ? s.settled_at : null,
+            prediction_created_at: typeof s.prediction_created_at === 'string' ? s.prediction_created_at : null,
           };
           newMap.set(pid, entry);
           signalsList.push(entry);

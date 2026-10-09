@@ -30,10 +30,12 @@ function snapshot(checkpoint = NOW) {
     currentHitStreak: 2, currentMissStreak: 0, longestHitStreak: 10, longestMissStreak: 9,
     test3MaxLoss: 13, test7MaxLoss: 0, test9MaxLoss: 4,
     weights: [0.76, 0.23, 0.01], dominantSignalIndex: 0,
-    adaptiveWeights: [0.76 / 0.77, 0.01 / 0.77], adaptiveDominantSignalIndex: 0,
+    adaptiveWeights: [0.75, 0.24, 0.01], adaptiveDominantSignalIndex: 0,
     last20: { hits: 11, total: 20 }, last50: { hits: 24, total: 50 },
     last100: { hits: 45, total: 100 }, last250: { hits: 124, total: 250 },
     lastSignalAgreement: { bigVotes: 1, smallVotes: 1, total: 2, majority: null },
+    latestEvaluatedPeriod: '20261004100051767', predictedAt: new Date(checkpoint).toISOString(),
+    adaptiveCoverage: { status: 'complete', reason: null, knownThrough: '20261004100051767', pendingPeriods: 0, skippedPeriods: 0 },
   };
 }
 
@@ -67,11 +69,11 @@ test('rejects missing fields, unsafe numbers, wrong signal layouts and malformed
     { ...snapshot(), adaptiveRequiredSignals: ['T3'] },
     { ...snapshot(), adaptiveOptionalSignals: ['T3'] },
     { ...snapshot(), t7AvailableForAdaptive: 'no' }, { ...snapshot(), adaptiveBlocked: 0 },
-    { ...snapshot(), adaptiveWeights: [0.5, 0.4] }, { ...snapshot(), adaptiveDominantSignalIndex: 2 },
+    { ...snapshot(), adaptiveWeights: [0.5, 0.4] }, { ...snapshot(), adaptiveDominantSignalIndex: 3 },
   ];
   for (const input of invalid) assert.throws(() => parseAdaptiveSnapshot(input));
   for (const key of Object.keys(snapshot())) {
-    if (key === 'dominantSignalIndex') continue;
+    if (['dominantSignalIndex', 'latestEvaluatedPeriod', 'predictedAt', 'adaptiveCoverage'].includes(key)) continue;
     const missing: Record<string, unknown> = { ...snapshot() };
     delete missing[key];
     assert.throws(() => parseAdaptiveSnapshot(missing), `Missing field: ${key}`);
@@ -206,6 +208,54 @@ const metric = () => ({
   firstMissingHistoryPeriod: '20261002100052302', lastMissingHistoryPeriod: '20261002100052347',
   knownThrough: '20261002100052220', scopeStartPeriod: '20261002100052078',
   calculatedAt: new Date(NOW).toISOString(), calculationStatus: 'ready',
+  tests: {
+    test3: { currentLossStreak: 0, longestLossStreak: 5, scoredPeriods: 0, unknownPeriods: 0, knownThrough: null, recordStartPeriod: null, recordEndPeriod: null },
+    test7: { currentLossStreak: 0, longestLossStreak: 15, scoredPeriods: 0, unknownPeriods: 0, knownThrough: null, recordStartPeriod: null, recordEndPeriod: null },
+    test9: { currentLossStreak: 0, longestLossStreak: 8, scoredPeriods: 0, unknownPeriods: 0, knownThrough: null, recordStartPeriod: null, recordEndPeriod: null },
+  },
+});
+
+test('reuses a valid cached snapshot for HTTP 304 and sends conditional validators', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: NOW });
+  const states: AdaptiveApiState[] = [];
+  const requests: Array<{ options?: RequestInit }> = [];
+  let count = 0;
+  const fetcher = ((_url: string, options?: RequestInit) => {
+    requests.push({ options });
+    count++;
+    return Promise.resolve(count === 1
+      ? new Response(JSON.stringify(snapshot()), { status: 200, headers: { 'Content-Type': 'application/json', ETag: '"v1"' } })
+      : new Response(null, { status: 304 }));
+  }) as typeof fetch;
+  const stop = startAdaptiveLearningPolling((state) => states.push(state), { fetcher });
+  t.after(stop);
+  await setImmediate();
+  const cached = states.at(-1)?.data;
+  t.mock.timers.tick(5000);
+  await setImmediate();
+  assert.equal(requests[1].options?.headers && (requests[1].options?.headers as Record<string, string>)['If-None-Match'], '"v1"');
+  assert.equal(states.at(-1)?.status, 'ready');
+  assert.equal(states.at(-1)?.error, null);
+  assert.deepEqual(states.at(-1)?.data, cached);
+});
+
+test('does not treat an uncached HTTP 304 as a valid Adaptive snapshot', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: NOW });
+  const states: AdaptiveApiState[] = [];
+  let count = 0;
+  const fetcher = ((_url: string, _options?: RequestInit) => {
+    count++;
+    return Promise.resolve(count === 1 ? new Response(null, { status: 304 }) : Response.json(snapshot()));
+  }) as typeof fetch;
+  const stop = startAdaptiveLearningPolling((state) => states.push(state), { fetcher });
+  t.after(stop);
+  await setImmediate();
+  assert.equal(states.at(-1)?.status, 'error');
+  assert.match(states.at(-1)?.error ?? '', /304 without a cached snapshot/);
+  t.mock.timers.tick(5000);
+  await setImmediate();
+  assert.equal(states.at(-1)?.status, 'ready');
+  assert.ok(states.at(-1)?.data);
 });
 
 test('independent metric contract rejects unsafe values and never retains full history', () => {

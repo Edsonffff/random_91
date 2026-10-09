@@ -1,14 +1,51 @@
 import React from 'react';
 import { useResults } from '../context/ResultContext';
 import { useTestMaxLossStreaks } from '../hooks/useTestMaxLossStreaks';
+import { useServerAdaptiveLearning } from '../hooks/useServerAdaptiveLearning';
+import type { AdaptiveApiState } from '../services/adaptiveLearningApi';
 import { StatCard } from '../components/common/StatCard';
 import { ResultTable } from '../components/results/ResultTable';
 import { Link } from 'react-router-dom';
 import { Database, Gamepad2, Calendar, Shield, Sparkles, ArrowRight, Flame } from 'lucide-react';
 
+function AdaptiveDashboardCard({ state }: { state: AdaptiveApiState }) {
+  const data = state.data;
+  const prediction = data?.activePrediction;
+  const signalCount = data?.signals
+    ? [data.signals.t3pred, data.signals.t7pred, data.signals.t9pred].filter(Boolean).length : 0;
+  const nextStatus = prediction ? 'READY' : signalCount > 0 ? 'WAITING' : 'NO SIGNAL';
+  return (
+    <div className="p-4 rounded-xl bg-[#06130F] border border-[#A78BFA]/40 space-y-3 shadow md:col-span-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h3 className="text-xs font-mono font-bold tracking-wider text-[#A78BFA]">ADAPTIVE LEARNING</h3>
+          <p className="text-[11px] text-[#8D9B95] mt-1">Independent Adaptive history and next-period prediction.</p>
+        </div>
+        <span className="text-[10px] font-mono font-bold px-2 py-1 rounded border border-[#A78BFA]/40 text-[#A78BFA]">{nextStatus}</span>
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2 text-center font-mono">
+        <div className="p-2 rounded bg-[#020806] border border-[#1E3A2B]/60"><span className="block text-[10px] text-[#8D9B95]">MAX LOSS</span><strong className="text-[#F04444]">{data?.longestMissStreak ?? '—'}</strong></div>
+        <div className="p-2 rounded bg-[#020806] border border-[#1E3A2B]/60"><span className="block text-[10px] text-[#8D9B95]">CURRENT LOSS</span><strong className="text-[#F04444]">{data?.currentMissStreak ?? '—'}</strong></div>
+        <div className="p-2 rounded bg-[#020806] border border-[#1E3A2B]/60"><span className="block text-[10px] text-[#8D9B95]">LONGEST WIN</span><strong className="text-[#35B978]">{data?.longestHitStreak ?? '—'}</strong></div>
+        <div className="p-2 rounded bg-[#020806] border border-[#1E3A2B]/60"><span className="block text-[10px] text-[#8D9B95]">TOTAL</span><strong>{data?.totalPredictions ?? '—'}</strong></div>
+        <div className="p-2 rounded bg-[#020806] border border-[#1E3A2B]/60"><span className="block text-[10px] text-[#8D9B95]">WINS</span><strong className="text-[#35B978]">{data?.totalHits ?? '—'}</strong></div>
+        <div className="p-2 rounded bg-[#020806] border border-[#1E3A2B]/60"><span className="block text-[10px] text-[#8D9B95]">LOSSES</span><strong className="text-[#F04444]">{data?.totalMisses ?? '—'}</strong></div>
+        <div className="p-2 rounded bg-[#020806] border border-[#1E3A2B]/60"><span className="block text-[10px] text-[#8D9B95]">ACCURACY</span><strong>{data ? `${data.accuracyPct}%` : '—'}</strong></div>
+        <div className="p-2 rounded bg-[#020806] border border-[#1E3A2B]/60"><span className="block text-[10px] text-[#8D9B95]">COVERAGE</span><strong className="text-[#E7B93F]">{data?.adaptiveCoverage.status ?? '—'}</strong></div>
+      </div>
+      <div className="text-xs font-mono text-[#8D9B95]">
+        {prediction
+          ? <span>Next: <strong className={prediction.decision === 'Big' ? 'text-[#E7B93F]' : 'text-[#60A5FA]'}>{prediction.decision.toUpperCase()}</strong> · Target {prediction.period} · {data?.predictedAt ? new Date(data.predictedAt).toLocaleString() : 'timestamp unavailable'} · {prediction.signalsAvailable} valid signals</span>
+          : <span>Next prediction: {nextStatus === 'WAITING' ? 'WAITING FOR SIGNALS' : 'NO SIGNAL'} · Last evaluated period: {data?.latestEvaluatedPeriod ?? '—'} · Coverage: {data?.adaptiveCoverage.reason ?? 'not available'}</span>}
+      </div>
+    </div>
+  );
+}
+
 export const Dashboard: React.FC = () => {
   const { results, activeGame, currentPeriod, isLoading, deleteResult } = useResults();
   const { t3, t7, t9 } = useTestMaxLossStreaks();
+  const adaptiveState = useServerAdaptiveLearning();
 
   // Show top 6 recent items on dashboard
   const recentResults = results.slice(0, 6);
@@ -115,7 +152,7 @@ export const Dashboard: React.FC = () => {
             </div>
             <div className="flex items-center justify-between text-xs font-mono text-[#8D9B95] pt-2 border-t border-[#1E3A2B]/60">
               <span>Current: <strong className="text-[#F5F5F5]">{t3.currentLossStreak}</strong> L</span>
-              <span>{t3.totalEvaluated} draws evaluated</span>
+              <span>{t3.totalEvaluated} draws · {t3.coverage}</span>
             </div>
           </div>
 
@@ -135,7 +172,7 @@ export const Dashboard: React.FC = () => {
             </div>
             <div className="flex items-center justify-between text-xs font-mono text-[#8D9B95] pt-2 border-t border-[#1E3A2B]/60">
               <span>Current: <strong className="text-[#F5F5F5]">{t7.currentLossStreak}</strong> L</span>
-              <span>{t7.totalEvaluated} signals scored</span>
+              <span>{t7.totalEvaluated} signals · {t7.coverage}</span>
             </div>
           </div>
 
@@ -155,11 +192,13 @@ export const Dashboard: React.FC = () => {
             </div>
             <div className="flex items-center justify-between text-xs font-mono text-[#8D9B95] pt-2 border-t border-[#1E3A2B]/60">
               <span>Current: <strong className="text-[#F5F5F5]">{t9.currentLossStreak}</strong> L</span>
-              <span>{t9.totalEvaluated} draws evaluated</span>
+              <span>{t9.totalEvaluated} draws · {t9.coverage}</span>
             </div>
           </div>
         </div>
       </div>
+
+      <AdaptiveDashboardCard state={adaptiveState} />
 
       {/* Recent Test Results Section */}
       <div className="space-y-4">

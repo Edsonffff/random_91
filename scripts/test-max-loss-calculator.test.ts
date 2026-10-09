@@ -59,11 +59,11 @@ test('T3: sorts records chronologically ascending before evaluating', () => {
   assert.equal(result.totalEvaluated, 3);
 });
 
-test('T3: period gap is ignored and losses on both sides share one streak', () => {
+test('T3: period gap breaks the loss streak', () => {
   // round 1: LOSS (streak = 1)
   // round 2: LOSS (streak = 2)
   // [GAP: round 3 is missing]
-  // round 4: LOSS (streak = 3; the missing round is ignored)
+  // round 4: LOSS (new streak = 1; the missing round breaks continuity)
   const rounds = [
     makeRound(1, 7), // pos 0 pred Small vs Big -> LOSS
     makeRound(2, 2), // pos 1 pred Big vs Small -> LOSS
@@ -72,8 +72,8 @@ test('T3: period gap is ignored and losses on both sides share one streak', () =
   ];
 
   const result = calculateT3MaxLoss(rounds);
-  assert.equal(result.maxLossStreak, 3);
-  assert.equal(result.currentLossStreak, 3);
+  assert.equal(result.maxLossStreak, 2);
+  assert.equal(result.currentLossStreak, 1);
   assert.equal(result.totalEvaluated, 3);
 });
 
@@ -106,8 +106,8 @@ test('T7: calculates longest consecutive loss streak from its own signals only',
   assert.equal(result.totalMisses, 4);
 });
 
-test('T7: unknown / missing signal does NOT count as a loss or reset the streak', () => {
-  // L L L UNKNOWN L L -> maxLoss = 5, currentLoss = 5
+test('T7: unknown / missing signal does NOT count as a loss and breaks the streak', () => {
+  // L L L UNKNOWN L L -> maxLoss = 3, currentLoss = 2
   const rounds = [
     makeRound(1, 6), // LOSS
     makeRound(2, 6), // LOSS
@@ -127,8 +127,8 @@ test('T7: unknown / missing signal does NOT count as a loss or reset the streak'
   ]);
 
   const result = calculateT7MaxLoss(rounds, signals);
-  assert.equal(result.maxLossStreak, 5, 'Only finalized losses are counted, across unknown rows');
-  assert.equal(result.currentLossStreak, 5);
+  assert.equal(result.maxLossStreak, 3, 'Only consecutive finalized losses are counted');
+  assert.equal(result.currentLossStreak, 2);
   assert.equal(result.totalEvaluated, 5, 'Unscored period 4 is excluded from total');
 });
 

@@ -187,6 +187,64 @@ export class AdaptivePeriodRuntime {
     };
   }
 
+  adaptiveMetrics(entries, engine) {
+    const history = new Map(engine.history.map((row) => [row.period, row]));
+    let currentLossStreak = 0;
+    let longestLossStreak = 0;
+    let currentHitStreak = 0;
+    let longestHitStreak = 0;
+    let totalHits = 0;
+    let totalMisses = 0;
+    let latestEvaluatedPeriod = null;
+    for (const entry of ordered(entries)) {
+      const row = entry.status === PERIOD_STATUS.EVALUATED ? history.get(entry.period) : null;
+      if (!row || typeof row.isHit !== 'boolean') {
+        currentLossStreak = 0;
+        currentHitStreak = 0;
+        continue;
+      }
+      latestEvaluatedPeriod = entry.period;
+      if (row.isHit) {
+        totalHits++;
+        totalMisses += 0;
+        currentHitStreak++;
+        currentLossStreak = 0;
+        longestHitStreak = Math.max(longestHitStreak, currentHitStreak);
+      } else {
+        totalMisses++;
+        currentLossStreak++;
+        currentHitStreak = 0;
+        longestLossStreak = Math.max(longestLossStreak, currentLossStreak);
+      }
+    }
+    const totalPredictions = totalHits + totalMisses;
+    return {
+      totalPredictions, totalHits, totalMisses,
+      accuracyPct: totalPredictions ? Math.round(totalHits / totalPredictions * 100) : 0,
+      currentHitStreak, currentMissStreak: currentLossStreak,
+      longestHitStreak, longestMissStreak: longestLossStreak,
+      latestEvaluatedPeriod,
+    };
+  }
+
+  prepareNextPrediction(engine, targetPeriod) {
+    if (!targetPeriod || (engine.lastProcessedPeriod
+      && compareIssuesAsc(targetPeriod, engine.lastProcessedPeriod) <= 0)) {
+      engine.activePrediction = null;
+      engine.activeSignals = null;
+      return;
+    }
+    const signal = this.signals.get(targetPeriod);
+    if (signal) engine.setSignals([signal]);
+    engine.predict(targetPeriod);
+    if (engine.activePrediction && engine.activePrediction.signalsAvailable < 2) {
+      // The engine can calculate a mathematical vote with zero/one inputs, but
+      // the period-ledger contract reports that as WAITING rather than a real
+      // next-period prediction.
+      engine.activePrediction = null;
+    }
+  }
+
   predictorInputs() {
     const records = [...this.records.values()].filter((record) => finalizedActual(record.issueNumber, { record }))
       .sort((a, b) => compareIssuesAsc(a.issueNumber, b.issueNumber));
@@ -225,19 +283,25 @@ export class AdaptivePeriodRuntime {
     const skipped = this.state.periods.filter((entry) => entry.status === PERIOD_STATUS.PERMANENTLY_SKIPPED);
     const last = this.engine.history.at(-1);
     const latestState = ordered(this.state.periods).at(-1);
+    const metrics = this.adaptiveMetrics(this.state.periods, this.engine);
     this.body = {
-      ...this.engine.current(), status: 'ready', adaptiveState: 'ready',
+      ...this.engine.current(), ...metrics, status: 'ready', adaptiveState: 'ready',
       adaptiveInputMode: MINIMUM_SIGNAL_POLICY.id, adaptiveRequiredSignals: [],
       adaptiveOptionalSignals: ['T3', 'T7', 'T9'], minimumSignals: 2,
       adaptiveWeights: [...this.engine.weights],
       adaptiveDominantSignalIndex: this.engine.weights.indexOf(Math.max(...this.engine.weights)),
       t7AvailableForAdaptive: Boolean(latestState?.input?.t7pred), adaptiveBlocked: false,
-      latestEvaluatedPeriod: last?.period ?? null, adaptiveCursor: this.state.period,
+      latestEvaluatedPeriod: metrics.latestEvaluatedPeriod ?? last?.period ?? null, adaptiveCursor: this.state.period,
       scanThrough: this.state.scanThrough, checkpointAt: this.state.checkpointAt,
       checkpointStatus: 'saved', databaseConnected: true,
       pendingResultCount: pending.length, permanentlySkippedCount: skipped.length,
       pendingPeriod: pending[0]?.period ?? null,
       t7Coverage: this.state.baseline ? 'independent' : 'not_required',
+      adaptiveCoverage: {
+        status: pending.length || skipped.length ? 'partial' : 'complete',
+        reason: pending.length ? 'pending_results' : skipped.length ? 'low_signal_periods_skipped' : null,
+        knownThrough: this.state.scanThrough, pendingPeriods: pending.length, skippedPeriods: skipped.length,
+      },
       // Keep the browser contract bounded; the full audit remains durable.
       recentPeriodStates: ordered(this.state.periods).slice(-20).map(({ input, recordDigest, ...entry }) => entry),
       baselineId: this.state.baseline?.baselineId ?? null,
@@ -319,12 +383,17 @@ export class AdaptivePeriodRuntime {
       this.log(`[ADAPTIVE] period=${period} tests=${entry.contributingTests.join(',')} records=${entry.validRecordCount} status=${entry.status} reason=${entry.reason}`);
     }
     const entries = ordered(states.values());
-    if (this.state.ledgerDigest && digest(entries) === digest(this.state.periods)) return this.body;
+    if (this.state.ledgerDigest && digest(entries) === digest(this.state.periods)) {
+      this.prepareNextPrediction(this.engine, active);
+      this.publish();
+      return this.body;
+    }
     const engine = this.replay(entries);
     for (const entry of entries) if (entry.status === PERIOD_STATUS.ELIGIBLE) {
       entry.status = PERIOD_STATUS.EVALUATED;
       entry.reason = 'Eligible period evaluated; model and status persisted together.';
     }
+    this.prepareNextPrediction(engine, active);
     let safePeriod = anchorPeriod ?? null;
     for (const entry of entries) {
       if (!terminal(entry)) break;

@@ -23,7 +23,6 @@ import {
   runCpl3WalkForward,
   type Cpl3Row,
 } from '../experimental/cpl3LossStreakBreaker';
-import { calculateLossStreakMetrics } from '../experimental/cpl2ConfidenceGate';
 
 export interface TestStreakMetrics {
   name: 'T3' | 'T7' | 'T9';
@@ -35,6 +34,11 @@ export interface TestStreakMetrics {
   totalMisses: number;
   accuracy: number | null;
   latestPrediction: string | null;
+  longestWinStreak: number;
+  coverage: 'partial' | 'complete';
+  coverageReason: string | null;
+  knownThrough: string | null;
+  unknownPeriods: number;
 }
 
 export interface AllTestMaxLossResults {
@@ -65,28 +69,67 @@ export function nextPeriod(period: string | null | undefined): string | null {
   return `${date.toISOString().slice(0, 10).replaceAll('-', '')}100050001`;
 }
 
+function validNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 9;
+}
+
+function isFinalized(row: { status?: string; finalized?: boolean }): boolean {
+  return row.finalized !== false && !['pending', 'unknown', 'unfinalized', 'skipped'].includes(String(row.status ?? '').toLowerCase());
+}
+
+function isFinalizedT7(
+  signal: { signal?: string; status?: string; actual_number?: number | null; settled_at?: string | null } | undefined,
+  record: { number: number },
+): boolean {
+  if (!signal || !['BIG', 'SMALL'].includes(signal.signal ?? '')) return false;
+  if (signal.status === undefined || signal.status === null) return true;
+  return ['win', 'loss'].includes(String(signal.status).toLowerCase())
+    && Boolean(signal.settled_at)
+    && (signal.actual_number === undefined || signal.actual_number === null || signal.actual_number === record.number);
+}
+
+function coverage(knownThrough: string | null, unknownPeriods: number, periods: string[]) {
+  let gaps = 0;
+  for (let i = 1; i < periods.length; i++) {
+    if (nextPeriod(periods[i - 1]) !== periods[i]) gaps++;
+  }
+  const reasons = [gaps ? 'historical_gap' : null, unknownPeriods ? 'unknown_or_unscored_periods' : null].filter(Boolean);
+  return {
+    coverage: reasons.length ? 'partial' as const : 'complete' as const,
+    coverageReason: reasons[0] ?? null,
+    knownThrough,
+    unknownPeriods,
+  };
+}
+
 /**
  * Test 3: 14-Round Repeating Sequence.
  * Evaluates chronological settled rounds.
  * Missing periods or gaps are ignored and are never counted as losses.
  */
 export function calculateT3MaxLoss(
-  records: Array<{ period: string; number: number }>,
+  records: Array<{ period: string; number: number; status?: string; finalized?: boolean }>,
 ): TestStreakMetrics {
-  const valid = records.filter(
-    (r) => r.period && typeof r.number === 'number' && Number.isInteger(r.number) && r.number >= 0 && r.number <= 9,
-  );
-
-  const rounds = new Map(valid.map((r) => [String(r.period).trim(), r]));
+  const rounds = new Map(records.filter((r) => r.period).map((r) => [String(r.period).trim(), r]));
   const periods = [...rounds.keys()].sort(compareIssuesAsc);
 
   let currentLossStreak = 0;
   let maxLossStreak = 0;
   let hits = 0;
   let misses = 0;
+  let unknownPeriods = 0;
+  let previousPeriod: string | null = null;
   for (let i = 0; i < periods.length; i++) {
     const period = periods[i];
     const round = rounds.get(period)!;
+
+    if (previousPeriod && nextPeriod(previousPeriod) !== period) currentLossStreak = 0;
+    previousPeriod = period;
+    if (!isFinalized(round) || !validNumber(round.number)) {
+      unknownPeriods++;
+      currentLossStreak = 0;
+      continue;
+    }
 
     const predictedSize = test3Prediction(i);
     const actualSize = round.number >= 5 ? 'Big' : 'Small';
@@ -100,7 +143,6 @@ export function calculateT3MaxLoss(
       currentLossStreak += 1;
       maxLossStreak = Math.max(maxLossStreak, currentLossStreak);
     }
-
   }
 
   const total = hits + misses;
@@ -114,6 +156,8 @@ export function calculateT3MaxLoss(
     totalMisses: misses,
     accuracy: total > 0 ? Math.round((hits / total) * 100) : null,
     latestPrediction: test3Prediction(periods.length),
+    longestWinStreak: 0,
+    ...coverage(periods.at(-1) ?? null, unknownPeriods, periods),
   };
 }
 
@@ -124,34 +168,39 @@ export function calculateT3MaxLoss(
  * are NEVER losses.
  */
 export function calculateT7MaxLoss(
-  records: Array<{ period: string; number: number }>,
+  records: Array<{ period: string; number: number; status?: string; finalized?: boolean }>,
   t7SignalsMap?: Map<string, { signal: 'BIG' | 'SMALL'; [key: string]: any }>,
 ): TestStreakMetrics {
-  const valid = records.filter(
-    (r) => r.period && typeof r.number === 'number' && Number.isInteger(r.number) && r.number >= 0 && r.number <= 9,
-  );
-
-  const rounds = new Map(valid.map((r) => [String(r.period).trim(), r]));
+  const rounds = new Map(records.filter((r) => r.period).map((r) => [String(r.period).trim(), r]));
   const periods = [...rounds.keys()].sort(compareIssuesAsc);
 
   let currentLossStreak = 0;
   let maxLossStreak = 0;
   let hits = 0;
   let misses = 0;
+  let unknownPeriods = 0;
+  let previousPeriod: string | null = null;
   for (let i = 0; i < periods.length; i++) {
     const period = periods[i];
     const round = rounds.get(period)!;
+
+    if (previousPeriod && nextPeriod(previousPeriod) !== period) currentLossStreak = 0;
+    previousPeriod = period;
 
     const stored = t7SignalsMap?.get(period);
 
     // If no signal exists or signal is not finalized BIG/SMALL:
     // This period is UNKNOWN. It does not count as a loss and does not alter
-    // the streak made up exclusively of finalized WIN/LOSS results.
-    if (!stored || (stored.signal !== 'BIG' && stored.signal !== 'SMALL')) {
+    // the streak made up exclusively of finalized WIN/LOSS results. Unknown
+    // results break the current run so losses cannot bridge an unavailable row.
+    if (!isFinalized(round) || !validNumber(round.number) || !isFinalizedT7(stored, round)) {
+      unknownPeriods++;
+      currentLossStreak = 0;
       continue;
     }
+    const finalizedSignal = stored!;
 
-    const predictedSize = stored.signal === 'BIG' ? 'Big' : 'Small';
+    const predictedSize = finalizedSignal.signal === 'BIG' ? 'Big' : 'Small';
     const actualSize = round.number >= 5 ? 'Big' : 'Small';
     const isHit = predictedSize === actualSize;
 
@@ -165,7 +214,6 @@ export function calculateT7MaxLoss(
     }
 
   }
-
   const total = hits + misses;
   return {
     name: 'T7',
@@ -177,6 +225,8 @@ export function calculateT7MaxLoss(
     totalMisses: misses,
     accuracy: total > 0 ? Math.round((hits / total) * 100) : null,
     latestPrediction: null,
+    longestWinStreak: 0,
+    ...coverage(periods.at(-1) ?? null, unknownPeriods, periods),
   };
 }
 
@@ -187,13 +237,10 @@ export function calculateT7MaxLoss(
  * streak; only finalized WIN/LOSS outcomes are considered.
  */
 export function calculateT9MaxLoss(
-  records: Array<{ period: string; number: number; completedAt?: string }>,
+  records: Array<{ period: string; number: number; completedAt?: string; status?: string; finalized?: boolean }>,
 ): TestStreakMetrics {
-  const valid = records.filter(
-    (r) => r.period && typeof r.number === 'number' && Number.isInteger(r.number) && r.number >= 0 && r.number <= 9,
-  );
-
-  const sorted = [...valid].sort((a, b) => compareIssuesAsc(a.period, b.period));
+  const sorted = [...new Map(records.filter((r) => r.period).map((r) => [String(r.period).trim(), r])).values()]
+    .sort((a, b) => compareIssuesAsc(a.period, b.period));
 
   if (sorted.length === 0) {
     return {
@@ -206,10 +253,13 @@ export function calculateT9MaxLoss(
       totalMisses: 0,
       accuracy: null,
       latestPrediction: null,
+      longestWinStreak: 0,
+      coverage: 'partial', coverageReason: 'No historical periods are available.', knownThrough: null, unknownPeriods: 0,
     };
   }
 
-  const test9History: ExperimentalHistoryRecord[] = sorted.map((r) => ({
+  const finalized = sorted.filter((r) => isFinalized(r) && validNumber(r.number));
+  const test9History: ExperimentalHistoryRecord[] = finalized.map((r) => ({
     issueNumber: r.period,
     winningNumber: r.number,
     sourceTime: r.completedAt ?? null,
@@ -219,30 +269,49 @@ export function calculateT9MaxLoss(
   const test9Cpl1Rows = evaluateWalkForward(test9History);
   const config = CPL3_CONFIGS.find((item) => item.name === 'context-8-cap-3')!;
   const test9Rows: Cpl3Row[] = runCpl3WalkForward(test9Cpl1Rows, config);
-  const metrics = calculateLossStreakMetrics(test9Rows);
-
-  // Compute currentLossStreak from the end of the finalized outcome sequence.
-  // Unknown/no-signal rows are intentionally ignored.
+  const rowsByPeriod = new Map(test9Rows.map((row) => [row.periodId, row]));
+  let maxLossStreak = 0;
   let currentLossStreak = 0;
-  for (let i = test9Rows.length - 1; i >= 0; i--) {
-    const row = test9Rows[i];
-    if (row.outcome === 'LOSS') {
+  let currentWinStreak = 0;
+  let longestWinStreak = 0;
+  let hits = 0;
+  let misses = 0;
+  let unknownPeriods = 0;
+  let previousPeriod: string | null = null;
+  for (const record of sorted) {
+    const period = String(record.period).trim();
+    const row = rowsByPeriod.get(period);
+    if (previousPeriod && nextPeriod(previousPeriod) !== period) currentLossStreak = 0;
+    previousPeriod = period;
+    if (!row || row.outcome === 'NO_SIGNAL') {
+      unknownPeriods++;
+      currentLossStreak = 0;
+      currentWinStreak = 0;
+    } else if (row.outcome === 'LOSS') {
+      misses++;
       currentLossStreak++;
-    } else if (row.outcome === 'WIN') {
-      break;
+      currentWinStreak = 0;
+      maxLossStreak = Math.max(maxLossStreak, currentLossStreak);
+    } else {
+      hits++;
+      currentLossStreak = 0;
+      currentWinStreak++;
+      longestWinStreak = Math.max(longestWinStreak, currentWinStreak);
     }
   }
 
   return {
     name: 'T9',
     label: 'CPL-3 Loss-Streak Breaker',
-    maxLossStreak: metrics.longestLossStreak,
+    maxLossStreak,
     currentLossStreak,
-    totalEvaluated: metrics.totalPredictions,
-    totalHits: metrics.wins,
-    totalMisses: metrics.losses,
-    accuracy: metrics.accuracy !== null ? Math.round(metrics.accuracy * 100) : null,
+    totalEvaluated: hits + misses,
+    totalHits: hits,
+    totalMisses: misses,
+    accuracy: hits + misses > 0 ? Math.round((hits / (hits + misses)) * 100) : null,
     latestPrediction: test9Rows.at(-1)?.prediction ?? null,
+    ...coverage(sorted.at(-1)?.period ?? null, unknownPeriods, sorted.map((record) => record.period)),
+    longestWinStreak,
   };
 }
 

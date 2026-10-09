@@ -82,27 +82,28 @@ function SigCell({ pred }: { pred: 'Big' | 'Small' | null }) {
   );
 }
 
-function AdaptiveCheckpointMaxLoss({ data }: { data: NonNullable<AdaptiveApiState['data']> }) {
-  const values = [
-    ['TEST 3', data.test3MaxLoss],
-    ['TEST 7', data.test7MaxLoss],
-    ['TEST 9', data.test9MaxLoss],
-  ] as const;
+function AdaptiveMetricsCard({ data }: { data: NonNullable<AdaptiveApiState['data']> }) {
   return (
-    <section aria-labelledby="adaptive-checkpoint-max-loss" className="p-4 rounded-xl bg-[#06130F] border border-[#1E3A2B]">
+    <section aria-labelledby="adaptive-learning-metrics" className="p-4 rounded-xl bg-[#06130F] border border-[#1E3A2B]">
       <div className="flex flex-wrap items-baseline justify-between gap-2 mb-1">
-        <h2 id="adaptive-checkpoint-max-loss" className="text-xs font-mono font-bold tracking-wider text-[#A78BFA]">ADAPTIVE CHECKPOINT COUNTERS</h2>
-        <span className="text-[10px] font-mono uppercase tracking-wider text-[#8D9B95]">Replay state · Not verified Max Loss</span>
+        <h2 id="adaptive-learning-metrics" className="text-xs font-mono font-bold tracking-wider text-[#A78BFA]">ADAPTIVE LEARNING MAX LOSS</h2>
+        <span className="text-[10px] font-mono uppercase tracking-wider text-[#8D9B95]">Independent Adaptive evaluation history</span>
       </div>
-      <p className="text-[11px] text-[#8D9B95] mb-3">These values belong to the Adaptive replay checkpoint. They are not the independent historical Verified Max Loss metric below.</p>
-      <dl className="grid grid-cols-3 gap-3 text-xs font-mono">
-        {values.map(([label, value]) => (
-          <div key={label} className="flex items-center justify-between gap-2 p-2.5 rounded-lg bg-[#020806] border border-[#1E3A2B]/60">
-            <dt className="text-[#8D9B95]">{label}</dt>
-            <dd className="font-extrabold text-[#A78BFA]">{value}</dd>
+      <p className="text-[11px] text-[#8D9B95] mb-3">Only finalized Adaptive WIN/LOSS evaluations contribute. Pending, skipped, abstained, and missing periods break streaks.</p>
+      <dl className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2 text-xs font-mono">
+        {[
+          ['Max Loss', data.longestMissStreak], ['Current Loss', data.currentMissStreak],
+          ['Longest Win', data.longestHitStreak], ['Evaluated', data.totalPredictions],
+          ['Wins', data.totalHits], ['Losses', data.totalMisses], ['Accuracy', `${data.accuracyPct}%`],
+          ['Coverage', data.adaptiveCoverage.status],
+        ].map(([label, value]) => (
+          <div key={label} className="p-2.5 rounded-lg bg-[#020806] border border-[#1E3A2B]/60 text-center">
+            <dt className="text-[#8D9B95] text-[10px]">{label}</dt>
+            <dd className="font-extrabold text-[#A78BFA] mt-1">{value}</dd>
           </div>
         ))}
       </dl>
+      <p className="mt-2 text-[11px] text-[#8D9B95]">Last evaluated period: <strong className="text-[#F5F5F5]">{data.latestEvaluatedPeriod ?? '—'}</strong> · {data.adaptiveCoverage.reason ?? 'Historical coverage complete within the reported scope.'}</p>
     </section>
   );
 }
@@ -170,13 +171,14 @@ const AdaptiveLearningPanelContent: React.FC<Props & { serverState: AdaptiveApiS
     last100,
     last250,
     lastSignalAgreement,
+    predictedAt,
   } = data;
 
   const lastRow = data.latestEvaluation;
   const visibleHistory = lastRow ? [lastRow] : [];
-  const currentDecision = activePrediction?.decision ?? finalDecision;
-  const currentPeriod = activePrediction?.period ?? lastRow?.period;
-  const currentVote = activePrediction ?? lastRow;
+  const currentDecision = finalDecision;
+  const currentPeriod = lastRow?.period;
+  const currentVote = lastRow;
   const live = status === 'ready';
   // The existing weight display remains the T3/T9 adaptive-weight view; T7 is
   // now admitted as the third eligible signal without changing those weights.
@@ -187,7 +189,7 @@ const AdaptiveLearningPanelContent: React.FC<Props & { serverState: AdaptiveApiS
 
   return (
     <div className="space-y-5">
-      <AdaptiveCheckpointMaxLoss data={data} />
+      <AdaptiveMetricsCard data={data} />
       <div role="status" className="p-3 rounded-xl bg-[#06130F] border border-[#1E3A2B] text-xs font-mono text-[#8D9B95]">
         <span className="text-[#35B978] font-bold">Adaptive requires at least two of T3, T7, and T9.</span>{' '}
         Signals are matched to the exact period; fewer than two finalized signals are permanently skipped.
@@ -228,7 +230,7 @@ const AdaptiveLearningPanelContent: React.FC<Props & { serverState: AdaptiveApiS
             {/* Left: Huge Final Decision */}
             <div className="p-4 rounded-xl bg-[#020806]/80 border border-[#1E3A2B] text-center space-y-1">
               <span className="text-[11px] font-mono font-bold text-[#8D9B95] tracking-widest uppercase block">
-                {live ? 'CURRENT DECISION' : 'LAST KNOWN DECISION'}
+                LAST EVALUATED DECISION
               </span>
               {currentDecision ? (
                 <div className="py-2">
@@ -238,7 +240,7 @@ const AdaptiveLearningPanelContent: React.FC<Props & { serverState: AdaptiveApiS
                     {currentDecision.toUpperCase()}
                   </span>
                   <span className="text-xs font-mono text-[#8D9B95] block mt-1">
-                    Period {currentPeriod?.slice(-7) ?? '—'} · {activePrediction ? 'Decision before result' : 'Latest evaluated decision'}
+                    Period {currentPeriod ?? '—'} · Finalized historical evaluation
                   </span>
                 </div>
               ) : (
@@ -270,8 +272,8 @@ const AdaptiveLearningPanelContent: React.FC<Props & { serverState: AdaptiveApiS
                 </span>
                 <span className="text-[10px] font-mono text-[#35B978]">
                   {currentVote
-                    ? `${currentVote.signalsAvailable} of ${adaptiveRequiredSignals.length} required signals voting`
-                    : `${adaptiveRequiredSignals.length} required signals configured`}
+                    ? `${currentVote.signalsAvailable} signals voting`
+                    : 'No evaluated signals'}
                 </span>
               </div>
 
@@ -331,18 +333,18 @@ const AdaptiveLearningPanelContent: React.FC<Props & { serverState: AdaptiveApiS
           <div className="flex items-center gap-2">
             <TrendingUp className="w-4 h-4 text-[#E7B93F]" />
             <span className="text-xs font-mono font-black uppercase tracking-wider text-[#F5F5F5]">
-              Adaptive Final Result
+              Adaptive Next Prediction
             </span>
           </div>
           <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[#E7B93F]/15 text-[#E7B93F] border border-[#E7B93F]/30 uppercase font-bold">
-            Status: {live ? 'Decision before result' : 'Last known snapshot'}
+            Status: {activePrediction ? 'READY' : signals ? 'WAITING' : 'NO SIGNAL'}
           </span>
         </div>
 
         {activePrediction ? (
           <div className="space-y-3">
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 font-mono">
-              <StatBox label="Period" value={activePrediction.period.slice(-7)} />
+              <StatBox label="Target Period" value={activePrediction.period} />
               <StatBox
                 label="Result"
                 value={activePrediction.decision.toUpperCase()}
@@ -355,11 +357,14 @@ const AdaptiveLearningPanelContent: React.FC<Props & { serverState: AdaptiveApiS
               <span className="text-[#8D9B95]">
                 Signals voting:{' '}
                 <span className="text-[#35B978] font-bold">
-                  {activePrediction.signalsAvailable} / {adaptiveRequiredSignals.length}
+                  {activePrediction.signalsAvailable} / 3 valid signals
                 </span>
               </span>
               <span className="text-[#8D9B95]">
                 Actual: <span className="text-[#8D9B95] font-bold">PENDING</span>
+              </span>
+              <span className="text-[#8D9B95]">
+                Predicted at: <span className="text-[#F5F5F5] font-bold">{predictedAt ? new Date(predictedAt).toLocaleString() : '—'}</span>
               </span>
               {live && activeSchedule?.currentIssue === activePrediction.period && (
                 <span className="text-[#35B978] font-bold">
@@ -370,7 +375,8 @@ const AdaptiveLearningPanelContent: React.FC<Props & { serverState: AdaptiveApiS
           </div>
         ) : (
           <div className="py-4 text-center text-[#8D9B95] font-mono text-xs">
-            Awaiting an active prediction from the phone server…
+            {signals ? 'WAITING FOR SIGNALS' : 'NO SIGNAL'}
+            <span className="block mt-2">The last evaluated result is shown separately. A next prediction is never inferred from finalDecision.</span>
           </div>
         )}
         {signals && (

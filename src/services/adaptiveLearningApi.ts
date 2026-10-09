@@ -10,6 +10,7 @@ export interface AdaptiveSnapshot extends Omit<AdaptiveResult, 'history' | 'rese
   signalLabels: [string, string, string];
   signals: ActiveInputRow | null;
   latestEvaluation: AdaptiveHistoryRow | null;
+  latestEvaluatedPeriod: string | null;
   status: 'ready';
   checkpointAt: string;
   adaptiveInputMode: string;
@@ -17,8 +18,10 @@ export interface AdaptiveSnapshot extends Omit<AdaptiveResult, 'history' | 'rese
   adaptiveOptionalSignals: ['T3', 'T7', 'T9'];
   t7AvailableForAdaptive: boolean;
   adaptiveBlocked: boolean;
-  adaptiveWeights: [number, number];
-  adaptiveDominantSignalIndex: 0 | 1;
+  adaptiveWeights: [number, number, number];
+  adaptiveDominantSignalIndex: 0 | 1 | 2;
+  predictedAt: string | null;
+  adaptiveCoverage: AdaptiveCoverage;
   /** Adaptive replay checkpoint counters; never the independent Verified Max Loss metric. */
   test3MaxLoss: number;
   test7MaxLoss: number;
@@ -35,6 +38,14 @@ export interface AdaptiveApiState {
   pendingPeriod: string | null;
 }
 
+export interface AdaptiveCoverage {
+  status: 'partial' | 'complete';
+  reason: string | null;
+  knownThrough: string | null;
+  pendingPeriods: number;
+  skippedPeriods: number;
+}
+
 export interface VerifiedMaxLoss {
   test3: number;
   test7: number;
@@ -47,6 +58,21 @@ export interface VerifiedMaxLoss {
   scopeStartPeriod: string | null;
   calculatedAt: string;
   calculationStatus: 'calculating' | 'ready';
+  tests: {
+    test3: VerifiedMaxLossTest;
+    test7: VerifiedMaxLossTest;
+    test9: VerifiedMaxLossTest;
+  };
+}
+
+export interface VerifiedMaxLossTest {
+  currentLossStreak: number;
+  longestLossStreak: number;
+  scoredPeriods: number;
+  unknownPeriods: number;
+  knownThrough: string | null;
+  recordStartPeriod: string | null;
+  recordEndPeriod: string | null;
 }
 
 export const INITIAL_ADAPTIVE_API_STATE: AdaptiveApiState = {
@@ -58,6 +84,7 @@ function object(value: unknown): value is Record<string, unknown> {
 }
 function size(value: unknown): boolean { return value === 'Big' || value === 'Small'; }
 function optionalSize(value: unknown): boolean { return value === null || size(value); }
+function optionalText(value: unknown): boolean { return value === null || value === undefined || text(value); }
 function text(value: unknown): value is string { return typeof value === 'string' && value.trim().length > 0; }
 function numberIn(value: unknown, max = Number.MAX_SAFE_INTEGER): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= max;
@@ -80,14 +107,28 @@ function evaluation(value: unknown): value is AdaptiveHistoryRow {
     && size(value.actual) && value.t4pred === value.adaptiveDecision && typeof value.isHit === 'boolean'
     && ['t3pred', 't7pred', 't9pred'].every((key) => optionalSize(value[key]));
 }
-function adaptiveWeights(value: unknown): value is [number, number] {
-  return Array.isArray(value) && value.length === 2 && value.every((v) => numberIn(v, 1))
+function adaptiveWeights(value: unknown): value is [number, number, number] {
+  return Array.isArray(value) && value.length === 3 && value.every((v) => numberIn(v, 1))
     && Math.abs(value.reduce((sum, v) => sum + v, 0) - 1) < 0.000001;
+}
+
+function verifiedTest(value: unknown): value is VerifiedMaxLossTest {
+  return object(value) && count(value.currentLossStreak) && count(value.longestLossStreak)
+    && count(value.scoredPeriods) && count(value.unknownPeriods)
+    && ['knownThrough', 'recordStartPeriod', 'recordEndPeriod']
+      .every((key) => value[key] === null || text(value[key]));
+}
+
+function emptyVerifiedTest(longestLossStreak = 0): VerifiedMaxLossTest {
+  return {
+    currentLossStreak: 0, longestLossStreak, scoredPeriods: 0, unknownPeriods: 0,
+    knownThrough: null, recordStartPeriod: null, recordEndPeriod: null,
+  };
 }
 
 /** Independent metric validation; a waiting Adaptive response is not a model snapshot. */
 export function parseVerifiedMaxLoss(value: unknown): VerifiedMaxLoss {
-  if (!object(value) || !['test3', 'test7', 'test9'].every((field) => count(value[field]))
+  if (!object(value)
     || !['partial', 'complete'].includes(String(value.coverage))
     || !['calculating', 'ready'].includes(String(value.calculationStatus))
     || !text(value.calculatedAt) || !Number.isFinite(Date.parse(value.calculatedAt))
@@ -95,13 +136,29 @@ export function parseVerifiedMaxLoss(value: unknown): VerifiedMaxLoss {
       .every((field) => value[field] === null || text(value[field]))) {
     throw new Error('Malformed verified Max Loss response.');
   }
+  const nested = value.tests;
+  if (nested !== undefined && (!object(nested)
+    || !verifiedTest(nested.test3) || !verifiedTest(nested.test7) || !verifiedTest(nested.test9))) {
+    throw new Error('Malformed verified Max Loss response.');
+  }
+  const tests = nested as Record<string, VerifiedMaxLossTest> | undefined;
+  const flat = (name: 'test3' | 'test7' | 'test9') => value[name] === undefined
+    ? tests?.[name]?.longestLossStreak : count(value[name]) ? value[name] as number : undefined;
+  if (!(['test3', 'test7', 'test9'] as const).every((name) => count(flat(name)))) {
+    throw new Error('Malformed verified Max Loss response.');
+  }
   return {
-    test3: value.test3 as number, test7: value.test7 as number, test9: value.test9 as number,
+    test3: flat('test3') as number, test7: flat('test7') as number, test9: flat('test9') as number,
     coverage: value.coverage as VerifiedMaxLoss['coverage'], coverageReason: value.coverageReason as string | null,
     firstMissingHistoryPeriod: value.firstMissingHistoryPeriod as string | null,
     lastMissingHistoryPeriod: value.lastMissingHistoryPeriod as string | null,
     knownThrough: value.knownThrough as string | null, scopeStartPeriod: value.scopeStartPeriod as string | null,
     calculatedAt: value.calculatedAt, calculationStatus: value.calculationStatus as VerifiedMaxLoss['calculationStatus'],
+    tests: {
+      test3: tests?.test3 ?? emptyVerifiedTest(flat('test3') as number),
+      test7: tests?.test7 ?? emptyVerifiedTest(flat('test7') as number),
+      test9: tests?.test9 ?? emptyVerifiedTest(flat('test9') as number),
+    },
   };
 }
 
@@ -113,11 +170,13 @@ export function parseAdaptiveSnapshot(value: unknown): AdaptiveSnapshot {
   if (value.success !== true || value.status !== 'ready' || !text(value.version)
     || !text(value.checkpointAt) || !Number.isFinite(Date.parse(value.checkpointAt))
     || !Array.isArray(value.signalLabels) || value.signalLabels.join('|') !== 'Test 3|Test 7|Test 9'
-    || value.adaptiveInputMode !== 'adaptive-minimum-two-v1'
+     || value.adaptiveInputMode !== 'adaptive-minimum-two-v1'
     || !Array.isArray(value.adaptiveRequiredSignals) || value.adaptiveRequiredSignals.length !== 0
     || !Array.isArray(value.adaptiveOptionalSignals) || value.adaptiveOptionalSignals.join('|') !== 'T3|T7|T9'
     || typeof value.t7AvailableForAdaptive !== 'boolean' || typeof value.adaptiveBlocked !== 'boolean'
-    || !adaptiveWeights(value.adaptiveWeights) || !count(value.adaptiveDominantSignalIndex, 1)
+     || !adaptiveWeights(value.adaptiveWeights) || !count(value.adaptiveDominantSignalIndex, 2)
+     || (value.predictedAt !== null && value.predictedAt !== undefined
+       && (!text(value.predictedAt) || !Number.isFinite(Date.parse(value.predictedAt))))
     || !optionalSize(value.finalDecision) || !weights(value.weights)) return malformed();
 
   if (value.activePrediction !== null && !prediction(value.activePrediction)) return malformed();
@@ -139,6 +198,12 @@ export function parseAdaptiveSnapshot(value: unknown): AdaptiveSnapshot {
     || !optionalSize(agreement.majority)) return malformed();
   if (value.dominantSignalIndex !== undefined && !count(value.dominantSignalIndex, 2)) return malformed();
 
+  const coverageValue = value.adaptiveCoverage;
+  if (coverageValue !== undefined && (!object(coverageValue)
+    || !['partial', 'complete'].includes(String(coverageValue.status))
+    || !optionalText(coverageValue.reason) || !optionalText(coverageValue.knownThrough)
+    || !count(coverageValue.pendingPeriods) || !count(coverageValue.skippedPeriods))) return malformed();
+
   // The index is presentation-only; some deployed responses omit it.
   const dominantSignalIndex = value.dominantSignalIndex ?? value.weights.indexOf(Math.max(...value.weights));
   // Select fields explicitly: even an accidental history field must not enter React state.
@@ -149,10 +214,16 @@ export function parseAdaptiveSnapshot(value: unknown): AdaptiveSnapshot {
     activePrediction: value.activePrediction as AdaptiveSnapshot['activePrediction'],
     signals: value.signals as AdaptiveSnapshot['signals'],
     latestEvaluation: value.latestEvaluation as AdaptiveSnapshot['latestEvaluation'],
+    latestEvaluatedPeriod: value.latestEvaluatedPeriod === null || value.latestEvaluatedPeriod === undefined
+      ? null : value.latestEvaluatedPeriod as string,
     adaptiveInputMode: value.adaptiveInputMode,
     adaptiveRequiredSignals: [], adaptiveOptionalSignals: ['T3', 'T7', 'T9'],
     t7AvailableForAdaptive: value.t7AvailableForAdaptive, adaptiveBlocked: value.adaptiveBlocked,
-    adaptiveWeights: value.adaptiveWeights, adaptiveDominantSignalIndex: value.adaptiveDominantSignalIndex as 0 | 1,
+    adaptiveWeights: value.adaptiveWeights as [number, number, number], adaptiveDominantSignalIndex: value.adaptiveDominantSignalIndex as 0 | 1 | 2,
+    predictedAt: value.predictedAt === null || value.predictedAt === undefined ? null : value.predictedAt as string,
+    adaptiveCoverage: coverageValue ? coverageValue as unknown as AdaptiveCoverage : {
+      status: 'complete', reason: null, knownThrough: null, pendingPeriods: 0, skippedPeriods: 0,
+    },
     weights: value.weights, dominantSignalIndex: dominantSignalIndex as number,
     totalPredictions: value.totalPredictions as number, totalHits: value.totalHits as number,
     totalMisses: value.totalMisses as number, accuracyPct: value.accuracyPct,
@@ -181,6 +252,8 @@ export function startAdaptiveLearningPolling(
   let nextPoll: ReturnType<typeof setTimeout> | undefined;
   let timeout: ReturnType<typeof setTimeout> | undefined;
   let controller: AbortController | undefined;
+  let etag: string | null = null;
+  let lastModified: string | null = null;
 
   function publish() {
     if (disposed) return;
@@ -195,11 +268,21 @@ export function startAdaptiveLearningPolling(
     let timedOut = false;
     timeout = setTimeout(() => { timedOut = true; controller?.abort(); }, 4000);
     try {
+      const headers: Record<string, string> = { Accept: 'application/json' };
+      if (etag) headers['If-None-Match'] = etag;
+      if (lastModified) headers['If-Modified-Since'] = lastModified;
       const response = await fetcher(url, {
-        method: 'GET', headers: { Accept: 'application/json' }, credentials: 'omit',
+        method: 'GET', headers, credentials: 'omit',
         cache: 'no-store', signal: controller.signal,
       });
+      if (response.status === 304) {
+        if (!state.data) throw new Error('Adaptive Learning API returned 304 without a cached snapshot.');
+        state = { ...state, status: 'ready', pendingPeriod: null, receivedAt: now(), error: null };
+        return;
+      }
       if (!response.ok) throw new Error(`Adaptive Learning API unavailable (HTTP ${response.status}).`);
+      etag = response.headers.get('ETag') ?? etag;
+      lastModified = response.headers.get('Last-Modified') ?? lastModified;
       let payload: unknown;
       try { payload = await response.json(); }
       catch { throw new Error('Malformed Adaptive Learning response: invalid JSON.'); }
