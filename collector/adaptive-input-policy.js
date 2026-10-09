@@ -16,3 +16,11 @@ export const LEGACY_T7_REQUIRED_POLICY = Object.freeze({
   optionalSignals: Object.freeze([]),
   includeOptionalT7: true,
 });
+
+export const MINIMUM_SIGNAL_POLICY = Object.freeze({
+  id: 'adaptive-minimum-two-v1',
+  requiredSignals: Object.freeze([]),
+  optionalSignals: Object.freeze(['T3', 'T7', 'T9']),
+  minimumSignals: 2,
+  includeOptionalT7: true,
+});

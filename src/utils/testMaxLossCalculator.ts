@@ -9,7 +9,7 @@
  *  - Do NOT count unknown / unscored / pending periods as losses.
  *  - Only finalized WIN/LOSS results contribute to streak calculations.
  *  - Results are sorted chronologically ascending by period/issue.
- *  - Gaps in periods reset consecutive loss streaks; missing periods are never losses.
+ *  - Missing periods are ignored; they never reset or increment a loss streak.
  */
 
 import { compareIssuesAsc } from '../context/RealHistoryContext';
@@ -68,7 +68,7 @@ export function nextPeriod(period: string | null | undefined): string | null {
 /**
  * Test 3: 14-Round Repeating Sequence.
  * Evaluates chronological settled rounds.
- * Missing periods or gaps reset the consecutive loss streak and are never counted as losses.
+ * Missing periods or gaps are ignored and are never counted as losses.
  */
 export function calculateT3MaxLoss(
   records: Array<{ period: string; number: number }>,
@@ -84,17 +84,9 @@ export function calculateT3MaxLoss(
   let maxLossStreak = 0;
   let hits = 0;
   let misses = 0;
-  let previousPeriod: string | null = null;
-
   for (let i = 0; i < periods.length; i++) {
     const period = periods[i];
     const round = rounds.get(period)!;
-
-    // A gap in historical periods breaks the consecutive sequence.
-    // The missing period is NOT a loss, so streak resets to 0.
-    if (previousPeriod && nextPeriod(previousPeriod) !== period) {
-      currentLossStreak = 0;
-    }
 
     const predictedSize = test3Prediction(i);
     const actualSize = round.number >= 5 ? 'Big' : 'Small';
@@ -109,7 +101,6 @@ export function calculateT3MaxLoss(
       maxLossStreak = Math.max(maxLossStreak, currentLossStreak);
     }
 
-    previousPeriod = period;
   }
 
   const total = hits + misses;
@@ -129,7 +120,8 @@ export function calculateT3MaxLoss(
 /**
  * Test 7: External Signal (WingoAI / bdgtharu.com).
  * Evaluates only periods with a stored, finalized signal ('BIG' or 'SMALL').
- * Periods with no signal or gaps are UNKNOWN — they reset the loss streak and are NEVER losses.
+ * Periods with no finalized signal or gaps are UNKNOWN — they are ignored and
+ * are NEVER losses.
  */
 export function calculateT7MaxLoss(
   records: Array<{ period: string; number: number }>,
@@ -146,25 +138,16 @@ export function calculateT7MaxLoss(
   let maxLossStreak = 0;
   let hits = 0;
   let misses = 0;
-  let previousPeriod: string | null = null;
-
   for (let i = 0; i < periods.length; i++) {
     const period = periods[i];
     const round = rounds.get(period)!;
 
-    // History gap resets consecutive loss streak.
-    if (previousPeriod && nextPeriod(previousPeriod) !== period) {
-      currentLossStreak = 0;
-    }
-
     const stored = t7SignalsMap?.get(period);
 
     // If no signal exists or signal is not finalized BIG/SMALL:
-    // This period is UNKNOWN. It does NOT count as a loss, and it CANNOT
-    // bridge losses across it (e.g. L L L UNKNOWN L L cannot become 5 losses).
+    // This period is UNKNOWN. It does not count as a loss and does not alter
+    // the streak made up exclusively of finalized WIN/LOSS results.
     if (!stored || (stored.signal !== 'BIG' && stored.signal !== 'SMALL')) {
-      currentLossStreak = 0;
-      previousPeriod = period;
       continue;
     }
 
@@ -181,7 +164,6 @@ export function calculateT7MaxLoss(
       maxLossStreak = Math.max(maxLossStreak, currentLossStreak);
     }
 
-    previousPeriod = period;
   }
 
   const total = hits + misses;
@@ -201,7 +183,8 @@ export function calculateT7MaxLoss(
 /**
  * Test 9: CPL-3 Loss-Streak Breaker.
  * Reuses evaluateWalkForward + runCpl3WalkForward + calculateLossStreakMetrics.
- * Gaps, date boundaries, and NO_SIGNAL reset the loss streak.
+ * Gaps, date boundaries, and NO_SIGNAL do not count as losses or reset the
+ * streak; only finalized WIN/LOSS outcomes are considered.
  */
 export function calculateT9MaxLoss(
   records: Array<{ period: string; number: number; completedAt?: string }>,
@@ -238,13 +221,14 @@ export function calculateT9MaxLoss(
   const test9Rows: Cpl3Row[] = runCpl3WalkForward(test9Cpl1Rows, config);
   const metrics = calculateLossStreakMetrics(test9Rows);
 
-  // Compute currentLossStreak from the end of the evaluated sequence
+  // Compute currentLossStreak from the end of the finalized outcome sequence.
+  // Unknown/no-signal rows are intentionally ignored.
   let currentLossStreak = 0;
   for (let i = test9Rows.length - 1; i >= 0; i--) {
     const row = test9Rows[i];
     if (row.outcome === 'LOSS') {
       currentLossStreak++;
-    } else {
+    } else if (row.outcome === 'WIN') {
       break;
     }
   }

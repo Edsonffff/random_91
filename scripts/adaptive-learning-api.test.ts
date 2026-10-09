@@ -13,8 +13,8 @@ function snapshot(checkpoint = NOW) {
   return {
     success: true, version: 'phone-v1', signalLabels: ['Test 3', 'Test 7', 'Test 9'],
     finalDecision: 'Small', status: 'ready', checkpointAt: new Date(checkpoint).toISOString(),
-    adaptiveInputMode: 'adaptive-t3-t9-v1',
-    adaptiveRequiredSignals: ['T3', 'T9'], adaptiveOptionalSignals: ['T7'],
+    adaptiveInputMode: 'adaptive-minimum-two-v1',
+    adaptiveRequiredSignals: [], adaptiveOptionalSignals: ['T3', 'T7', 'T9'],
     t7AvailableForAdaptive: false, adaptiveBlocked: false,
     activePrediction: {
       period: '20261004100051769', decision: 'Big', probBig: 100, probSmall: 0,
@@ -64,8 +64,8 @@ test('rejects missing fields, unsafe numbers, wrong signal layouts and malformed
     { ...snapshot(), test3MaxLoss: -1 }, { ...snapshot(), test7MaxLoss: 2.5 },
     { ...snapshot(), test9MaxLoss: Infinity },
     { ...snapshot(), adaptiveInputMode: 'legacy-t3-t7-t9' },
-    { ...snapshot(), adaptiveRequiredSignals: ['T3', 'T7', 'T9'] },
-    { ...snapshot(), adaptiveOptionalSignals: [] },
+    { ...snapshot(), adaptiveRequiredSignals: ['T3'] },
+    { ...snapshot(), adaptiveOptionalSignals: ['T3'] },
     { ...snapshot(), t7AvailableForAdaptive: 'no' }, { ...snapshot(), adaptiveBlocked: 0 },
     { ...snapshot(), adaptiveWeights: [0.5, 0.4] }, { ...snapshot(), adaptiveDominantSignalIndex: 2 },
   ];
@@ -219,13 +219,13 @@ test('independent metric contract rejects unsafe values and never retains full h
 test('a waiting Adaptive response displays independent metrics without inventing an Adaptive snapshot', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: NOW });
   const states: AdaptiveApiState[] = [];
-  const waiting = { success: false, status: 'waiting_for_t7', pendingPeriod: '20261002100052220', maxLoss: metric() };
+  const waiting = { success: false, status: 'PENDING_RESULT', pendingPeriod: '20261002100052220', maxLoss: metric() };
   let payload: unknown = waiting;
   const fetcher = (async () => Response.json(payload)) as typeof fetch;
   const stop = startAdaptiveLearningPolling((state) => states.push(state), { fetcher });
   t.after(stop);
   await setImmediate();
-  assert.equal(states.at(-1)?.status, 'waiting_for_t7');
+  assert.equal(states.at(-1)?.status, 'PENDING_RESULT');
   assert.equal(states.at(-1)?.data, null);
   assert.equal(states.at(-1)?.error, null);
   assert.deepEqual(states.at(-1)?.maxLoss, metric());
@@ -238,7 +238,7 @@ test('a waiting Adaptive response displays independent metrics without inventing
   payload = waiting;
   t.mock.timers.tick(5000);
   await setImmediate();
-  assert.equal(states.at(-1)?.status, 'waiting_for_t7');
+  assert.equal(states.at(-1)?.status, 'PENDING_RESULT');
   assert.equal(states.at(-1)?.data, ready, 'Waiting does not mutate the last real Adaptive snapshot');
   assert.deepEqual(states.at(-1)?.maxLoss, metric());
 });

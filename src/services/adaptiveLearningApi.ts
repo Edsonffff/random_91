@@ -13,8 +13,8 @@ export interface AdaptiveSnapshot extends Omit<AdaptiveResult, 'history' | 'rese
   status: 'ready';
   checkpointAt: string;
   adaptiveInputMode: string;
-  adaptiveRequiredSignals: ['T3', 'T9'];
-  adaptiveOptionalSignals: ['T7'];
+  adaptiveRequiredSignals: [];
+  adaptiveOptionalSignals: ['T3', 'T7', 'T9'];
   t7AvailableForAdaptive: boolean;
   adaptiveBlocked: boolean;
   adaptiveWeights: [number, number];
@@ -27,7 +27,7 @@ export interface AdaptiveSnapshot extends Omit<AdaptiveResult, 'history' | 'rese
 
 export interface AdaptiveApiState {
   data: AdaptiveSnapshot | null;
-  status: 'loading' | 'ready' | 'stale' | 'error' | 'waiting_for_t7' | 'waiting_for_history';
+  status: 'loading' | 'ready' | 'stale' | 'error' | 'PENDING_RESULT' | 'PERMANENTLY_SKIPPED';
   stale: boolean;
   error: string | null;
   receivedAt: number | null;
@@ -113,9 +113,9 @@ export function parseAdaptiveSnapshot(value: unknown): AdaptiveSnapshot {
   if (value.success !== true || value.status !== 'ready' || !text(value.version)
     || !text(value.checkpointAt) || !Number.isFinite(Date.parse(value.checkpointAt))
     || !Array.isArray(value.signalLabels) || value.signalLabels.join('|') !== 'Test 3|Test 7|Test 9'
-    || value.adaptiveInputMode !== 'adaptive-t3-t9-v1'
-    || !Array.isArray(value.adaptiveRequiredSignals) || value.adaptiveRequiredSignals.join('|') !== 'T3|T9'
-    || !Array.isArray(value.adaptiveOptionalSignals) || value.adaptiveOptionalSignals.join('|') !== 'T7'
+    || value.adaptiveInputMode !== 'adaptive-minimum-two-v1'
+    || !Array.isArray(value.adaptiveRequiredSignals) || value.adaptiveRequiredSignals.length !== 0
+    || !Array.isArray(value.adaptiveOptionalSignals) || value.adaptiveOptionalSignals.join('|') !== 'T3|T7|T9'
     || typeof value.t7AvailableForAdaptive !== 'boolean' || typeof value.adaptiveBlocked !== 'boolean'
     || !adaptiveWeights(value.adaptiveWeights) || !count(value.adaptiveDominantSignalIndex, 1)
     || !optionalSize(value.finalDecision) || !weights(value.weights)) return malformed();
@@ -150,7 +150,7 @@ export function parseAdaptiveSnapshot(value: unknown): AdaptiveSnapshot {
     signals: value.signals as AdaptiveSnapshot['signals'],
     latestEvaluation: value.latestEvaluation as AdaptiveSnapshot['latestEvaluation'],
     adaptiveInputMode: value.adaptiveInputMode,
-    adaptiveRequiredSignals: ['T3', 'T9'], adaptiveOptionalSignals: ['T7'],
+    adaptiveRequiredSignals: [], adaptiveOptionalSignals: ['T3', 'T7', 'T9'],
     t7AvailableForAdaptive: value.t7AvailableForAdaptive, adaptiveBlocked: value.adaptiveBlocked,
     adaptiveWeights: value.adaptiveWeights, adaptiveDominantSignalIndex: value.adaptiveDominantSignalIndex as 0 | 1,
     weights: value.weights, dominantSignalIndex: dominantSignalIndex as number,
@@ -185,7 +185,7 @@ export function startAdaptiveLearningPolling(
   function publish() {
     if (disposed) return;
     const stale = state.data ? isAdaptiveSnapshotStale(state.data, now()) : false;
-    const waiting = state.status === 'waiting_for_t7' || state.status === 'waiting_for_history';
+    const waiting = state.status === 'PENDING_RESULT';
     state = { ...state, stale, status: state.error ? 'error' : waiting ? state.status : state.data ? (stale ? 'stale' : 'ready') : 'loading' };
     onUpdate(state);
   }
@@ -206,8 +206,7 @@ export function startAdaptiveLearningPolling(
       if (disposed) return;
       if (timedOut) throw new Error('Adaptive Learning request timed out.');
       const maxLoss = object(payload) && payload.maxLoss != null ? parseVerifiedMaxLoss(payload.maxLoss) : state.maxLoss;
-      if (object(payload) && payload.success === false
-        && (payload.status === 'waiting_for_t7' || payload.status === 'waiting_for_history')) {
+      if (object(payload) && payload.success === false && payload.status === 'PENDING_RESULT') {
         if (!text(payload.pendingPeriod)) throw new Error('Malformed Adaptive Learning waiting response.');
         state = { ...state, status: payload.status, maxLoss, pendingPeriod: payload.pendingPeriod, receivedAt: now(), error: null };
         return;

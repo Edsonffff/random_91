@@ -858,7 +858,7 @@ async function fetchAndProcessT7Prediction(supabaseClient) {
     t7WindowOldestPeriod = oldestHistoryPeriod;
     t7WindowNewestPeriod = newestHistoryPeriod;
     t7HistoryCount = historyCount;
-    const pendingPeriod = adaptiveCurrent.status === 'waiting_for_t7' ? adaptiveCurrent.pendingPeriod : null;
+    const pendingPeriod = adaptiveCurrent.status === 'PENDING_RESULT' ? adaptiveCurrent.pendingPeriod : null;
     const observedAt = getTimestamp();
     await observeT7History(supabaseClient, responseHistory, observedAt);
     await expireT7Pending(supabaseClient, oldestHistoryPeriod, newestHistoryPeriod, observedAt);
@@ -1193,7 +1193,7 @@ const healthServer = http.createServer((req, res) => {
   // Lightweight snapshot; waiting is input readiness, not an HTTP outage.
   if (req.method === 'GET' && urlPath === '/api/adaptive-learning/current') {
     verifiedMaxLossWorker?.refresh();
-    const waiting = ['waiting_for_t7', 'waiting_for_history'].includes(adaptiveCurrent.status);
+    const waiting = adaptiveCurrent.status === 'PENDING_RESULT';
     res.writeHead(adaptiveCurrent.success || waiting ? 200 : 503, {
       'Content-Type': 'application/json',
       'Cache-Control': 'no-store',
@@ -1254,7 +1254,7 @@ const healthServer = http.createServer((req, res) => {
         resetStartPeriod,
         adaptiveStatus: adaptiveCurrent.status,
         adaptiveState: adaptiveCurrent.adaptiveState ?? 'normal',
-        adaptiveRequiredSignals: adaptiveCurrent.adaptiveRequiredSignals ?? ['T3', 'T9'],
+        adaptiveRequiredSignals: adaptiveCurrent.adaptiveRequiredSignals ?? [],
         adaptiveOptionalSignals: adaptiveCurrent.adaptiveOptionalSignals ?? ['T7'],
         t7AvailableForAdaptive: adaptiveCurrent.t7AvailableForAdaptive ?? false,
         recoveryId: adaptiveCurrent.recoveryId ?? null,
@@ -1270,7 +1270,7 @@ const healthServer = http.createServer((req, res) => {
         lastEvaluatedPeriod: adaptiveCurrent.latestEvaluatedPeriod ?? null,
         checkpointStatus: adaptiveCurrent.checkpointStatus ?? 'loading',
         checkpointAt: adaptiveCurrent.checkpointAt ?? null,
-        waiting_for_t7: adaptiveCurrent.status === 'waiting_for_t7',
+        waiting_for_t7: false,
         pendingPeriod: adaptiveCurrent.pendingPeriod ?? null,
         baselineId: adaptiveCurrent.baselineId ?? null,
         baselineStartPeriod: adaptiveCurrent.baselineStartPeriod ?? null,

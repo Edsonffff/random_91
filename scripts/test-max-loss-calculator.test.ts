@@ -59,11 +59,11 @@ test('T3: sorts records chronologically ascending before evaluating', () => {
   assert.equal(result.totalEvaluated, 3);
 });
 
-test('T3: period gap resets consecutive loss streak and is not counted as a loss', () => {
+test('T3: period gap is ignored and losses on both sides share one streak', () => {
   // round 1: LOSS (streak = 1)
   // round 2: LOSS (streak = 2)
   // [GAP: round 3 is missing]
-  // round 4: LOSS (streak = 1, because gap broke the sequence)
+  // round 4: LOSS (streak = 3; the missing round is ignored)
   const rounds = [
     makeRound(1, 7), // pos 0 pred Small vs Big -> LOSS
     makeRound(2, 2), // pos 1 pred Big vs Small -> LOSS
@@ -72,10 +72,8 @@ test('T3: period gap resets consecutive loss streak and is not counted as a loss
   ];
 
   const result = calculateT3MaxLoss(rounds);
-  // Without gap handling, streak would be 3.
-  // With gap handling, missing round 3 is NOT a loss, so max loss is 2!
-  assert.equal(result.maxLossStreak, 2);
-  assert.equal(result.currentLossStreak, 1);
+  assert.equal(result.maxLossStreak, 3);
+  assert.equal(result.currentLossStreak, 3);
   assert.equal(result.totalEvaluated, 3);
 });
 
@@ -108,8 +106,8 @@ test('T7: calculates longest consecutive loss streak from its own signals only',
   assert.equal(result.totalMisses, 4);
 });
 
-test('T7: unknown / missing signal does NOT count as a loss and breaks the streak', () => {
-  // L L L UNKNOWN L L -> maxLoss = 3, currentLoss = 2
+test('T7: unknown / missing signal does NOT count as a loss or reset the streak', () => {
+  // L L L UNKNOWN L L -> maxLoss = 5, currentLoss = 5
   const rounds = [
     makeRound(1, 6), // LOSS
     makeRound(2, 6), // LOSS
@@ -129,8 +127,8 @@ test('T7: unknown / missing signal does NOT count as a loss and breaks the strea
   ]);
 
   const result = calculateT7MaxLoss(rounds, signals);
-  assert.equal(result.maxLossStreak, 3, 'Missing signal must not bridge into a streak of 5');
-  assert.equal(result.currentLossStreak, 2);
+  assert.equal(result.maxLossStreak, 5, 'Only finalized losses are counted, across unknown rows');
+  assert.equal(result.currentLossStreak, 5);
   assert.equal(result.totalEvaluated, 5, 'Unscored period 4 is excluded from total');
 });
 

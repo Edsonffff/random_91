@@ -9,12 +9,12 @@ const CONFIG = CPL3_CONFIGS.find((config) => config.name === 'context-8-cap-3');
 const freshStreak = () => ({ currentLossStreak: 0, longestLossStreak: 0, knownThrough: null,
   scoredPeriods: 0, unknownPeriods: 0, currentLossStartPeriod: null, recordStartPeriod: null, recordEndPeriod: null });
 
-/** UNKNOWN is a boundary, never an inferred win/loss. Historical records never decrease. */
+/** UNKNOWN is ignored, never an inferred win/loss. Historical records never decrease. */
 export function advanceVerifiedStreak(state, outcome) {
   if (outcome === 'LOSS') {
     state.currentLossStreak++;
     if (state.currentLossStreak > state.longestLossStreak) state.longestLossStreak = state.currentLossStreak;
-  } else {
+  } else if (outcome === 'WIN') {
     state.currentLossStreak = 0;
     if ('currentLossStartPeriod' in state) state.currentLossStartPeriod = null;
   }
@@ -67,14 +67,11 @@ export async function calculateVerifiedMaxLoss(records, signals, {
   }
   const signalMap = new Map(signals.map((signal) => [signal.period_id, signal]));
   const gaps = [];
-  let prefixLength = sorted.length;
   for (let index = 1; index < sorted.length; index++) {
     const gap = historyGap(sorted[index - 1].issueNumber, sorted[index].issueNumber);
-    if (gap) { gaps.push(gap); prefixLength = Math.min(prefixLength, index); }
+    if (gap) gaps.push(gap);
   }
-  // After a history hole, T3's actual round ordinal cannot be proved. Do not
-  // compress the missing interval or restart its prediction sequence.
-  const t3Details = computeTest3(sorted.slice(0, prefixLength)
+  const t3Details = computeTest3(sorted
     .map((record) => ({ period: record.issueNumber, number: record.winningNumber }))).details;
   const tests = { test3: freshStreak(), test7: freshStreak(), test9: freshStreak() };
   let cplState = { stats: [], previous: null, priorLossStreak: 0, previousActual: null };
@@ -83,7 +80,6 @@ export async function calculateVerifiedMaxLoss(records, signals, {
   let sameDateDigest = '';
   let t9ContextEstablished = true;
   let processedThrough = null;
-  const gapStarts = new Set(gaps.map((gap) => gap.nextAvailablePeriod));
 
   const snapshot = (calculationStatus) => {
     const unknown = Object.values(tests).some((test) => test.unknownPeriods > 0);
@@ -104,9 +100,6 @@ export async function calculateVerifiedMaxLoss(records, signals, {
   };
 
   for (const [index, record] of sorted.entries()) {
-    if (gapStarts.has(record.issueNumber)) {
-      for (const test of Object.values(tests)) advanceVerifiedStreak(test, 'UNKNOWN');
-    }
     const date = dateFromIssue(record.issueNumber);
     if (date !== lastDate) {
       sameDateRecords = [];
@@ -115,7 +108,7 @@ export async function calculateVerifiedMaxLoss(records, signals, {
       // dates can re-establish context only when their first round is present.
       t9ContextEstablished = index === 0 || record.issueNumber.endsWith('0001');
       cplState = { stats: [], previous: null, priorLossStreak: 0, previousActual: null };
-    } else if (gapStarts.has(record.issueNumber)) t9ContextEstablished = false;
+    }
     sameDateDigest = createHash('sha256').update(sameDateDigest + JSON.stringify(record)).digest('hex');
     const cached = cplCache.get(record.issueNumber);
     let cpl;
@@ -129,10 +122,10 @@ export async function calculateVerifiedMaxLoss(records, signals, {
       cplCache.set(record.issueNumber, { digest: sameDateDigest, value: cpl });
     }
     if (cpl) cplState = cpl.state;
-    // The original T9 context/streak breaks at dates, gaps, and NO_SIGNAL.
-    if (date !== lastDate) advanceVerifiedStreak(tests.test9, 'UNKNOWN');
+    // T9 prediction context retains its algorithm-defined date behavior;
+    // streak accounting below ignores unknown rows and historical gaps.
     const outcomes = {
-      test3: index < prefixLength ? t3Details[index].isHit ? 'WIN' : 'LOSS' : 'UNKNOWN',
+      test3: t3Details[index].isHit ? 'WIN' : 'LOSS',
       test7: scoreVerifiedT7(record, signalMap.get(record.issueNumber)),
       test9: !cpl || cpl.rows[0].outcome === 'NO_SIGNAL' ? 'UNKNOWN' : cpl.rows[0].outcome,
     };

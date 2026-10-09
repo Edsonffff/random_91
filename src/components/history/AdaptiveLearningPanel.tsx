@@ -123,15 +123,15 @@ const ConnectedAdaptiveLearningPanel: React.FC<Props> = (props) => {
 const AdaptiveLearningPanelContent: React.FC<Props & { serverState: AdaptiveApiState }> = ({ activeSchedule, serverState }) => {
   const { data, status, stale, error } = serverState;
 
-  if (status === 'waiting_for_t7' || status === 'waiting_for_history') {
+  if (status === 'PENDING_RESULT') {
     const gap = serverState.maxLoss?.firstMissingHistoryPeriod && serverState.maxLoss.lastMissingHistoryPeriod
       ? `Historical input is unavailable for this range. Historical gap: ${serverState.maxLoss.firstMissingHistoryPeriod} → ${serverState.maxLoss.lastMissingHistoryPeriod}.`
       : 'Historical input is unavailable for part of the verified scope.';
     return (
       <div role="status" aria-live="polite" className="p-5 rounded-xl bg-[#06130F] border border-[#E7B93F]/50 text-sm text-[#E7B93F]">
-        <p>Adaptive Learning status: {status === 'waiting_for_t7' ? 'Waiting for T7 data' : 'Waiting for historical data'}</p>
+        <p>Adaptive Learning status: Waiting for finalized actual result</p>
         <p className="mt-1 text-xs">Pending period: {serverState.pendingPeriod}</p>
-        <p className="mt-2 text-xs text-[#8D9B95]">Adaptive replay is paused and will not infer or finalize missing inputs. {status === 'waiting_for_t7' ? 'It is waiting for the exact finalized T7 input.' : 'It is waiting for the exact historical input.'}</p>
+        <p className="mt-2 text-xs text-[#8D9B95]">Adaptive will retry this exact period until its actual result is finalized. It will not learn from the pending result.</p>
         <p className="mt-1 text-xs text-[#8D9B95]">{gap}</p>
         <p className="mt-2 text-xs text-[#8D9B95]">Verified Max Loss is an independent read-only metric and must not be interpreted as Adaptive checkpoint state.</p>
       </div>
@@ -178,7 +178,9 @@ const AdaptiveLearningPanelContent: React.FC<Props & { serverState: AdaptiveApiS
   const currentPeriod = activePrediction?.period ?? lastRow?.period;
   const currentVote = activePrediction ?? lastRow;
   const live = status === 'ready';
-  const requiredSignalLabels = adaptiveRequiredSignals.map((signal) => signal.replace('T', 'Test '));
+  // The existing weight display remains the T3/T9 adaptive-weight view; T7 is
+  // now admitted as the third eligible signal without changing those weights.
+  const requiredSignalLabels = ['Test 3', 'Test 9'];
 
   const diff = accuracyPct - 50;
   const diffStr = diff >= 0 ? `+${diff.toFixed(1)}pp` : `${diff.toFixed(1)}pp`;
@@ -187,8 +189,8 @@ const AdaptiveLearningPanelContent: React.FC<Props & { serverState: AdaptiveApiS
     <div className="space-y-5">
       <AdaptiveCheckpointMaxLoss data={data} />
       <div role="status" className="p-3 rounded-xl bg-[#06130F] border border-[#1E3A2B] text-xs font-mono text-[#8D9B95]">
-        <span className="text-[#35B978] font-bold">Adaptive = T3 + T9.</span>{' '}
-        T7 is an independent signal and metric. Missing T7 does not block Adaptive.
+        <span className="text-[#35B978] font-bold">Adaptive requires at least two of T3, T7, and T9.</span>{' '}
+        Signals are matched to the exact period; fewer than two finalized signals are permanently skipped.
         <span className="block mt-1">Optional: {adaptiveOptionalSignals.join(', ')} · T7 available for Adaptive: {t7AvailableForAdaptive ? 'yes' : 'no'} · blocked: {adaptiveBlocked ? 'yes' : 'no'}</span>
       </div>
       <div role="status" aria-live="polite" className={`p-3 rounded-xl border text-xs font-mono ${live ? 'border-[#1E3A2B] text-[#8D9B95]' : 'border-[#E7B93F]/50 text-[#E7B93F]'}`}>

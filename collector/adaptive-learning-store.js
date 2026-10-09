@@ -17,10 +17,10 @@ function checked(result, operation) {
 /** Match api/index.ts readFromSupabase and AlgorithmAnalyzer.test9History exactly. */
 export function browserHistoryRecord(row, now = new Date().toISOString()) {
   const rawNum = row.winning_number !== undefined ? row.winning_number : row.number;
-  const num = typeof rawNum === 'number' ? rawNum : parseInt(String(rawNum ?? 0), 10);
+  const num = typeof rawNum === 'number' ? rawNum : /^\d$/.test(String(rawNum ?? '')) ? Number(rawNum) : NaN;
   const completedAt = row.completed_at || row.created_at || now;
   return {
-    issueNumber: String(row.issue_number).trim(), winningNumber: isNaN(num) ? 0 : num,
+    issueNumber: String(row.issue_number ?? '').trim(), winningNumber: num,
     sourceTime: completedAt, createdAt: completedAt,
   };
 }

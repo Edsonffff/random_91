@@ -49,10 +49,10 @@ test('waiting Adaptive and independently verified 5/15/8 Max Loss render separat
     calculatedAt: '2026-10-07T17:00:00.000Z', calculationStatus: 'ready',
   };
   const panel = renderToStaticMarkup(createElement(AdaptiveLearningPanel, { serverState: {
-    ...INITIAL_ADAPTIVE_API_STATE, status: 'waiting_for_t7', pendingPeriod: '20261002100052220', maxLoss: metric,
+    ...INITIAL_ADAPTIVE_API_STATE, status: 'PENDING_RESULT', pendingPeriod: '20261002100052220', maxLoss: metric,
   } }));
-  assert.match(panel, /Waiting for T7 data/);
-  assert.match(panel, /Adaptive replay is paused/);
+  assert.match(panel, /Waiting for finalized actual result/);
+  assert.match(panel, /Waiting for finalized actual result/);
   assert.match(panel, /Historical input is unavailable/);
   assert.match(panel, /Verified Max Loss is an independent read-only metric/);
   assert.match(panel, /Historical gap: 20261002100052302 → 20261002100052347/);

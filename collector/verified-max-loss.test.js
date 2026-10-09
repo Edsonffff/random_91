@@ -25,13 +25,13 @@ for (const [name, current, outcome, expectedCurrent, expectedMax] of [
   });
 }
 
-test('D/G: missing T7 prediction is UNKNOWN and cannot bridge L L L UNKNOWN L L', async () => {
+test('D/G: missing T7 prediction is UNKNOWN and does not count as a loss', async () => {
   const rows = Array.from({ length: 6 }, (_, index) => record(index));
   const signals = rows.filter((_, index) => index !== 3).map((row) => signal(row));
   assert.equal(scoreVerifiedT7(rows[3], undefined), 'UNKNOWN');
   const metric = await calculateVerifiedMaxLoss(rows, signals);
-  assert.equal(metric.test7, 3);
-  assert.equal(metric.tests.test7.currentLossStreak, 2);
+  assert.equal(metric.test7, 5);
+  assert.equal(metric.tests.test7.currentLossStreak, 5);
   assert.equal(metric.tests.test7.unknownPeriods, 1);
   assert.equal(metric.coverage, 'partial');
   assert.equal(metric.knownThrough, null, 'No overall known-through is claimed when a test has no scorable predictions yet');
@@ -61,13 +61,13 @@ test('all seven diagnosed periods retain their metric-only classifications witho
   }
 });
 
-test('H: history holes break verified streaks, diagnose exact missing ranges, and do not compress T3 ordinals', async () => {
+test('H: history holes are diagnosed, ignored by streaks, and do not compress T3 ordinals', async () => {
   const rows = [record(0), record(1), record(2), record(4), record(5)];
   const metric = await calculateVerifiedMaxLoss(rows, rows.map((row) => signal(row)));
-  assert.equal(metric.test7, 3);
-  assert.equal(metric.tests.test7.currentLossStreak, 2);
-  assert.equal(metric.tests.test3.scoredPeriods, 3);
-  assert.equal(metric.tests.test3.unknownPeriods, 2);
+  assert.equal(metric.test7, 5);
+  assert.equal(metric.tests.test7.currentLossStreak, 5);
+  assert.equal(metric.tests.test3.scoredPeriods, 5);
+  assert.equal(metric.tests.test3.unknownPeriods, 0);
   assert.equal(metric.tests.test9.unknownPeriods, 5);
   assert.equal(metric.coverageReason, 'historical_gap');
   assert.deepEqual(historyGap('20261002100052301', '20261002100052348'), {

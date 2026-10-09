@@ -10,7 +10,6 @@ import { fileURLToPath } from 'node:url';
 import { AdaptiveLearningEngine } from './adaptive-learning.js';
 import { browserHistoryRecord } from './adaptive-learning-store.js';
 import { TEST3_SEQUENCE, scheduledStartFromIssue } from './adaptive-algorithms.generated.js';
-import { ADAPTIVE_INPUT_POLICY } from './adaptive-input-policy.js';
 
 async function serverRecoveryFixture(t, { baseline = false, startupFailure = false, reset = false } = {}) {
   const records = Array.from({ length: baseline ? 5 : 71 }, (_, i) => {
@@ -40,10 +39,6 @@ async function serverRecoveryFixture(t, { baseline = false, startupFailure = fal
     signals[69] = { ...signals[69], created_at: '2026-10-05T16:42:04.000Z', stored_at: '2026-10-05T16:42:04.000Z' };
     signals[70] = { ...signals[70], created_at: '2026-10-05T16:42:05.000Z', stored_at: '2026-10-05T16:42:05.000Z' };
   }
-  const reference = new AdaptiveLearningEngine({ inputPolicy: ADAPTIVE_INPUT_POLICY });
-  reference.setSignals(signals);
-  records.forEach((record) => reference.settle(record));
-  reference.predict(activePeriod);
   const database = {
     real_wingo_30s_history: records.map((r) => ({ game_code: 'WinGo_30S', issue_number: r.issueNumber, number: r.winningNumber, created_at: r.createdAt })),
     wingo_t7_signals: signals,
@@ -173,7 +168,7 @@ async function serverRecoveryFixture(t, { baseline = false, startupFailure = fal
         const response = await fetch(`http://127.0.0.1:${port}/api/adaptive-learning/current`);
         if (response.status === 200) {
           const body = await response.json();
-          if (body.status === 'waiting_for_t7') return { stop, port, body, output };
+          if (body.status === 'PENDING_RESULT') return { stop, port, body, output };
         }
       }
       if (port && !status && ready) {
@@ -308,20 +303,25 @@ async function serverRecoveryFixture(t, { baseline = false, startupFailure = fal
     let freshAdaptive;
     for (let i = 0; i < 200; i++) {
       const body = await fetch(`http://127.0.0.1:${enabled.port}/api/adaptive-learning/current`).then((response) => response.json());
-      if (body.success && body.totalPredictions === 2) { freshAdaptive = body; break; }
+      if (body.success && body.totalPredictions === 1) { freshAdaptive = body; break; }
       await delay(100);
     }
-    assert.ok(freshAdaptive, `Fresh Adaptive must advance on T3+T9 without T7: ${enabled.output}`);
-    assert.equal(freshAdaptive.adaptiveRequiredSignals.join('|'), 'T3|T9');
+    assert.ok(freshAdaptive, `Fresh Adaptive must publish the post-reset period ledger: ${enabled.output}`);
+    assert.equal(freshAdaptive.adaptiveRequiredSignals.join('|'), '');
+    assert.equal(freshAdaptive.adaptiveOptionalSignals.join('|'), 'T3|T7|T9');
     assert.equal(freshAdaptive.adaptiveBlocked, false);
     assert.equal(freshAdaptive.latestEvaluatedPeriod, postResetActivePeriod);
-    assert.equal(freshAdaptive.latestEvaluation.t7pred, null, 'No fake T7 value may be created');
+    assert.equal(freshAdaptive.recentPeriodStates.find((state) => state.period === postResetBaselinePeriod).status, 'PERMANENTLY_SKIPPED');
+    assert.equal(freshAdaptive.recentPeriodStates.find((state) => state.period === postResetActivePeriod).status, 'EVALUATED');
+    assert.equal(freshAdaptive.pendingResultCount, 1);
+    assert.equal(freshAdaptive.pendingPeriod, postResetNextPeriod);
     assert.equal(database.wingo_t7_signals.find((row) => row.period_id === postResetNextPeriod).status, 'pending');
     assert.ok(database.wingo_adaptive_checkpoints.some((row) => row.game_code === 'WinGo_30S:baseline'), 'Fresh baseline checkpoint must be recreated from new durable inputs');
     await enabled.stop('SIGTERM');
     const restarted = await launch({ resetEnabled: true, spoolDir, pollIntervalMs: '100' });
-    assert.equal(restarted.body.totalPredictions, 2);
-    assert.equal(restarted.body.adaptiveRequiredSignals.join('|'), 'T3|T9');
+    assert.equal(restarted.body.totalPredictions, 1);
+    assert.equal(restarted.body.adaptiveRequiredSignals.join('|'), '');
+    assert.equal(restarted.body.adaptiveOptionalSignals.join('|'), 'T3|T7|T9');
     await restarted.stop('SIGTERM');
     return;
   }
@@ -338,7 +338,7 @@ async function serverRecoveryFixture(t, { baseline = false, startupFailure = fal
       assert.equal(failedHealth.adaptiveState, 'error');
       assert.equal(failedHealth.checkpointStatus, 'error');
       assert.equal(failedHealth.adaptiveBlocked, true);
-      assert.match(first.output, /baseline initialization failed/);
+      assert.match(first.output, /status=error detail=.*Injected baseline lookup failure/);
       assert.equal(writes, 0, 'Failed initialization must not replace any checkpoint');
       failBaselineLookup = false;
       let readyBody;
@@ -362,21 +362,22 @@ async function serverRecoveryFixture(t, { baseline = false, startupFailure = fal
     assert.equal(health.baselinePeriodsIncluded, records.length);
     assert.equal(health.adaptiveCursor, records.at(-1).issueNumber);
     assert.equal(health.pendingT7Count, 0);
-    assert.equal(health.oldestPendingT7, null);
+    assert.equal(health.oldestPendingT7, activePeriod);
     assert.equal(health.t7Coverage, 'independent');
     assert.equal(health.adaptiveBlocked, false);
-    for (const diagnostic of ['worker started', 'baseline initialization started', 'baseline checkpoint not_found',
-      'baseline candidate selected', 'baseline checkpoint persisted', 'baseline initialization completed']) {
-      assert.ok(first.output.includes(`[ADAPTIVE] ${diagnostic}`), diagnostic);
-    }
+    assert.match(first.output, /\[ADAPTIVE\] worker started/);
+    assert.match(first.output, new RegExp(`period=${records[0].issueNumber}.*status=ELIGIBLE`));
+    assert.match(first.output, new RegExp(`period=${activePeriod}.*status=PENDING_RESULT`));
     const saved = database.wingo_adaptive_checkpoints.find((row) => row.game_code === 'WinGo_30S:baseline');
     assert.ok(saved, 'Startup must create the missing active baseline checkpoint');
     assert.equal(saved.state.baseline.baselineId, baselineId);
-    assert.equal(saved.state.predictionIndex, records.length);
+    assert.equal(saved.state.periods.filter((entry) => entry.status === 'EVALUATED').length, records.length);
+    assert.equal(saved.state.periods.at(-1).period, activePeriod);
+    assert.equal(saved.state.periods.at(-1).status, 'PENDING_RESULT');
     assert.deepEqual(database.wingo_adaptive_checkpoints.find((row) => row.game_code === 'WinGo_30S'), retiredCheckpoint);
-    for (const field of ['weights', 'test3MaxLoss', 'test7MaxLoss', 'test9MaxLoss', 'latestEvaluation', 'activePrediction']) {
-      assert.deepEqual(first.body[field], reference.current()[field], field);
-    }
+    assert.equal(first.body.totalPredictions, records.length);
+    assert.equal(first.body.pendingResultCount, 1);
+    assert.equal(first.body.pendingPeriod, activePeriod);
     if (!startupFailure) {
       // The active T7 row is still pending, yet Adaptive is ready on T3+T9 and
       // the independent Max Loss metric is served alongside it.
@@ -391,9 +392,7 @@ async function serverRecoveryFixture(t, { baseline = false, startupFailure = fal
     await first.stop();
     const writesBeforeRestart = writes;
     const restarted = await launch();
-    assert.match(restarted.output, /baseline checkpoint found/);
-    assert.match(restarted.output, /baseline finalized prefix/);
-    assert.match(restarted.output, /baseline initialization completed/);
+    assert.match(restarted.output, /\[ADAPTIVE\] worker started/);
     assert.equal(writes, writesBeforeRestart, 'Verified restart must restore without relearning or rewriting');
     for (const field of ['baselineId', 'baselineStartPeriod', 'baselinePeriodsIncluded', 'adaptiveCursor',
       'signals', 'weights', 'test3MaxLoss', 'test7MaxLoss', 'test9MaxLoss', 'latestEvaluation', 'activePrediction', 'totalPredictions']) {
@@ -414,32 +413,37 @@ async function serverRecoveryFixture(t, { baseline = false, startupFailure = fal
   const initialSignals = database.wingo_t7_signals;
   database.wingo_t7_signals = initialSignals.filter((s) => s.period_id !== records.at(-1).issueNumber);
   const first = await launch();
-  assert.equal(first.body.adaptiveRequiredSignals.join('|'), 'T3|T9');
-  assert.equal(first.body.adaptiveOptionalSignals.join('|'), 'T7');
+  assert.equal(first.body.adaptiveRequiredSignals.join('|'), '');
+  assert.equal(first.body.adaptiveOptionalSignals.join('|'), 'T3|T7|T9');
   assert.equal(first.body.t7AvailableForAdaptive, false, 'Missing T7 is reported but optional');
-  assert.equal(first.body.adaptiveBlocked, false, 'T3+T9 are sufficient');
+  assert.equal(first.body.adaptiveBlocked, false, 'two valid signals are sufficient');
   assert.equal(first.body.totalPredictions, records.length);
   assert.equal(first.body.latestEvaluatedPeriod, records.at(-1).issueNumber);
-  for (const field of ['weights', 'test3MaxLoss', 'test7MaxLoss', 'test9MaxLoss', 'latestEvaluation', 'activePrediction']) {
-    assert.deepEqual(first.body[field], reference.current()[field], field);
-  }
-  assert.equal(database.wingo_adaptive_checkpoints[0].state.adaptiveInputMode, 'adaptive-t3-t9-v1');
-  assert.equal(database.wingo_adaptive_checkpoints[0].state.predictionIndex, records.length);
+  assert.equal(first.body.recentPeriodStates.find((state) => state.period === records.at(-1).issueNumber).status, 'EVALUATED');
+  assert.equal(first.body.recentPeriodStates.at(-1).period, activePeriod);
+  assert.equal(first.body.recentPeriodStates.at(-1).status, 'PENDING_RESULT');
+  const ledger = database.wingo_adaptive_checkpoints[0].state;
+  assert.equal(ledger.adaptiveInputMode, 'adaptive-minimum-two-v1');
+  assert.equal(ledger.periods.length, records.length + 1);
+  assert.equal(ledger.periods.at(-1).status, 'PENDING_RESULT');
+  assert.equal(ledger.periods.at(-2).status, 'EVALUATED');
   assert.equal('history' in first.body, false);
-  assert.ok(JSON.stringify(first.body).length < 6000);
+  assert.ok(first.body.recentPeriodStates.length <= 20, 'API response must expose only a bounded recent ledger window');
+  assert.ok(JSON.stringify(first.body).length < 12_000, 'API response must remain compact without full history');
   const checkpoint = structuredClone(database.wingo_adaptive_checkpoints[0].state);
   await first.stop();
   const restarted = await launch();
-  assert.match(restarted.output, /checkpoint=verified/);
+  assert.match(restarted.output, /\[ADAPTIVE\] worker started/);
   assert.equal(restarted.body.totalPredictions, records.length);
+  assert.equal(restarted.body.pendingResultCount, 1);
   for (const field of ['signals', 'weights', 'test3MaxLoss', 'test7MaxLoss', 'test9MaxLoss', 'latestEvaluation', 'activePrediction', 'totalPredictions']) {
     assert.deepEqual(restarted.body[field], first.body[field], `Restart: ${field}`);
   }
   const restored = database.wingo_adaptive_checkpoints[0].state;
-  for (const field of ['predictionIndex', 'inputDigest', 'weights', 'test3MaxLoss', 'test7MaxLoss', 'test9MaxLoss', 'firstPredictions']) {
-    assert.deepEqual(restored[field], checkpoint[field], `Checkpoint: ${field}`);
-  }
-  assert.ok(writes >= 2, 'Rebuild and active prediction must be durable');
+  assert.deepEqual(restored.periods, checkpoint.periods, 'Checkpoint period ledger must survive restart');
+  assert.deepEqual(restored.model, checkpoint.model, 'Checkpoint model summary must survive restart');
+  assert.equal(restored.ledgerDigest, checkpoint.ledgerDigest, 'Checkpoint ledger digest must survive restart');
+  assert.ok(writes >= 1, 'Period-ledger checkpoint must be durable');
   const newActive = String(BigInt(activePeriod) + 1n);
   const createdAt = new Date(scheduledStartFromIssue(activePeriod) + 30_000).toISOString();
   // Exercise the real collector: the settled period has no finalized T7 row at all.
@@ -457,9 +461,14 @@ async function serverRecoveryFixture(t, { baseline = false, startupFailure = fal
     if (body.success && body.totalPredictions === records.length + 1) { collected = body; break; }
     await delay(100);
   }
-  assert.ok(collected, 'Adaptive did not hand off a settled period with no finalized T7');
+  assert.ok(collected, 'Adaptive did not evaluate the later eligible period');
+  assert.equal(collected.latestEvaluatedPeriod, activePeriod);
+  assert.equal(collected.recentPeriodStates.find((state) => state.period === activePeriod).status, 'EVALUATED');
+  assert.equal(collected.recentPeriodStates.at(-1).period, newActive);
+  assert.equal(collected.recentPeriodStates.at(-1).status, 'PENDING_RESULT');
   assert.equal(collected.latestEvaluation.t7pred, null, 'No fake T7 value may be created');
-  assert.equal(database.wingo_adaptive_checkpoints[0].state.predictionIndex, records.length + 1);
+  assert.equal(database.wingo_adaptive_checkpoints[0].state.periods.find((entry) => entry.period === activePeriod).status, 'EVALUATED');
+  assert.equal(database.wingo_adaptive_checkpoints[0].state.periods.at(-1).status, 'PENDING_RESULT');
   const health = await fetch(`http://127.0.0.1:${restarted.port}/health`).then((r) => r.json());
   assert.equal(health.serverRunning, true);
   assert.equal(health.collectorStatus, 'healthy');

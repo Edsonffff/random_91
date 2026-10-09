@@ -66,7 +66,7 @@ export class AdaptiveLearningEngine {
     return changed;
   }
 
-  settle(record, { quiet = false } = {}) {
+  settle(record, { quiet = false, learn = true } = {}) {
     const period = record.issueNumber;
     if (this.lastProcessedPeriod && compareIssuesAsc(period, this.lastProcessedPeriod) <= 0) {
       const existing = this.records.find((row) => row.issueNumber === period);
@@ -93,9 +93,6 @@ export class AdaptiveLearningEngine {
       t9pred: t9Row.prediction === 'BIG' ? 'Big' : t9Row.prediction === 'SMALL' ? 'Small' : null,
       actual: record.winningNumber >= 5 ? 'Big' : 'Small',
     };
-    const learned = advanceAdaptive([input], this.weights);
-    const evaluated = learned.history[0];
-    this.weights = learned.weights;
     this.cplState = cpl.state;
     this.predictionIndex++;
     this.test3MissStreak = t3 === input.actual ? 0 : this.test3MissStreak + 1;
@@ -105,25 +102,38 @@ export class AdaptiveLearningEngine {
     this.test7MaxLoss = Math.max(this.test7MaxLoss, this.test7MissStreak);
     // CPL-3 already resets this at gaps, date changes and NO_SIGNAL rows.
     this.test9MaxLoss = Math.max(this.test9MaxLoss, this.cplState.priorLossStreak);
-    this.history.push(evaluated);
     this.records.push(record);
     this.sameDateRecords.push(record);
-    this.totalHits += Number(evaluated.isHit);
-    this.currentHitStreak = evaluated.isHit ? this.currentHitStreak + 1 : 0;
-    this.currentMissStreak = evaluated.isHit ? 0 : this.currentMissStreak + 1;
-    this.longestHitStreak = Math.max(this.longestHitStreak, this.currentHitStreak);
-    this.longestMissStreak = Math.max(this.longestMissStreak, this.currentMissStreak);
     this.lastProcessedPeriod = period;
-    this.lastEvaluatedAt = this.clock();
+    // Predictor reconstruction is independent of Adaptive eligibility. Advancing
+    // T3/T9 on real history never updates ensemble weights in this mode.
+    if (!learn) return { input, cpl1: cplRow, cpl3: t9Row };
+    const evaluated = this.evaluateInput(input);
     this.inputDigest = createHash('sha256').update(this.inputDigest + JSON.stringify({ record, input })).digest('hex');
-    this.activeCacheKey = null;
-    this.activePrediction = null;
-    this.activeSignals = null;
     if (!quiet) {
       this.log(`newly processed period=${period} T3=${t3} T7=${t7} T9=${input.t9pred}`);
       this.log(`settlement period=${period} decision=${evaluated.adaptiveDecision} actual=${input.actual} result=${evaluated.isHit ? 'HIT' : 'MISS'}`);
     }
     return { evaluated, test3: { prediction: t3, sequencePosition: (this.predictionIndex - 1) % 14 + 1, outcome: t3 === input.actual ? 'HIT' : 'MISS' }, cpl1: cplRow, cpl3: t9Row };
+  }
+
+  /** Apply the unchanged ensemble formulas to a previously validated input. */
+  evaluateInput(input) {
+    const learned = advanceAdaptive([input], this.weights);
+    const evaluated = learned.history[0];
+    this.weights = learned.weights;
+    this.history.push(evaluated);
+    this.totalHits += Number(evaluated.isHit);
+    this.currentHitStreak = evaluated.isHit ? this.currentHitStreak + 1 : 0;
+    this.currentMissStreak = evaluated.isHit ? 0 : this.currentMissStreak + 1;
+    this.longestHitStreak = Math.max(this.longestHitStreak, this.currentHitStreak);
+    this.longestMissStreak = Math.max(this.longestMissStreak, this.currentMissStreak);
+    this.lastProcessedPeriod = input.period;
+    this.lastEvaluatedAt = this.clock();
+    this.activeCacheKey = null;
+    this.activePrediction = null;
+    this.activeSignals = null;
+    return evaluated;
   }
 
   predict(period) {
